@@ -48,6 +48,11 @@ class task_config:
 
     return_state_before_reset = False
 
+    # Out-of-bounds margin multiplier for the exceed check.
+    # 1.0 = terminate exactly at env bounds (training default).
+    # 1.5 = allow drone to fly 50% beyond bounds before terminating (useful for inference).
+    exceed_bounds_margin = 1.0
+
     # Target waypoint placement (as ratio of environment bounds)
     # Target is placed in the far end of the environment
     target_min_ratio = [0.95, 0.10, 0.10]

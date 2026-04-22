@@ -206,6 +206,18 @@ def get_args():
             "default": None,
             "help": "Wandb entity (team)",
         },
+        {
+            "name": "--curriculum_level",
+            "type": int,
+            "default": None,
+            "help": "Fix curriculum (obstacle density) at this level (0-25). Overrides min/max.",
+        },
+        {
+            "name": "--exceed_margin",
+            "type": float,
+            "default": None,
+            "help": "Out-of-bounds margin multiplier (e.g. 1.5 = 50%% beyond bounds before termination)",
+        },
     ]
     args = parse_arguments(
         description="Navigation with Obstacles",
@@ -238,6 +250,16 @@ def update_config(config, args):
     if args["seed"] > 0:
         config["params"]["seed"] = args["seed"]
         config["params"]["config"]["env_config"]["seed"] = args["seed"]
+
+    # Fix curriculum level (obstacle density)
+    if args.get("curriculum_level") is not None:
+        level = args["curriculum_level"]
+        task_config.curriculum.min_level = level
+        task_config.curriculum.max_level = level
+
+    # Expand out-of-bounds termination margin
+    if args.get("exceed_margin") is not None:
+        task_config.exceed_bounds_margin = args["exceed_margin"]
 
     # Resume from checkpoint
     if args.get("checkpoint"):

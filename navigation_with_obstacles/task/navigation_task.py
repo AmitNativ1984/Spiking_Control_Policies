@@ -652,9 +652,18 @@ class NavigationWithObstaclesTask(BaseTask):
         dist = torch.norm(disp, dim=1)
 
         # Condition masks (mutually exclusive, priority order)
+        # Expand bounds by exceed_bounds_margin (1.0 = exact bounds, 1.5 = 50% beyond)
+        margin = self.task_config.exceed_bounds_margin
+        bounds_min = obs_dict["env_bounds_min"]
+        bounds_max = obs_dict["env_bounds_max"]
+        if margin != 1.0:
+            center = (bounds_min + bounds_max) / 2
+            half_extent = (bounds_max - bounds_min) / 2
+            bounds_min = center - half_extent * margin
+            bounds_max = center + half_extent * margin
         exceed_mask = (
-            (robot_pos < obs_dict["env_bounds_min"]).any(dim=1)
-            | (robot_pos > obs_dict["env_bounds_max"]).any(dim=1)
+            (robot_pos < bounds_min).any(dim=1)
+            | (robot_pos > bounds_max).any(dim=1)
         )
         arrive_mask = (~exceed_mask) & (
             dist < self.task_config.reward_parameters["d_min"]
