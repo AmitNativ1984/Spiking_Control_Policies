@@ -2,8 +2,7 @@
 Task configuration for navigation with obstacles.
 Defines observation/action spaces, reward parameters, curriculum, and VAE settings.
 """
-import torch
-
+import math
 
 class task_config:
     """
@@ -32,16 +31,39 @@ class task_config:
     device = "cuda:0"
 
     # Observation space: 12 (state) + 32 (VAE latents) = 44
-    
     observation_space_dim = 12 + 32
     privileged_observation_space_dim = 0
+
+    # Per-dimension observation bounds — values derived from env_config.py bounds:
+    #   upper_bound_max - lower_bound_min: X=12m, Y=8m, Z=6m
+    # Used for spaces.Box and PopSAN encoder initialization.
+    _max_d_hor  = math.sqrt(12.0**2 + 8.0**2)   # worst-case XY diagonal
+    _max_log_hor  = math.log(_max_d_hor + 1)     # ~2.77
+    _max_log_vert = math.log(6.0 + 1)            # ~1.95
+    _v_max = 10.0                                 # m/s hard ceiling for speed obs bounds
+
+    observation_bounds = (
+        [(0.0, _max_log_hor),    # [0]  log(d_hor + 1)
+         (0.0, _max_log_vert),   # [1]  log(d_vert + 1)
+         (-1.0, 1.0),            # [2]  cos(azimuth to target)
+         (-1.0, 1.0),            # [3]  sin(azimuth to target)
+         (-math.pi/2, math.pi/2),# [4]  elevation angle to target
+         (-1.0, 1.0),            # [5]  cos(drone yaw)
+         (-1.0, 1.0),            # [6]  sin(drone yaw)
+         (0.0, _v_max),          # [7]  horizontal speed
+         (-_v_max, _v_max),      # [8]  vertical speed
+         (-1.0, 1.0),            # [9]  cos(track azimuth)
+         (-1.0, 1.0),            # [10] sin(track azimuth)
+         (-math.pi/2, math.pi/2)]# [11] track elevation
+        + [(-3.0, 3.0)] * 32    # [12:44] VAE latents ≈ N(0,1)
+    )
 
     # Action space: [accel_x, accel_y, accel_z, yaw_rate]
     action_space_dim = 4
 
     # Action scaling: network outputs [-1, 1], scaled to physical units
     max_accel = 2.0              # m/s² per axis (symmetric: [-max, +max])
-    max_yaw_rate = torch.pi / 3  # rad/s (~60 deg/s, symmetric: [-max, +max])
+    max_yaw_rate = math.pi / 3  # rad/s (~60 deg/s, symmetric: [-max, +max])
 
     # Episode length
     episode_len_steps = 400
@@ -120,6 +142,7 @@ class task_config:
         Input: action tensor (num_envs, 4) in range [-1, 1]
         Output: [accel_x, accel_y, accel_z, yaw_rate] for lee_acceleration_control
         """
+        import torch
         clamped_action = torch.clamp(action, -1.0, 1.0)
 
         processed = torch.zeros_like(clamped_action)

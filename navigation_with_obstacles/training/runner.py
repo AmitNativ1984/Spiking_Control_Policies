@@ -38,10 +38,11 @@ from navigation_with_obstacles.task.navigation_task import (
 from navigation_with_obstacles.config.task_config import task_config
 from navigation_with_obstacles.config.env_config import NavigationObstacleEnvCfg
 from navigation_with_obstacles.config.robot_config import NavQuadWithCameraCfg
-
+from navigation_with_obstacles.networks.popsan import PopSANNetworkBuilder
+from rl_games.algos_torch.model_builder import register_network
 
 # =============================================================================
-# Register Custom Environment and Task
+# Register Custom Environment, Task, and Networks
 # =============================================================================
 
 # Register environment configuration
@@ -58,6 +59,9 @@ task_registry.register_task(
     NavigationWithObstaclesTask,
     task_config,
 )
+
+# Register custom SNN network builder with rl_games
+register_network("PopSAN", PopSANNetworkBuilder)
 
 
 # =============================================================================
