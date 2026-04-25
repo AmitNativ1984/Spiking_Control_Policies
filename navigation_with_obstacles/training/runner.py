@@ -168,7 +168,7 @@ def get_args():
         {"name": "--play", "action": "store_true", "help": "Play/test network"},
         {"name": "--checkpoint", "type": str, "help": "Path to checkpoint"},
         {"name": "--file", "type": str, "default": "...", "help": "Path to config"},
-        {"name": "--num_envs", "type": int, "default": 1024, "help": "Num envs"},
+        {"name": "--num_envs", "type": int, "default": -1, "help": "Num envs (overrides YAML; -1 = use YAML value)"},
         {
             "name": "--headless",
             "type": lambda x: bool(strtobool(x)),
@@ -240,7 +240,6 @@ def update_config(config, args):
     config["params"]["config"]["name"] = args["experiment_name"]
 
     config["params"]["config"]["env_config"]["headless"] = args["headless"]
-    config["params"]["config"]["env_config"]["num_envs"] = args["num_envs"]
     config["params"]["config"]["env_config"]["use_warp"] = args["use_warp"]
 
     if args["num_envs"] > 0:

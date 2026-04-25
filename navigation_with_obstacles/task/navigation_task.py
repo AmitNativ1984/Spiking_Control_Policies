@@ -467,7 +467,7 @@ class NavigationWithObstaclesTask(BaseTask):
         if self.task_config.vae_config.use_vae and self.vae_model is not None:
             image_obs = self.obs_dict["depth_range_pixels"].squeeze(1)
             # Batch VAE encoding to avoid CUDA OOM on large num_envs
-            batch_size = 512
+            batch_size = self.task_config.vae_config.encode_batch_size
             n = image_obs.shape[0]
             if n <= batch_size:
                 self.image_latents[:] = self.vae_model.encode(image_obs)
