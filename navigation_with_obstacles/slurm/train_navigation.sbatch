@@ -1,10 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=nav-vae
+#SBATCH --job-name=nav-popsan
 #SBATCH --partition=dlc
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
-#SBATCH --output=slurm_logs/nav-vae_%j.out
-#SBATCH --error=slurm_logs/nav-vae_%j.err
+#SBATCH --output=slurm_logs/nav-popsan_%j.out
+#SBATCH --error=slurm_logs/nav-popsan_%j.err
 
 # =============================================================================
 # Navigation VAE Training on SLURM with Pyxis
@@ -25,8 +25,8 @@ set -euo pipefail
 
 # --- Configuration (override via environment variables) ---
 CONTAINER_IMAGE="${CONTAINER_IMAGE:-${HOME}/DOCKER_IMAGES/aerial-gym.sqsh}"
-EXPERIMENT="${EXPERIMENT:-nav_vae_popsan_cluster}"
-CONFIG_FILE="${CONFIG_FILE:-training/pposan_navigation_cluster.yaml}"
+EXPERIMENT="${EXPERIMENT:-nav_popsan_cluster}"
+CONFIG_FILE="${CONFIG_FILE:-navigation_with_obstacles/training/popsan_navigation_cluster.yaml}"
 CHECKPOINT="${CHECKPOINT:-}"  # Path to checkpoint file to resume training (empty = start fresh)
 
 # --- Paths ---
@@ -51,8 +51,6 @@ echo "Job ID:          ${SLURM_JOB_ID}"
 echo "Node:            ${SLURMD_NODENAME}"
 echo "GPU:             ${CUDA_VISIBLE_DEVICES:-not set}"
 echo "Container:       ${CONTAINER_IMAGE}"
-echo "Num envs:        ${NUM_ENVS}"
-echo "Max epochs:      ${MAX_EPOCHS}"
 echo "Config:          ${CONFIG_FILE}"
 echo "Experiment:      ${EXPERIMENT}"
 echo "Checkpoint:      ${CHECKPOINT:-none (fresh start)}"
@@ -77,7 +75,6 @@ srun \
         echo 'Starting training...'
         python -m navigation_with_obstacles.training.runner \
             --file=${CONFIG_FILE} \
-            --num_envs=${NUM_ENVS} \
             --headless=True \
             --train \
             --track \
@@ -85,5 +82,4 @@ srun \
             --wandb-project-name=aerial_gym \
             ${CHECKPOINT_ARG}
     "
-
 echo "Training complete. Job ${SLURM_JOB_ID} finished at $(date)"
