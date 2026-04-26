@@ -11,10 +11,13 @@ Usage:
 """
 import isaacgym
 import argparse
+import logging
 import os
 import sys
 import yaml
 import numpy as np
+
+logging.getLogger("asset_manager").setLevel(logging.ERROR)
 
 sys.path.insert(0, "/workspaces/aerial_gym_docker")
 import wandb
