@@ -115,6 +115,11 @@ class NavigationWithObstaclesTask(BaseTask):
         # Previous distance to target (for progress tracking)
         self.prev_dist = torch.zeros(self.sim_env.num_envs, device=self.device)
 
+        # Previous transformed action for jerk penalty
+        self.prev_action = torch.zeros(
+            (self.sim_env.num_envs, 4), device=self.device, requires_grad=False
+        )
+
         # VAE encoder for depth images (custom DepthVAE)
         if self.task_config.vae_config.use_vae:
             from vae_depth.vae_image_encoder import DepthVAEImageEncoder
@@ -322,6 +327,7 @@ class NavigationWithObstaclesTask(BaseTask):
         # Reset VAE latents so first observation doesn't contain stale encodings
         if self.image_latents is not None:
             self.image_latents[env_ids] = 0.0
+        self.prev_action[env_ids] = 0.0
 
         # Store start positions for debug visualization
         if not self._headless:
@@ -370,14 +376,16 @@ class NavigationWithObstaclesTask(BaseTask):
         """
         # Transform network outputs to controller commands
         transformed_action = self.action_transformation_function(actions)
+        current_action = transformed_action.clone()  # snapshot before sim overwrites robot_actions/robot_prev_actions
 
         # Step the simulation
         self.sim_env.step(actions=transformed_action)
 
         # Compute rewards, terminations, and event masks
         self.rewards[:], self.terminations[:], arrive_mask, exceed_mask = (
-            self.compute_rewards(self.obs_dict)
+            self.compute_rewards(self.obs_dict, current_action)
         )
+        self.prev_action[:] = current_action
 
         # Check for episode timeout (truncation), only for non-terminated envs
         timeout_mask = (self.sim_env.sim_steps > self.task_config.episode_len_steps) & (
@@ -633,7 +641,7 @@ class NavigationWithObstaclesTask(BaseTask):
             self.timeouts_aggregate = 0
             self.exceeds_aggregate = 0
 
-    def compute_rewards(self, obs_dict):
+    def compute_rewards(self, obs_dict, current_action):
         """
         Compute reward from four mutually exclusive components (priority order):
         1. r_exceed:    out-of-bounds penalty (terminates)
@@ -676,7 +684,7 @@ class NavigationWithObstaclesTask(BaseTask):
         reward[exceed_mask] = self._reward_exceed()
         reward[arrive_mask] = self._reward_arrive()
         reward[collision_mask] = self._reward_collision()
-        reward[progress_mask] = self._reward_progress(progress_mask)
+        reward[progress_mask] = self._reward_progress(progress_mask, current_action)
 
         # All three event types terminate the episode
         terminations = exceed_mask | arrive_mask | collision_mask
@@ -700,7 +708,7 @@ class NavigationWithObstaclesTask(BaseTask):
         """Penalty for colliding with an obstacle."""
         return self.task_config.reward_parameters["collision_penalty"]
 
-    def _reward_progress(self, mask):
+    def _reward_progress(self, mask, current_action):
         """
         Dense shaping reward for non-terminal steps. Balances goal-reaching,
         flight stability and safety. All lambda coefficients are negative.
@@ -750,9 +758,9 @@ class NavigationWithObstaclesTask(BaseTask):
         # 4. Penalize lateral velocity deviation
         r_path_deviation = params["lambda_path_deviation"] * torch.abs(vel_angle)
 
-        # 5. Penalize jerk (difference between current actions and prev actions)
+        # 5. Penalize jerk (difference between current and previous transformed actions)
         r_jerk = params["lambda_jerk"] * torch.norm(
-            self.obs_dict["robot_actions"] - self.obs_dict["robot_prev_actions"], dim=1
+            current_action - self.prev_action, dim=1
         )
 
 
