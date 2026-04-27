@@ -149,20 +149,23 @@ class PopulationEncodedSpikingActorNetwork(nn.Module):
         self.actor_lif1 = snn.Leaky(beta=actor_config["beta"],
                                     reset_mechanism=actor_config["reset_mechanism"],
                                     reset_delay=actor_config["reset_delay"],
-                                    spike_grad=spike_grad)
+                                    spike_grad=spike_grad,
+                                    learn_beta=True)
 
         
         self.actor_fc2 = nn.Linear(in_features=hidden_dims[0], out_features=hidden_dims[1])
         self.actor_lif2 = snn.Leaky(beta=actor_config["beta"],
                                     reset_mechanism=actor_config["reset_mechanism"],
                                     reset_delay=actor_config["reset_delay"],
-                                    spike_grad=spike_grad)
+                                    spike_grad=spike_grad,
+                                    learn_beta=True)
         
         self.actor_fc3 = nn.Linear(in_features=hidden_dims[1], out_features=hidden_dims[2])
         self.actor_lif3 = snn.Leaky(beta=actor_config["beta"],
                                     reset_mechanism=actor_config["reset_mechanism"],
                                     reset_delay=actor_config["reset_delay"],
-                                    spike_grad=spike_grad)
+                                    spike_grad=spike_grad,
+                                    learn_beta=True)
 
         self.action_decoder = SpikeDecoder(input_dim=hidden_dims[2], action_dim=action_dim)
        
