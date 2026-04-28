@@ -45,6 +45,69 @@ from navigation_with_obstacles.networks.popsan import PopSANNetworkBuilder
 from rl_games.algos_torch.model_builder import register_network
 
 # =============================================================================
+# PopSAN Encoder Observer
+# =============================================================================
+
+class PopSANAlgoObserver(IsaacAlgoObserver):
+    """Extends IsaacAlgoObserver to log PopSAN encoder μ and σ statistics."""
+
+    def after_print_stats(self, frame, epoch_num, total_time):
+        super().after_print_stats(frame, epoch_num, total_time)
+
+        try:
+            encoder = self.algo.model.a2c_network.snn_actor.pop_encoder
+        except AttributeError:
+            return
+
+        # means: [1, obs_dim, pop_dim] → [obs_dim, pop_dim]
+        means = encoder.means.data.squeeze(0)
+        stds  = encoder.stds.data.squeeze(0).abs()
+
+        # --- Scalars ---
+        self.writer.add_scalar("popsan_encoder/means_mean", means.mean().item(), epoch_num)
+        self.writer.add_scalar("popsan_encoder/means_std",  means.std().item(),  epoch_num)
+        self.writer.add_scalar("popsan_encoder/stds_mean",  stds.mean().item(),  epoch_num)
+        self.writer.add_scalar("popsan_encoder/stds_min",   stds.min().item(),   epoch_num)
+        self.writer.add_scalar("popsan_encoder/stds_max",   stds.max().item(),   epoch_num)
+
+        self.writer.add_scalar("popsan_encoder/state_stds_mean", stds[:12].mean().item(), epoch_num)
+        self.writer.add_scalar("popsan_encoder/vae_stds_mean",   stds[12:].mean().item(), epoch_num)
+
+        # Fraction of neurons that would fire at least once (A_E >= 1/num_steps)
+        # evaluated at the centre of each dimension's obs_bounds
+        num_steps = self.algo.model.a2c_network.snn_actor.num_steps
+        min_A_E   = 1.0 / num_steps
+        obs_mid   = encoder.obs_bounds.mean(dim=1).unsqueeze(1).expand_as(means)
+        A_E_mid   = torch.exp(-0.5 * ((obs_mid - means) / stds.clamp(min=1e-3)) ** 2)
+        self.writer.add_scalar("popsan_encoder/frac_firing_at_bound_center",
+                               (A_E_mid >= min_A_E).float().mean().item(), epoch_num)
+
+        # --- Histograms ---
+        # TensorBoard: visible in DISTRIBUTIONS tab as overlaid density plots over time
+        # W&B: sync_tensorboard captures these but renders as percentile bands, not full histograms.
+        #      The wandb.log() calls below produce proper W&B histogram panels.
+        self.writer.add_histogram("popsan_encoder/all_means",        means.flatten(),    epoch_num)
+        self.writer.add_histogram("popsan_encoder/all_stds",         stds.flatten(),     epoch_num)
+        self.writer.add_histogram("popsan_encoder/state_means",      means[:12].flatten(), epoch_num)
+        self.writer.add_histogram("popsan_encoder/state_stds",       stds[:12].flatten(),  epoch_num)
+        self.writer.add_histogram("popsan_encoder/vae_means",        means[12:].flatten(), epoch_num)
+        self.writer.add_histogram("popsan_encoder/vae_stds",         stds[12:].flatten(),  epoch_num)
+        self.writer.add_histogram("popsan_encoder/per_dim_stds_mean", stds.mean(dim=1),   epoch_num)
+
+        # W&B native histograms — proper distribution panels, not percentile bands
+        if wandb.run is not None:
+            wandb.log({
+                "popsan_encoder/all_means":         wandb.Histogram(means.flatten().cpu().numpy()),
+                "popsan_encoder/all_stds":          wandb.Histogram(stds.flatten().cpu().numpy()),
+                "popsan_encoder/state_means":       wandb.Histogram(means[:12].flatten().cpu().numpy()),
+                "popsan_encoder/state_stds":        wandb.Histogram(stds[:12].flatten().cpu().numpy()),
+                "popsan_encoder/vae_means":         wandb.Histogram(means[12:].flatten().cpu().numpy()),
+                "popsan_encoder/vae_stds":          wandb.Histogram(stds[12:].flatten().cpu().numpy()),
+                "popsan_encoder/per_dim_stds_mean": wandb.Histogram(stds.mean(dim=1).cpu().numpy()),
+            }, step=epoch_num, commit=False)
+
+
+# =============================================================================
 # Register Custom Environment, Task, and Networks
 # =============================================================================
 
@@ -305,7 +368,8 @@ if __name__ == "__main__":
         # navigation_with_obstacles/runs/
         config["params"]["config"]["train_dir"] = runs_dir
 
-        runner = Runner(algo_observer=IsaacAlgoObserver())
+        observer = PopSANAlgoObserver() if not args.get("play") else IsaacAlgoObserver()
+        runner = Runner(algo_observer=observer)
         try:
             runner.load(config)
         except yaml.YAMLError as exc:
