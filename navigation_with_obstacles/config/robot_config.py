@@ -13,37 +13,38 @@ class NavQuadWithCameraCfg(BaseQuadWithCameraCfg):
     """
 
     class init_config(BaseQuadWithCameraCfg.init_config):
-        # Spawn position as ratio of environment bounds [x, y, z]
-        # X: 0-5% (pinned to lower X bound)
-        # Y: 10-90% (wide randomization)
-        # Z: 10-90% (wide randomization)
-        min_state_ratio = [
-            0.00,     # X: at lower X bound
-            0.10,     # Y: 10%
-            0.10,     # Z: 10%
-            0,        # Roll (rad)
-            0,        # Pitch (rad)
-            -np.pi,   # Yaw min (facing any direction)
-            1.0,      # Scale
-            0,        # Linear velocity X
-            0,        # Linear velocity Y
-            0,        # Linear velocity Z
-            0,        # Angular velocity X
-            0,        # Angular velocity Y
-            0,        # Angular velocity Z
+        # Tensor format: [ratio_x, ratio_y, ratio_z, roll_rad, pitch_rad, yaw_rad, 1.0, vx, vy, vz, wx, wy, wz]
+        # Position indices 0-2: ratio of env bounds (0-1), interpolated to world coords at reset
+        # Attitude indices 3-5: direct radians
+        # Velocity indices 7-9: direct m/s (world frame)
+        # Angular rate indices 10-12: direct rad/s (body frame)
+        min_init_state = [
+            0.00,                    # X: 0-5% of env bounds
+            0.10,                    # Y: 10-90%
+            0.10,                    # Z: 10-90%
+            -np.pi * 25 / 180,       # Roll:  -25 deg
+            -np.pi * 25 / 180,       # Pitch: -25 deg
+            -np.pi / 6,              # Yaw:   -30 deg
+            1.0,
+            -0.5,                    # vx: +-0.5 m/s
+            -0.5,                    # vy: +-0.5 m/s
+            -0.3,                    # vz: +-0.3 m/s
+            -0.3,                    # wx: +-0.3 rad/s (~17 deg/s roll rate)
+            -0.3,                    # wy: +-0.3 rad/s (~17 deg/s pitch rate)
+            -0.2,                    # wz: +-0.2 rad/s (~11 deg/s yaw rate)
         ]
-        max_state_ratio = [
-            0.05,     # X: thin band at lower X bound
-            0.90,     # Y: 90%
-            0.90,     # Z: 90%
-            0,        # Roll (rad)
-            0,        # Pitch (rad)
-            np.pi,    # Yaw max
-            1.0,      # Scale
-            0,        # Linear velocity X
-            0,        # Linear velocity Y
-            0,        # Linear velocity Z
-            0,        # Angular velocity X
-            0,        # Angular velocity Y
-            0,        # Angular velocity Z
+        max_init_state = [
+            0.05,                    # X
+            0.90,                    # Y
+            0.90,                    # Z
+            np.pi * 25 / 180,        # Roll:  +25 deg
+            np.pi * 25 / 180,        # Pitch: +25 deg
+            np.pi / 6,               # Yaw:   +30 deg
+            1.0,
+            0.5,                     # vx
+            0.5,                     # vy
+            0.3,                     # vz
+            0.3,                     # wx
+            0.3,                     # wy
+            0.2,                     # wz
         ]
