@@ -8,6 +8,7 @@ from typing import Tuple
 
 class PopulationSpikeEncoder(nn.Module):
     """ Population encoding module for PopSAN.
+    The input observation is already normalized and bounded [-3, 3] (RL-GAMES normalization).
     Each dimension of the input observation is encoded into the activity of a population of neurons.
     Each neuron in the population is modeled as a Gaussian N~(μ, σ) with learnable parameters. After training, 
     Each neuron stimulates a Gaussian-shaped response in the input space, allowing the network to learn a distributed 
@@ -16,35 +17,38 @@ class PopulationSpikeEncoder(nn.Module):
     The stimulus each neuron is computed over time steps.
     """
 
-    def __init__(self, obs_dim:int, obs_bounds: list, encoder_config: dict) -> None:
+    def __init__(self, obs_dim:int, obs_bounds: list, ts: int, encoder_config: dict) -> None:
         
         """Initialize the PopulationSpikeEncoder.
         
         Args:
             obs_dim (int): Dimension of the input observation space.
             pop_dim (int): Number of neurons in each population (per input dimension).
-            spike_ts (int): Number of time steps to encode the stimulus over.
-            obs_range (Tuple[float, float]) shape [obs_dim]: Range for initializing the mean parameters of the Gaussian neurons.
-                    column 0 = min, column 1 = max for each input dimension.
+            obs_bounds (list): List of (min, max) tuples for each observation dimension, used for initializing the means and stds of the Gaussian encoding neurons.
+            ts (int): Number of time steps for the spike simulation.
         """
 
         super(PopulationSpikeEncoder, self).__init__()
         self.obs_dim =  obs_dim
         self.pop_dim = encoder_config["pop_dim"]
-        self.register_buffer("obs_bounds", torch.tensor(obs_bounds, dtype=torch.float32))  # shape [obs_dim, 2]
+        self.ts = ts
         self.encoder_neuron_num = self.obs_dim * self.pop_dim
         # Initialize evenly spaced means across the specified range for each input dimension
         spacing = torch.linspace(0, 1, self.pop_dim).unsqueeze(0)  # shape [1, pop_dim]
-        obs_min = self.obs_bounds[:, 0]  # shape [obs_dim]
-        obs_max = self.obs_bounds[:, 1]  # shape [obs_dim]
-        assert torch.all(obs_min < obs_max), "Invalid obs_range: left column (min) must be less than right column (max)"
-        obs_range = obs_max - obs_min
-        self.means = nn.Parameter((obs_min.unsqueeze(1) + spacing * obs_range.unsqueeze(1)).unsqueeze(0), requires_grad=True)  # shape [1, obs_dim, pop_dim]
+        self.register_buffer("obs_bounds", torch.tensor(obs_bounds, dtype=torch.float))  # Register as a buffer to ensure it's moved to the correct device with the model
+        obs_min = self.obs_bounds[:, 0].unsqueeze(1)  # shape [obs_dim, 1]
+        obs_max = self.obs_bounds[:, 1].unsqueeze(1)  # shape [obs_dim, 1]
+        obs_range = obs_max - obs_min   # shape [obs_dim, 1]
+        self.means = nn.Parameter((obs_min + spacing * obs_range).unsqueeze(0), requires_grad=True)  # shape [1, obs_dim, pop_dim]
 
-        # Initialize standard deviations to the specified value
-        std = obs_range / (2 * self.pop_dim - 1) # heuristic to cover the input range with overlapping Gaussians
-        self.stds = nn.Parameter((torch.ones(self.obs_dim, self.pop_dim) * std.unsqueeze(1)).unsqueeze(0), requires_grad=True)  # shape [1, obs_dim, pop_dim]
-    
+        # Initialize stds to cover the input range with overlapping Gaussians.
+        # We want to make sure that all the range of the input is covered by Gaussian receptive fields,
+        # And inits at least a single spike down the road.
+              
+        delta_mean = self.means[:, :, 1] - self.means[:, :, 0]  # shape [1, obs_dim]
+        init_std = delta_mean / 2.0  # shape [1, obs_dim]
+        self.stds = nn.Parameter(init_std.unsqueeze(2).expand(-1, -1, self.pop_dim), requires_grad=True)  # shape [1, obs_dim, pop_dim]
+        
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         """Encode the input observation into population spike activity.
         
@@ -59,6 +63,9 @@ class PopulationSpikeEncoder(nn.Module):
         """
 
         batch_size = obs.shape[0]
+
+        # Clamp the input observations
+        obs = torch.clamp(obs, self.obs_bounds[:, 0], self.obs_bounds[:, 1])  # shape [batch_size, obs_dim]
 
         # Expand obs to shape [batch_size, obs_dim, pop_dim]
         obs_expanded = obs.unsqueeze(2).expand(-1, -1, self.pop_dim)
@@ -193,8 +200,8 @@ class PopulationEncodedSpikingActorNetwork(nn.Module):
         
         for t in range(self.num_steps):
             # Actor network - Encoding layer
-            pop_activity = self.pop_encoder(obs)
-            in_spks, self.input_mem = self.encoding_neurons(pop_activity, self.input_mem)
+            pop_stimulus = self.pop_encoder(obs)
+            in_spks, self.input_mem = self.encoding_neurons(pop_stimulus, self.input_mem)
             
             # Actor network - Layer 1
             actor_fc1_out = self.actor_fc1(in_spks)

@@ -73,8 +73,7 @@ params:
     normalize_value: True
     value_bootstrap: True
 
-    # Input normalization - The population encoding IS the normalizatiion. 
-    normalize_input: False
+    normalize_input: True   # RL-GAMES normalization of observations
 
     # Other settings
     bounds_loss_coef: 0.0001

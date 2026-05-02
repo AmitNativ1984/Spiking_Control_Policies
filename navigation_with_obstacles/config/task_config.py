@@ -40,22 +40,29 @@ class task_config:
     _max_d_hor  = math.sqrt(12.0**2 + 8.0**2)   # worst-case XY diagonal
     _max_log_hor  = math.log(_max_d_hor + 1)     # ~2.77
     _max_log_vert = math.log(6.0 + 1)            # ~1.95
+    _max_log_dist = max(_max_log_hor, _max_log_vert)  # ~2.77
     _v_max = 10.0                                 # m/s hard ceiling for speed obs bounds
 
+    # observation_bounds = (
+    #     [(0.0, _max_log_hor),    # [0]  log(d_hor + 1)
+    #      (0.0, _max_log_vert),   # [1]  log(d_vert + 1)
+    #      (-1.0, 1.0),            # [2]  cos(azimuth to target)
+    #      (-1.0, 1.0),            # [3]  sin(azimuth to target)
+    #      (-math.pi/2, math.pi/2),# [4]  elevation angle to target
+    #      (-1.0, 1.0),            # [5]  cos(drone yaw)
+    #      (-1.0, 1.0),            # [6]  sin(drone yaw)
+    #      (0.0, _v_max),          # [7]  horizontal speed
+    #      (-_v_max, _v_max),      # [8]  vertical speed
+    #      (-1.0, 1.0),            # [9]  cos(track azimuth)
+    #      (-1.0, 1.0),            # [10] sin(track azimuth)
+    #      (-math.pi/2, math.pi/2)]# [11] track elevation
+    #     + [(-3.0, 3.0)] * 32    # [12:44] VAE latents ≈ N(0,1)
+    # )
+
+    # Following PopSAN paper, 
+    # we use symmetric bounds for all obs dimensions
     observation_bounds = (
-        [(0.0, _max_log_hor),    # [0]  log(d_hor + 1)
-         (0.0, _max_log_vert),   # [1]  log(d_vert + 1)
-         (-1.0, 1.0),            # [2]  cos(azimuth to target)
-         (-1.0, 1.0),            # [3]  sin(azimuth to target)
-         (-math.pi/2, math.pi/2),# [4]  elevation angle to target
-         (-1.0, 1.0),            # [5]  cos(drone yaw)
-         (-1.0, 1.0),            # [6]  sin(drone yaw)
-         (0.0, _v_max),          # [7]  horizontal speed
-         (-_v_max, _v_max),      # [8]  vertical speed
-         (-1.0, 1.0),            # [9]  cos(track azimuth)
-         (-1.0, 1.0),            # [10] sin(track azimuth)
-         (-math.pi/2, math.pi/2)]# [11] track elevation
-        + [(-3.0, 3.0)] * 32    # [12:44] VAE latents ≈ N(0,1)
+        [(-3, 3)] * 44      
     )
 
     # Action space: [accel_x, accel_y, accel_z, yaw_rate]
