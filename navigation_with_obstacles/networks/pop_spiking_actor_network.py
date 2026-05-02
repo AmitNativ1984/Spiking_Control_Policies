@@ -48,7 +48,11 @@ class PopulationSpikeEncoder(nn.Module):
         delta_mean = self.means[:, :, 1] - self.means[:, :, 0]  # shape [1, obs_dim]
         init_std = delta_mean / 2.0  # shape [1, obs_dim]
         self.stds = nn.Parameter(init_std.unsqueeze(2).expand(-1, -1, self.pop_dim), requires_grad=True)  # shape [1, obs_dim, pop_dim]
-        
+
+        # Diagnostic captures (only populated during training, used by PopSANAlgoObserver)
+        self._last_obs = None              # shape [batch, obs_dim]
+        self._last_pop_activity = None     # shape [batch, obs_dim, pop_dim]
+
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         """Encode the input observation into population spike activity.
         
@@ -71,10 +75,16 @@ class PopulationSpikeEncoder(nn.Module):
         obs_expanded = obs.unsqueeze(2).expand(-1, -1, self.pop_dim)
 
         # Transform the observation values into the stimulation strength for each neuron in the population
-        pop_activity = torch.exp(-0.5 * ((obs_expanded - self.means) / self.stds) ** 2)  # shape [batch_size, obs_dim, pop_dim]
-        pop_activity = pop_activity.view(batch_size, self.encoder_neuron_num)  # shape [batch_size, obs_dim * pop_dim
+        pop_activity_3d = torch.exp(-0.5 * ((obs_expanded - self.means) / self.stds) ** 2)  # shape [batch_size, obs_dim, pop_dim]
+        pop_activity = pop_activity_3d.view(batch_size, self.encoder_neuron_num)  # shape [batch_size, obs_dim * pop_dim]
 
-        return pop_activity   
+        # Capture latest batch for PopSANAlgoObserver diagnostics (training only).
+        # .detach() shares storage with the source tensor, so this is near-zero cost.
+        if self.training:
+            self._last_obs = obs.detach()
+            self._last_pop_activity = pop_activity_3d.detach()
+
+        return pop_activity
 
 class SpikeDecoder(nn.Module):
     """ Spike decoder module for PopSAN.

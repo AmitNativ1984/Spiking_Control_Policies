@@ -16,6 +16,9 @@ import os
 import sys
 import yaml
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")  # headless backend, mandatory for SLURM
+import matplotlib.pyplot as plt
 
 logging.getLogger("asset_manager").setLevel(logging.ERROR)
 
@@ -48,8 +51,19 @@ from rl_games.algos_torch.model_builder import register_network
 # PopSAN Encoder Observer
 # =============================================================================
 
+OBS_NAMES = [
+    "log(d_hor+1)", "log(d_vert+1)", "cos(azimuth)", "sin(azimuth)",
+    "elevation", "cos(yaw)", "sin(yaw)", "v_hor", "v_vert",
+    "cos(track_az)", "sin(track_az)", "track_elev",
+] + [f"vae_{i:02d}" for i in range(32)]
+
+
 class PopSANAlgoObserver(IsaacAlgoObserver):
     """Extends IsaacAlgoObserver to log PopSAN encoder μ and σ statistics."""
+
+    def __init__(self):
+        super().__init__()
+        self._fig_log_every = 10  # render heatmap figure every N iters
 
     def after_print_stats(self, frame, epoch_num, total_time):
         super().after_print_stats(frame, epoch_num, total_time)
@@ -105,6 +119,99 @@ class PopSANAlgoObserver(IsaacAlgoObserver):
                 "popsan_encoder/vae_stds":          wandb.Histogram(stds[12:].flatten().cpu().numpy()),
                 "popsan_encoder/per_dim_stds_mean": wandb.Histogram(stds.mean(dim=1).cpu().numpy()),
             }, step=epoch_num, commit=False)
+
+        # --- Encoder diagnostics figure (every N iters) ---
+        if epoch_num % self._fig_log_every == 0:
+            fig = self._plot_encoder_diagnostics(encoder, means, stds, num_steps)
+            if fig is not None:
+                self.writer.add_figure("popsan_encoder/diagnostics", fig, epoch_num)
+                if wandb.run is not None:
+                    wandb.log({"popsan_encoder/diagnostics": wandb.Image(fig)},
+                              step=epoch_num, commit=False)
+                plt.close(fig)
+
+    def _plot_encoder_diagnostics(self, encoder, means, stds, num_steps):
+        """Render a 3-panel heatmap: receptive field coverage, observed obs density,
+        and per-neuron firing counts. Returns matplotlib figure or None."""
+        obs_dim, pop_dim = means.shape
+        x_lo, x_hi, n_bins = -3.5, 3.5, 200
+        x_grid = torch.linspace(x_lo, x_hi, n_bins, device=means.device)  # [n_bins]
+
+        # Panel A — receptive field coverage [obs_dim, n_bins]
+        # coverage[d, x] = sum_k exp(-0.5 * ((x - mu[d,k]) / sigma[d,k])^2)
+        x_exp = x_grid.view(1, 1, n_bins)                 # [1, 1, n_bins]
+        mu_exp = means.unsqueeze(2)                        # [obs_dim, pop_dim, 1]
+        sg_exp = stds.clamp(min=1e-3).unsqueeze(2)         # [obs_dim, pop_dim, 1]
+        coverage = torch.exp(-0.5 * ((x_exp - mu_exp) / sg_exp) ** 2).sum(dim=1)  # [obs_dim, n_bins]
+        coverage_np = coverage.cpu().numpy()
+
+        # Panel B & C: only if a training batch has been captured
+        last_obs = encoder._last_obs
+        last_act = encoder._last_pop_activity
+        has_activity = last_obs is not None and last_act is not None
+
+        density_np = None
+        firing_np = None
+        if has_activity:
+            # Panel B — observed obs density [obs_dim, n_bins]
+            edges = torch.linspace(x_lo, x_hi, n_bins + 1, device=last_obs.device)
+            density = torch.zeros(obs_dim, n_bins, device=last_obs.device)
+            for d in range(obs_dim):
+                hist = torch.histc(last_obs[:, d], bins=n_bins, min=x_lo, max=x_hi)
+                density[d] = hist
+            row_max = density.max(dim=1, keepdim=True).values.clamp(min=1.0)
+            density_np = (density / row_max).cpu().numpy()
+
+            # Panel C — per-neuron firing counts [obs_dim, pop_dim]
+            min_A_E = 1.0 / num_steps
+            firing = (last_act >= min_A_E).sum(dim=0).float()  # [obs_dim, pop_dim]
+            row_max = firing.max(dim=1, keepdim=True).values.clamp(min=1.0)
+            firing_np = (firing / row_max).cpu().numpy()
+
+        # --- Render ---
+        n_panels = 3 if has_activity else 1
+        fig, axes = plt.subplots(
+            1, n_panels, figsize=(5 * n_panels, 10),
+            gridspec_kw={"width_ratios": [4, 4, 1][:n_panels]},
+        )
+        if n_panels == 1:
+            axes = [axes]
+
+        # Panel A: coverage
+        im = axes[0].imshow(coverage_np, aspect="auto", origin="lower",
+                            extent=[x_lo, x_hi, -0.5, obs_dim - 0.5],
+                            cmap="viridis", interpolation="nearest")
+        axes[0].set_title("Receptive field coverage\n(sum of Gaussian responses)")
+        axes[0].set_xlabel("input value (post-normalization)")
+        axes[0].set_yticks(range(obs_dim))
+        axes[0].set_yticklabels(OBS_NAMES, fontsize=6)
+        axes[0].axvline(-3, color="white", linestyle="--", linewidth=0.5, alpha=0.5)
+        axes[0].axvline(+3, color="white", linestyle="--", linewidth=0.5, alpha=0.5)
+        plt.colorbar(im, ax=axes[0], fraction=0.04)
+
+        if has_activity:
+            # Panel B: observed density
+            im = axes[1].imshow(density_np, aspect="auto", origin="lower",
+                                extent=[x_lo, x_hi, -0.5, obs_dim - 0.5],
+                                cmap="viridis", interpolation="nearest", vmin=0, vmax=1)
+            axes[1].set_title("Observed obs density\n(last batch, row-normalized)")
+            axes[1].set_xlabel("input value")
+            axes[1].set_yticks([])
+            axes[1].axvline(-3, color="white", linestyle="--", linewidth=0.5, alpha=0.5)
+            axes[1].axvline(+3, color="white", linestyle="--", linewidth=0.5, alpha=0.5)
+            plt.colorbar(im, ax=axes[1], fraction=0.04)
+
+            # Panel C: per-neuron firing
+            im = axes[2].imshow(firing_np, aspect="auto", origin="lower",
+                                cmap="viridis", interpolation="nearest", vmin=0, vmax=1)
+            axes[2].set_title("Per-neuron\nfiring (row-norm)")
+            axes[2].set_xlabel("neuron idx")
+            axes[2].set_yticks([])
+            axes[2].set_xticks(range(pop_dim))
+            plt.colorbar(im, ax=axes[2], fraction=0.1)
+
+        fig.tight_layout()
+        return fig
 
 
 # =============================================================================
