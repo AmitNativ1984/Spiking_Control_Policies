@@ -17,7 +17,7 @@ class PopulationSpikeEncoder(nn.Module):
     The stimulus each neuron is computed over time steps.
     """
 
-    def __init__(self, obs_dim:int, obs_bounds: list, ts: int, encoder_config: dict) -> None:
+    def __init__(self, obs_dim:int, obs_bounds: list, encoder_config: dict) -> None:
         
         """Initialize the PopulationSpikeEncoder.
         
@@ -31,7 +31,6 @@ class PopulationSpikeEncoder(nn.Module):
         super(PopulationSpikeEncoder, self).__init__()
         self.obs_dim =  obs_dim
         self.pop_dim = encoder_config["pop_dim"]
-        self.ts = ts
         self.encoder_neuron_num = self.obs_dim * self.pop_dim
         # Initialize evenly spaced means across the specified range for each input dimension
         spacing = torch.linspace(0, 1, self.pop_dim).unsqueeze(0)  # shape [1, pop_dim]
