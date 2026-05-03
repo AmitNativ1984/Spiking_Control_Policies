@@ -25,7 +25,8 @@ class task_config:
     args = {}
 
     # Environment settings
-    num_envs = 1024
+    # NOTE: num_envs is set at runtime from the YAML (env_config.num_envs).
+    # The task __init__ assigns task_config.num_envs = num_envs from YAML.
     use_warp = True
     headless = True
     device = "cuda:0"
@@ -73,7 +74,7 @@ class task_config:
     max_yaw_rate = math.pi / 3  # rad/s (~60 deg/s, symmetric: [-max, +max])
 
     # Episode length
-    episode_len_steps = 400
+    episode_len_steps = 50
 
     return_state_before_reset = False
 
@@ -90,19 +91,19 @@ class task_config:
     # Reward parameters
     reward_parameters = {
         # Terminal rewards
-        "arrive_bonus_min": 2.0,        # arrival reward at curriculum level 0 (easy)
-        "arrive_bonus_max": 7.0,        # arrival reward at max curriculum level (hard)
-        "collision_penalty": -10.0,     # obstacle collision termination
-        "exceed_penalty": -10.0,        # out-of-bounds termination
+        "arrive_bonus_min": 5.0,        # arrival reward at curriculum level 0 (easy)
+        "arrive_bonus_max": 10.0,        # arrival reward at max curriculum level (hard)
+        "collision_penalty": -2.0,     # obstacle collision termination
+        "exceed_penalty": -2.0,        # out-of-bounds termination
         "timeout_penalty": -10.0,          # episode timeout termination
         "d_min": 0.4,                   # arrival distance threshold (meters)
         # Progress reward (dense shaping, all lambda < 0)
-        "lambda_d": -0.001,           # distance to target (horizontal + vertical)
-        "lambda_dz": -0.001,          # vertical distance to target (encourage altitude adjustments)
-        "lambda_v": -0.001,         # velocity-goal direction misalignment
-        "lambda_bearing": -0.001,           # projection of velocity onto target direction (encourage movement towards target)
-        "lambda_path_deviation": -0.0005,    # velocity misalignment with target direction (encourage movement towards target)
-        "lambda_jerk": -0.001,      # jerk penalty to encourage smooth control
+        "lambda_d": -0.01,           # distance to target (horizontal + vertical)
+        "lambda_dz": -0.01,          # vertical distance to target (encourage altitude adjustments)
+        "lambda_v": -0.01,         # velocity-goal direction misalignment
+        "lambda_bearing": -0.01,           # projection of velocity onto target direction (encourage movement towards target)
+        "lambda_path_deviation": -0.005,    # velocity misalignment with target direction (encourage movement towards target)
+        "lambda_jerk": -0.01,      # jerk penalty to encourage smooth control
     }
 
     # Speed threshold for excess speed penalty (m/s)
@@ -124,7 +125,7 @@ class task_config:
         max_depth_m = 7.0
         min_depth_m = 0.1
         sensor_max_range = 10.0
-        encode_batch_size = 4096  # single batch; keep in sync with num_envs
+        encode_batch_size = 128  # single batch; keep in sync with num_envs
         
 
     class curriculum:
@@ -160,4 +161,5 @@ class task_config:
         return processed
 
 
-task_config.vae_config.encode_batch_size = task_config.num_envs
+# vae_config.encode_batch_size is set at runtime in NavigationWithObstaclesTask.__init__,
+# once task_config.num_envs has been populated from the YAML.

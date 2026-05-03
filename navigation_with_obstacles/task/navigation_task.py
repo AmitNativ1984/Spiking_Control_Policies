@@ -120,7 +120,10 @@ class NavigationWithObstaclesTask(BaseTask):
             (self.sim_env.num_envs, 4), device=self.device, requires_grad=False
         )
 
-        # VAE encoder for depth images (custom DepthVAE)
+        # VAE encoder for depth images (custom DepthVAE).
+        # Match the encoder batch size to the runtime num_envs (set from YAML),
+        # so the VAE doesn't preallocate buffers for a stale value.
+        self.task_config.vae_config.encode_batch_size = self.task_config.num_envs
         if self.task_config.vae_config.use_vae:
             from vae_depth.vae_image_encoder import DepthVAEImageEncoder
             self.vae_model = DepthVAEImageEncoder(
