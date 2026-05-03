@@ -32,7 +32,7 @@ params:
     name: navigation_with_obstacles
     env_name: navigation_with_obstacles_task
     env_config:
-      num_envs: 16
+      num_envs: 128
       headless: True
       use_warp: True
 
@@ -57,15 +57,15 @@ params:
     save_frequency: 50
     score_to_win: 100000
     grad_norm: 1.0
-    entropy_coef: 0.001
+    entropy_coef: 0.01
     truncate_grads: True
     e_clip: 0.2
     clip_value: False
 
     # Batch settings
-    num_actors: 16
-    horizon_length: 64
-    minibatch_size: 128
+    num_actors: 128
+    horizon_length: 128
+    minibatch_size: 512
     mini_epochs: 4
 
     # Value function
