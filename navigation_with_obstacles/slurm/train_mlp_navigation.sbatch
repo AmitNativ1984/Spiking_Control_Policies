@@ -1,10 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=nav-vae
+#SBATCH --job-name=nav_vae_ann
 #SBATCH --partition=dlc
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
-#SBATCH --output=slurm_logs/nav-vae_%j.out
-#SBATCH --error=slurm_logs/nav-vae_%j.err
+#SBATCH --output=slurm_logs/nav_vae_ann_%j.out
+#SBATCH --error=slurm_logs/nav_vae_ann_%j.err
 
 # =============================================================================
 # Navigation VAE Training on SLURM with Pyxis
@@ -25,7 +25,6 @@ set -euo pipefail
 
 # --- Configuration (override via environment variables) ---
 CONTAINER_IMAGE="${CONTAINER_IMAGE:-${HOME}/DOCKER_IMAGES/aerial-gym.sqsh}"
-NUM_ENVS="${NUM_ENVS:-4096}"
 MAX_EPOCHS="${MAX_EPOCHS:-1000}"
 EXPERIMENT="${EXPERIMENT:-nav_vae_ann_cluster}"
 CONFIG_FILE="${CONFIG_FILE:-navigation_with_obstacles/training/ppo_navigation_ann_cluster.yaml}"
@@ -53,7 +52,6 @@ echo "Job ID:          ${SLURM_JOB_ID}"
 echo "Node:            ${SLURMD_NODENAME}"
 echo "GPU:             ${CUDA_VISIBLE_DEVICES:-not set}"
 echo "Container:       ${CONTAINER_IMAGE}"
-echo "Num envs:        ${NUM_ENVS}"
 echo "Max epochs:      ${MAX_EPOCHS}"
 echo "Config:          ${CONFIG_FILE}"
 echo "Experiment:      ${EXPERIMENT}"
@@ -79,7 +77,6 @@ srun \
         echo 'Starting training...'
         python -m navigation_with_obstacles.training.runner \
             --file=${CONFIG_FILE} \
-            --num_envs=${NUM_ENVS} \
             --headless=True \
             --train \
             --track \
