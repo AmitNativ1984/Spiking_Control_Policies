@@ -23,7 +23,6 @@ class PopulationSpikeEncoder(nn.Module):
         
         Args:
             obs_dim (int): Dimension of the input observation space.
-            pop_dim (int): Number of neurons in each population (per input dimension).
             obs_bounds (list): List of (min, max) tuples for each observation dimension, used for initializing the means and stds of the Gaussian encoding neurons.
             ts (int): Number of time steps for the spike simulation.
         """
@@ -46,11 +45,7 @@ class PopulationSpikeEncoder(nn.Module):
               
         delta_mean = self.means[:, :, 1] - self.means[:, :, 0]  # shape [1, obs_dim]
         init_std = delta_mean / 2.0  # shape [1, obs_dim]
-        self.stds = nn.Parameter(init_std.unsqueeze(2).expand(-1, -1, self.pop_dim), requires_grad=True)  # shape [1, obs_dim, pop_dim]
-
-        # Diagnostic captures (only populated during training, used by PopSANAlgoObserver)
-        self._last_obs = None              # shape [batch, obs_dim]
-        self._last_pop_activity = None     # shape [batch, obs_dim, pop_dim]
+        self.stds = nn.Parameter(init_std.unsqueeze(2).expand(-1, -1, self.pop_dim).contiguous().clone(), requires_grad=True)  # shape [1, obs_dim, pop_dim]
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         """Encode the input observation into population spike activity.
@@ -74,14 +69,8 @@ class PopulationSpikeEncoder(nn.Module):
         obs_expanded = obs.unsqueeze(2).expand(-1, -1, self.pop_dim)
 
         # Transform the observation values into the stimulation strength for each neuron in the population
-        pop_activity_3d = torch.exp(-0.5 * ((obs_expanded - self.means) / self.stds) ** 2)  # shape [batch_size, obs_dim, pop_dim]
-        pop_activity = pop_activity_3d.view(batch_size, self.encoder_neuron_num)  # shape [batch_size, obs_dim * pop_dim]
-
-        # Capture latest batch for PopSANAlgoObserver diagnostics (training only).
-        # .detach() shares storage with the source tensor, so this is near-zero cost.
-        if self.training:
-            self._last_obs = obs.detach()
-            self._last_pop_activity = pop_activity_3d.detach()
+        pop_activity = torch.exp(-0.5 * (obs_expanded - self.means).pow(2) / self.stds.pow(2))  # shape [batch_size, obs_dim, pop_dim]
+        pop_activity = pop_activity.view(batch_size, self.encoder_neuron_num)  # shape [batch_size, obs_dim * pop_dim]
 
         return pop_activity
 
@@ -90,21 +79,26 @@ class SpikeDecoder(nn.Module):
     This module takes the latent spike activity from the last hidden layer of the actor SNN and decodes it into the parameters of the action distribution (e.g. mean and std for Gaussian policy).
     """
 
-    def __init__(self, input_dim: int, action_dim: int) -> None:
+    def __init__(self, input_dim: int, action_dim: int, pop_dim: int) -> None:
         """Initialize the SpikeDecoder.
         
         Args:
             input_dim (int): Dimension of the input latent spike activity (last hidden layer size).
             action_dim (int): Dimension of the action space (number of actions).
+            pop_dim (int): Dimension of the population code.
         """
 
         super(SpikeDecoder, self).__init__()
 
-        # Action head: converts latent spikes to action distribution parameters (mu and sigma)
-        self.action_head = nn.Linear(in_features=input_dim, out_features=action_dim)
+        self.action_dim = action_dim
+        self.pop_dim = pop_dim
+        self.decoder = nn.Conv1d(in_channels=input_dim, 
+                                 out_channels=action_dim, 
+                                 kernel_size=pop_dim,
+                                 groups=action_dim)  # Depthwise convolution to decode each action dimension from its corresponding population code
         self.log_std = nn.Parameter(torch.zeros(action_dim))
 
-    def forward(self, latent_mean_spikes: torch.Tensor) -> torch.Tensor:
+    def forward(self, mean_spikes: torch.Tensor) -> torch.Tensor:
         """Decode the latent spike activity into action distribution parameters.
         
         Args:
@@ -113,10 +107,10 @@ class SpikeDecoder(nn.Module):
             torch.Tensor: Action distribution parameters tensor of shape [batch_size, action_dim].
         """
 
-        action_mu = self.action_head(latent_mean_spikes)   # shape [batch_size, action_dim]
-        action_log_std = self.log_std.expand_as(action_mu) # shape [batch_size, action_dim]
+        x = mean_spikes.view(-1, self.action_dim, self.pop_dim)  # Reshape to [batch_size, action_dim, pop_dim]
+        action_mu = self.decoder(x).view(-1, self.action_dim)  # Decode and reshape to [batch_size, action_dim]
+        action_log_std = self.log_std.expand_as(action_mu)  # Expand log std to match action_mu shape
         return action_mu, action_log_std
-
 
 class PopulationEncodedSpikingActorNetwork(nn.Module):
     """ Spiking Actor Network for PopSAN.
@@ -142,6 +136,7 @@ class PopulationEncodedSpikingActorNetwork(nn.Module):
         self.pop_encoder = PopulationSpikeEncoder(obs_dim, obs_bounds, actor_config["encoder"])
      
         input_dim = self.pop_encoder.encoder_neuron_num
+        pop_dim_out = actor_config["encoder"]["pop_dim"] * action_dim
 
         # Select surrogate gradient function
         if actor_config["spike_grad"] == "sigmoid":
@@ -154,36 +149,50 @@ class PopulationEncodedSpikingActorNetwork(nn.Module):
             raise ValueError(f"Unsupported spike_grad: {actor_config['spike_grad']}")
 
         
-        
         self.encoding_neurons = snn.Leaky(beta=1.0,  # no leak => IF neuron
-                                        threshold=1.0,
-                                       spike_grad=surrogate.straight_through_estimator(),   # Passthrough gradient for the non-differentiable spiking function
-                                       reset_mechanism="subtract"
-                                       )
+                                        threshold=0.95,
+                                        spike_grad=surrogate.straight_through_estimator(),   # Passthrough gradient for the non-differentiable spiking function
+                                        reset_mechanism="subtract"
+                                        )
+
+        # Hidden-layer LIF threshold. Lower threshold (e.g. 0.5) keeps the SNN
+        # active at init so gradients can flow to weight matrices; matches the
+        # reference PopSAN implementation (vth=0.5).
+        lif_threshold = actor_config.get("threshold", 0.5)
 
         self.actor_fc1 = nn.Linear(in_features=input_dim, out_features=hidden_dims[0])
         self.actor_lif1 = snn.Leaky(beta=actor_config["beta"],
+                                    threshold=lif_threshold,
                                     reset_mechanism=actor_config["reset_mechanism"],
                                     reset_delay=actor_config["reset_delay"],
                                     spike_grad=spike_grad,
                                     learn_beta=True)
 
-        
+
         self.actor_fc2 = nn.Linear(in_features=hidden_dims[0], out_features=hidden_dims[1])
         self.actor_lif2 = snn.Leaky(beta=actor_config["beta"],
-                                    reset_mechanism=actor_config["reset_mechanism"],
-                                    reset_delay=actor_config["reset_delay"],
-                                    spike_grad=spike_grad,
-                                    learn_beta=True)
-        
-        self.actor_fc3 = nn.Linear(in_features=hidden_dims[1], out_features=hidden_dims[2])
-        self.actor_lif3 = snn.Leaky(beta=actor_config["beta"],
+                                    threshold=lif_threshold,
                                     reset_mechanism=actor_config["reset_mechanism"],
                                     reset_delay=actor_config["reset_delay"],
                                     spike_grad=spike_grad,
                                     learn_beta=True)
 
-        self.action_decoder = SpikeDecoder(input_dim=hidden_dims[2], action_dim=action_dim)
+        self.actor_fc3 = nn.Linear(in_features=hidden_dims[1], out_features=hidden_dims[2])
+        self.actor_lif3 = snn.Leaky(beta=actor_config["beta"],
+                                    threshold=lif_threshold,
+                                    reset_mechanism=actor_config["reset_mechanism"],
+                                    reset_delay=actor_config["reset_delay"],
+                                    spike_grad=spike_grad,
+                                    learn_beta=True)
+
+        self.actor_fc4 = nn.Linear(in_features=hidden_dims[2], out_features=pop_dim_out)
+        self.actor_lif4 = snn.Leaky(beta=actor_config["beta"],
+                                    threshold=lif_threshold,
+                                    reset_mechanism=actor_config["reset_mechanism"],
+                                    reset_delay=actor_config["reset_delay"],
+                                    spike_grad=spike_grad,
+                                    learn_beta=True)
+        self.action_decoder = SpikeDecoder(input_dim=action_dim, action_dim=action_dim, pop_dim=actor_config["encoder"]["pop_dim"])
        
 
     def reset_membranes(self) -> None:
@@ -193,6 +202,7 @@ class PopulationEncodedSpikingActorNetwork(nn.Module):
         self.mem1 = self.actor_lif1.reset_mem()
         self.mem2 = self.actor_lif2.reset_mem()
         self.mem3 = self.actor_lif3.reset_mem()
+        self.mem4 = self.actor_lif4.reset_mem()
 
     
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
@@ -207,9 +217,9 @@ class PopulationEncodedSpikingActorNetwork(nn.Module):
         
         spikes_acc = []
         
+        pop_stimulus = self.pop_encoder(obs)
         for t in range(self.num_steps):
             # Actor network - Encoding layer
-            pop_stimulus = self.pop_encoder(obs)
             in_spks, self.input_mem = self.encoding_neurons(pop_stimulus, self.input_mem)
             
             # Actor network - Layer 1
@@ -224,7 +234,11 @@ class PopulationEncodedSpikingActorNetwork(nn.Module):
             actor_fc3_out = self.actor_fc3(spk2)
             spk3, self.mem3 = self.actor_lif3(actor_fc3_out, self.mem3)
 
-            spikes_acc.append(spk3) # Shape [batch_size, hidden_dims[2]]
+            # Actor network - Layer 4 - Output Population code
+            actor_fc4_out = self.actor_fc4(spk3)
+            spk4, self.mem4 = self.actor_lif4(actor_fc4_out, self.mem4)  #
+
+            spikes_acc.append(spk4) # Shape [batch_size, hidden_dims[2]]
 
         actor_mean_spikes = torch.stack(spikes_acc, dim=0).mean(dim=0)  # Average over time steps, shape [batch_size, hidden_dims[2]]
 

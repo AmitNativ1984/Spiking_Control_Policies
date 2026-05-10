@@ -26,12 +26,12 @@ class NavQuadWithCameraCfg(BaseQuadWithCameraCfg):
             0.0,              # Pitch: -30 deg
             0.0,                  # Yaw:   -180 deg (full 360 coverage of drone-to-target bearing)
             1.0,
-            -0.5,                    # vx: +-0.5 m/s
-            -0.5,                    # vy: +-0.5 m/s
-            -0.3,                    # vz: +-0.3 m/s
-            -0.3,                    # wx: +-0.3 rad/s (~17 deg/s roll rate)
-            -0.3,                    # wy: +-0.3 rad/s (~17 deg/s pitch rate)
-            -0.2,                    # wz: +-0.2 rad/s (~11 deg/s yaw rate)
+            0.0,                    # vx: +-0.5 m/s
+            0.0,                    # vy: +-0.5 m/s
+            0.0,                    # vz: +-0.3 m/s
+            0.0,                    # wx: +-0.3 rad/s (~17 deg/s roll rate)
+            0.0,                    # wy: +-0.3 rad/s (~17 deg/s pitch rate)
+            0.0,                    # wz: +-0.2 rad/s (~11 deg/s yaw rate)
         ]
         max_init_state = [
             0.05,                    # X
