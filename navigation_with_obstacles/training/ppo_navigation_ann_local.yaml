@@ -1,0 +1,90 @@
+params:
+  seed: 42
+  algo:
+    name: a2c_continuous
+
+  model:
+    name: continuous_a2c_logstd
+
+  load_checkpoint: False
+
+  network:
+    name: mlp_actor_critic
+    separate: True
+    space:
+      continuous:
+        mu_activation: None
+        sigma_activation: None
+        mu_init:
+          name: default
+        sigma_init:
+          name: const_initializer
+          val: 0
+        fixed_sigma: True
+    actor:
+      hidden_dims: [256, 256, 64]
+      activation: elu
+    critic: 
+      hidden_dims: [256, 256, 64]
+      activation: elu
+
+  config:
+    name: navigation_with_obstacles
+    env_name: navigation_with_obstacles_task
+    env_config:
+      num_envs: 128
+      headless: True
+      use_warp: True
+
+    # Reward scaling
+    reward_shaper:
+      scale_value: 1.0
+
+    # PPO settings
+    normalize_advantage: True
+    gamma: 0.99
+    tau: 0.95
+    ppo: True
+
+    # Learning rate
+    learning_rate: 1e-4
+    lr_schedule: adaptive
+    kl_threshold: 0.016
+    min_lr: 1e-6
+
+    # Training params
+    save_best_after: 10
+    save_frequency: 50
+    score_to_win: 100000
+    grad_norm: 1.0
+    entropy_coef: 0.001
+    truncate_grads: True
+    e_clip: 0.2
+    clip_value: False
+
+    # Batch settings
+    num_actors: 1024
+    horizon_length: 64
+    minibatch_size: 4096
+    mini_epochs: 4
+    seq_length: 8
+
+    # Value function
+    critic_coef: 2
+    normalize_value: True
+    value_bootstrap: True
+
+    # Input normalization (important for mixed state + VAE latents)
+    normalize_input: True
+
+    # Other settings
+    bounds_loss_coef: 0.0001
+    max_epochs: 1000
+    use_diagnostics: True
+
+    # Player settings (for inference/testing)
+    player:
+      render: True
+      deterministic: True
+      games_num: 100000
+      num_actors: 1

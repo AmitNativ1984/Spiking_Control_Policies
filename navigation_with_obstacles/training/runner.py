@@ -38,7 +38,8 @@ from navigation_with_obstacles.task.navigation_task import (
 from navigation_with_obstacles.config.task_config import task_config
 from navigation_with_obstacles.config.env_config import NavigationObstacleEnvCfg
 from navigation_with_obstacles.config.robot_config import NavQuadWithCameraCfg
-
+from navigation_with_obstacles.networks.ann_mlp_network import MLPActorCriticNetworkBuilder
+from rl_games.algos_torch import model_builder
 
 # =============================================================================
 # Register Custom Environment and Task
@@ -59,7 +60,8 @@ task_registry.register_task(
     task_config,
 )
 
-
+# Register network architecture with rl_games
+model_builder.register_network('mlp_actor_critic', MLPActorCriticNetworkBuilder)
 # =============================================================================
 # RL Games Integration
 # =============================================================================
@@ -112,12 +114,9 @@ class AERIALRLGPUEnv(vecenv.IVecEnv):
     def get_number_of_agents(self):
         return self.env.get_number_of_agents()
 
-    def render(self, mode="human"):
-        """No-op render — Isaac Gym handles its own viewer."""
-        pass
-
     def get_env_info(self):
         """Return observation and action space info for rl_games."""
+        
         info = {}
         info["action_space"] = spaces.Box(
             -np.ones(self.env.task_config.action_space_dim),
