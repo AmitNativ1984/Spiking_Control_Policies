@@ -25,8 +25,8 @@ set -euo pipefail
 
 # --- Configuration (override via environment variables) ---
 CONTAINER_IMAGE="${CONTAINER_IMAGE:-${HOME}/DOCKER_IMAGES/aerial-gym.sqsh}"
-MAX_EPOCHS="${MAX_EPOCHS:-1000}"
 EXPERIMENT="${EXPERIMENT:-nav_ann_gru_cluster}"
+WANDB_PROJECT="${WAND_B_PROJECT:-nav_vae_gru_ann}"
 CONFIG_FILE="${CONFIG_FILE:-navigation_with_obstacles/training/ppo_navigation_ann_gru_cluster.yaml}"
 CHECKPOINT="${CHECKPOINT:-}"  # Path to checkpoint file to resume training (empty = start fresh)
 
