@@ -13,8 +13,8 @@ class MLPActorCriticNetworkBuilder(NetworkBuilder):
         super().__init__(**kwargs)
 
     def load(self, params):
-        """Called when config is loaded - extract MLP params from YAML"""
-        self.config = params.get("network", {})
+        """rl_games calls this with params = the YAML's `network:` block (already unwrapped)."""
+        self.config = params
 
     def build(self, name, **kwargs):
         """Build and return the actual network"""

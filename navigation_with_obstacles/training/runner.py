@@ -38,7 +38,8 @@ from navigation_with_obstacles.task.navigation_task import (
 from navigation_with_obstacles.config.task_config import task_config
 from navigation_with_obstacles.config.env_config import NavigationObstacleEnvCfg
 from navigation_with_obstacles.config.robot_config import NavQuadWithCameraCfg
-from navigation_with_obstacles.networks.ann_mlp_network import MLPActorCriticNetworkBuilder
+from navigation_with_obstacles.networks.ann.ann_mlp_network import MLPActorCriticNetworkBuilder
+from navigation_with_obstacles.networks.ann.mlp_gru_network import GRUActorCriticNetworkBuilder
 from rl_games.algos_torch import model_builder
 
 # =============================================================================
@@ -62,6 +63,8 @@ task_registry.register_task(
 
 # Register network architecture with rl_games
 model_builder.register_network('mlp_actor_critic', MLPActorCriticNetworkBuilder)
+model_builder.register_network('mlp_gru_actor_critic', GRUActorCriticNetworkBuilder)
+
 # =============================================================================
 # RL Games Integration
 # =============================================================================
@@ -163,7 +166,7 @@ def get_args():
         {"name": "--play", "action": "store_true", "help": "Play/test network"},
         {"name": "--checkpoint", "type": str, "help": "Path to checkpoint"},
         {"name": "--file", "type": str, "default": "...", "help": "Path to config"},
-        {"name": "--num_envs", "type": int, "default": 1024, "help": "Num envs"},
+        {"name": "--num_envs", "type": int, "default": None, "help": "Num envs (overrides YAML when set)"},
         {
             "name": "--headless",
             "type": lambda x: bool(strtobool(x)),
@@ -235,10 +238,11 @@ def update_config(config, args):
     config["params"]["config"]["name"] = args["experiment_name"]
 
     config["params"]["config"]["env_config"]["headless"] = args["headless"]
-    config["params"]["config"]["env_config"]["num_envs"] = args["num_envs"]
     config["params"]["config"]["env_config"]["use_warp"] = args["use_warp"]
 
-    if args["num_envs"] > 0:
+    # Only override num_envs / num_actors if --num_envs was explicitly passed.
+    # Otherwise the YAML's values stand.
+    if args.get("num_envs") is not None and args["num_envs"] > 0:
         config["params"]["config"]["num_actors"] = args["num_envs"]
         config["params"]["config"]["env_config"]["num_envs"] = args["num_envs"]
         # Clamp minibatch_size to batch_size so rl_games assertion passes
@@ -297,6 +301,14 @@ if __name__ == "__main__":
         # Ensure rl_games saves tensorboard logs and checkpoints under
         # navigation_with_obstacles/runs/
         config["params"]["config"]["train_dir"] = runs_dir
+
+        # DEBUG: surface the runtime values rl_games will actually use
+        logger.debug(f"[DEBUG] args['num_envs'] = {args.get('num_envs')!r} (type={type(args.get('num_envs')).__name__})")
+        logger.debug(f"[DEBUG] config.num_actors            = {config['params']['config']['num_actors']}")
+        logger.debug(f"[DEBUG] config.env_config.num_envs   = {config['params']['config']['env_config']['num_envs']}")
+        logger.debug(f"[DEBUG] config.horizon_length        = {config['params']['config']['horizon_length']}")
+        logger.debug(f"[DEBUG] config.minibatch_size        = {config['params']['config']['minibatch_size']}")
+        logger.debug(f"[DEBUG] config.seq_length            = {config['params']['config'].get('seq_length')}")
 
         runner = Runner(algo_observer=IsaacAlgoObserver())
         try:
