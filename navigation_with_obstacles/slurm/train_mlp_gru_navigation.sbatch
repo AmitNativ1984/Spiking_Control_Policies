@@ -39,7 +39,7 @@ CHECKPOINT="${CHECKPOINT:-}"  # Path to checkpoint file to resume training (empt
 # --- Paths ---
 # SLURM_SUBMIT_DIR is the directory where sbatch was invoked
 REPO_DIR="${SLURM_SUBMIT_DIR}"
-SCRIPT_DIR="${REPO_DIR}/navigation_with_obstacles/slurm"
+SCRIPT_DIR="${REPO_DIR}/slurm"   # shared .env lives at <repo_root>/slurm/.env
 
 # --- Load W&B API key ---
 ENV_FILE="${SCRIPT_DIR}/.env"
@@ -50,6 +50,13 @@ if [[ -f "${ENV_FILE}" ]]; then
     echo "Loaded environment from ${ENV_FILE}"
 else
     echo "WARNING: ${ENV_FILE} not found. W&B tracking will fail unless WANDB_API_KEY is set."
+fi
+
+# Fail fast on the cluster: --track without an API key will crash 30s in with
+# an unrelated-looking "no-tty" error from wandb. Catch it here instead.
+if [[ -z "${WANDB_API_KEY:-}" ]]; then
+    echo "ERROR: WANDB_API_KEY is not set. Put it in ${ENV_FILE} or unset --track." >&2
+    exit 1
 fi
 
 # --- Print job info ---
