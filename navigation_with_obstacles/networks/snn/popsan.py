@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from .pop_spiking_actor_network import PopulationEncodedSpikingActorNetwork
-from .critic_network import CriticNetwork   
+from navigation_with_obstacles.networks.ann.critic import ANNMLPCritic
 from rl_games.algos_torch.network_builder import NetworkBuilder
 from typing import Tuple
 from navigation_with_obstacles.config.task_config import task_config
@@ -59,7 +59,7 @@ class PopSANActorCriticNetwork(nn.Module):
                                                               obs_bounds=obs_bounds, 
                                                               actor_config=actor_config)
         
-        self.critic = CriticNetwork(obs_dim=obs_dim, critic_config=critic_config)
+        self.critic = ANNMLPCritic(obs_dim=obs_dim, critic_config=critic_config)
 
     def is_rnn(self) -> bool:
         """Required by rl_games: indicates whether the network contains recurrent layers (LSTM/GRU)."""
