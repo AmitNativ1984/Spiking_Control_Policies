@@ -3,3 +3,4 @@ isaacgym/
 .claude/
 __pycache__/
 slurm/.env
+slurm_logs/
