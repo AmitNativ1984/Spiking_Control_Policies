@@ -142,7 +142,10 @@ class NavigationWithObstaclesTask(BaseTask):
 
         # Curriculum setup
         self.curriculum_level = self.task_config.curriculum.min_level
-        self.obs_dict["num_obstacles_in_env"] = self.curriculum_level
+        self.obs_dict["num_obstacles_in_env"] = max(
+            self.curriculum_level,
+            self.sim_env.keep_in_env
+        )
         self.curriculum_progress_fraction = 0.0
 
         # Curriculum tracking aggregates
