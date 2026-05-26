@@ -103,7 +103,7 @@ class task_config:
         "lambda_v": -0.01,         # velocity-goal direction misalignment
         "lambda_bearing": -0.01,           # projection of velocity onto target direction (encourage movement towards target)
         "lambda_path_deviation": -0.005,    # velocity misalignment with target direction (encourage movement towards target)
-        "lambda_jerk": -0.01,      # jerk penalty to encourage smooth control
+        "lambda_jerk": 0.0,      # jerk penalty to encourage smooth control
     }
 
     # Speed threshold for excess speed penalty (m/s)
