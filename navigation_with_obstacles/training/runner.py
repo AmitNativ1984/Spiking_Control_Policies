@@ -42,9 +42,9 @@ from navigation_with_obstacles.task.navigation_task import (
 from navigation_with_obstacles.config.task_config import task_config
 from navigation_with_obstacles.config.env_config import NavigationObstacleEnvCfg
 from navigation_with_obstacles.config.robot_config import NavQuadWithCameraCfg
-from navigation_with_obstacles.networks.popsan import PopSANNetworkBuilder
-from navigation_with_obstacles.networks.ann.ann_mlp_network import MLPActorCriticNetworkBuilder
-from navigation_with_obstacles.networks.ann.mlp_gru_network import GRUActorCriticNetworkBuilder
+from navigation_with_obstacles.networks.snn.popsan import PopSANNetworkBuilder
+from navigation_with_obstacles.networks.ann.actor_critic import MLPActorCriticNetworkBuilder
+from navigation_with_obstacles.networks.ann.gru_actor_critic import GRUActorCriticNetworkBuilder
 from rl_games.algos_torch import model_builder
 
 # =============================================================================
