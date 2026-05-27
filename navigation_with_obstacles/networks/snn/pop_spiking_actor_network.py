@@ -8,45 +8,52 @@ from typing import Tuple
 
 class PopulationSpikeEncoder(nn.Module):
     """ Population encoding module for PopSAN.
-    The input observation is already normalized and bounded [-3, 3] (RL-GAMES normalization).
+    The input observation is already normalized and bounded [-5, 5] (RL-GAMES normalization).
+    POPSAN clamps the normalized observations further to [-3, 3]
     Each dimension of the input observation is encoded into the activity of a population of neurons.
-    Each neuron in the population is modeled as a Gaussian N~(μ, σ) with learnable parameters. After training, 
-    Each neuron stimulates a Gaussian-shaped response in the input space, allowing the network to learn a distributed 
-    representation of the input features.
-
-    The stimulus each neuron is computed over time steps.
+    Each neuron in the population is modeled as a Gaussian N~(μ, σ) with fixed (non-learned)
+    parameters at this training stage — means and stds are registered as buffers.
     """
 
-    def __init__(self, obs_dim:int, obs_bounds: list, encoder_config: dict) -> None:
-        
+    def __init__(self, obs_dim: int, obs_bounds: list, num_steps: int, encoder_config: dict) -> None:
+
         """Initialize the PopulationSpikeEncoder.
-        
+
         Args:
             obs_dim (int): Dimension of the input observation space.
             obs_bounds (list): List of (min, max) tuples for each observation dimension, used for initializing the means and stds of the Gaussian encoding neurons.
-            ts (int): Number of time steps for the spike simulation.
+            num_steps (int): Number of time steps for the spike simulation. Shared with the outer SNN.
+            encoder_config (dict): Encoder configuration (pop_dim, threshold).
         """
 
         super(PopulationSpikeEncoder, self).__init__()
         self.obs_dim =  obs_dim
         self.pop_dim = encoder_config["pop_dim"]
         self.encoder_neuron_num = self.obs_dim * self.pop_dim
+        self.num_steps = num_steps
+        self.threshold = encoder_config["threshold"]
+        
         # Initialize evenly spaced means across the specified range for each input dimension
         spacing = torch.linspace(0, 1, self.pop_dim).unsqueeze(0)  # shape [1, pop_dim]
         self.register_buffer("obs_bounds", torch.tensor(obs_bounds, dtype=torch.float))  # Register as a buffer to ensure it's moved to the correct device with the model
         obs_min = self.obs_bounds[:, 0].unsqueeze(1)  # shape [obs_dim, 1]
         obs_max = self.obs_bounds[:, 1].unsqueeze(1)  # shape [obs_dim, 1]
         obs_range = obs_max - obs_min   # shape [obs_dim, 1]
-        self.means = nn.Parameter((obs_min + spacing * obs_range).unsqueeze(0), requires_grad=True)  # shape [1, obs_dim, pop_dim]
-
+        self.register_buffer("means", (obs_min + spacing * obs_range).unsqueeze(0))  # shape [1, obs_dim, pop_dim]
+        
         # Initialize stds to cover the input range with overlapping Gaussians.
         # We want to make sure that all the range of the input is covered by Gaussian receptive fields,
-        # And inits at least a single spike down the road.
-              
-        delta_mean = self.means[:, :, 1] - self.means[:, :, 0]  # shape [1, obs_dim]
-        init_std = delta_mean / 2.0  # shape [1, obs_dim]
-        self.stds = nn.Parameter(init_std.unsqueeze(2).expand(-1, -1, self.pop_dim).contiguous().clone(), requires_grad=True)  # shape [1, obs_dim, pop_dim]
-
+        # And inits at least a single spike down the road.      
+        means_spacing = torch.abs(self.means[:, :, 1] - self.means[:, :, 0])  # shape [1, obs_dim]
+        init_stds = means_spacing * 0.75  # shape [1, obs_dim]
+        self.register_buffer("stds", init_stds.unsqueeze(2).expand(-1, -1, self.pop_dim).contiguous())  # shape [1, obs_dim, pop_dim]
+        
+        self.if1 = snn.Leaky(beta=1.0,  # no leak => IF neuron
+                            threshold=self.threshold,
+                            spike_grad=surrogate.straight_through_estimator(),   # Passthrough gradient for the non-differentiable spiking function
+                            reset_mechanism="subtract"
+                            )
+        
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         """Encode the input observation into population spike activity.
         
@@ -57,22 +64,27 @@ class PopulationSpikeEncoder(nn.Module):
             obs (torch.Tensor): Input observation tensor of shape [batch_size, obs_dim].
 
         Returns:
-            torch.Tensor: Encoded spike activity tensor of shape [batch_size, encoder_neuron_num, spike_ts].
+            torch.Tensor: Encoded spike activity tensor of shape [batch_size, encoder_neuron_num, num_steps].
         """
 
         batch_size = obs.shape[0]
 
         # Clamp the input observations
-        obs = torch.clamp(obs, self.obs_bounds[:, 0], self.obs_bounds[:, 1])  # shape [batch_size, obs_dim]
+        lo = self.obs_bounds[:, 0]
+        hi = self.obs_bounds[:, 1]
+        obs = torch.clamp(obs, min=lo, max=hi)  # shape [batch_size, obs_dim]
 
         # Expand obs to shape [batch_size, obs_dim, pop_dim]
         obs_expanded = obs.unsqueeze(2).expand(-1, -1, self.pop_dim)
 
-        # Transform the observation values into the stimulation strength for each neuron in the population
-        pop_activity = torch.exp(-0.5 * (obs_expanded - self.means).pow(2) / self.stds.pow(2))  # shape [batch_size, obs_dim, pop_dim]
-        pop_activity = pop_activity.view(batch_size, self.encoder_neuron_num)  # shape [batch_size, obs_dim * pop_dim]
-
-        return pop_activity
+        pop_activity = torch.exp(-0.5 * (obs_expanded - self.means).pow(2) / self.stds.pow(2)).view(batch_size, -1)  # shape [batch_size, obs_dim * pop_dim]
+        pop_spikes = torch.zeros(batch_size, self.obs_dim * self.pop_dim, self.num_steps, device=obs.device)  # shape [batch_size, obs_dim * pop_dim, num_steps]
+        pop_mem = self.if1.reset_mem()
+        for t in range(self.num_steps):
+            spikes, pop_mem = self.if1(pop_activity, pop_mem)  # shape [batch_size, obs_dim * pop_dim]
+            pop_spikes[:, :, t] = spikes
+            
+        return pop_spikes
 
 class SpikeDecoder(nn.Module):
     """ Spike decoder module for PopSAN.
@@ -133,7 +145,7 @@ class PopulationEncodedSpikingActorNetwork(nn.Module):
         assert "hidden_dims" in actor_config, "actor configuration must include 'hidden_dims' key"
         hidden_dims = actor_config["hidden_dims"]
         self.num_steps = actor_config["num_steps"]  # Number of time steps to run the SNN for each input observation
-        self.pop_encoder = PopulationSpikeEncoder(obs_dim, obs_bounds, actor_config["encoder"])
+        self.pop_encoder = PopulationSpikeEncoder(obs_dim, obs_bounds, self.num_steps, actor_config["encoder"])
      
         input_dim = self.pop_encoder.encoder_neuron_num
         pop_dim_out = actor_config["encoder"]["pop_dim"] * action_dim
@@ -148,16 +160,10 @@ class PopulationEncodedSpikingActorNetwork(nn.Module):
         else:
             raise ValueError(f"Unsupported spike_grad: {actor_config['spike_grad']}")
 
-        
-        self.encoding_neurons = snn.Leaky(beta=1.0,  # no leak => IF neuron
-                                        threshold=0.95,
-                                        spike_grad=surrogate.straight_through_estimator(),   # Passthrough gradient for the non-differentiable spiking function
-                                        reset_mechanism="subtract"
-                                        )
-
         # Hidden-layer LIF threshold. Lower threshold (e.g. 0.5) keeps the SNN
         # active at init so gradients can flow to weight matrices; matches the
         # reference PopSAN implementation (vth=0.5).
+        # Note: the encoder owns its own IF layer (pop_encoder.if1); no outer encoding IF layer here.
         lif_threshold = actor_config.get("threshold", 0.5)
 
         self.actor_fc1 = nn.Linear(in_features=input_dim, out_features=hidden_dims[0])
@@ -196,9 +202,8 @@ class PopulationEncodedSpikingActorNetwork(nn.Module):
        
 
     def reset_membranes(self) -> None:
-        """Reset the membrane potentials of all spiking layers."""
-        
-        self.input_mem = self.encoding_neurons.reset_mem()
+        """Reset the membrane potentials of all hidden spiking layers."""
+
         self.mem1 = self.actor_lif1.reset_mem()
         self.mem2 = self.actor_lif2.reset_mem()
         self.mem3 = self.actor_lif3.reset_mem()
@@ -217,13 +222,11 @@ class PopulationEncodedSpikingActorNetwork(nn.Module):
         
         spikes_acc = []
         
-        pop_stimulus = self.pop_encoder(obs)
+        in_pop_spikes = self.pop_encoder(obs)
         for t in range(self.num_steps):
-            # Actor network - Encoding layer
-            in_spks, self.input_mem = self.encoding_neurons(pop_stimulus, self.input_mem)
             
             # Actor network - Layer 1
-            actor_fc1_out = self.actor_fc1(in_spks)
+            actor_fc1_out = self.actor_fc1(in_pop_spikes[:, :, t])
             spk1, self.mem1 = self.actor_lif1(actor_fc1_out, self.mem1)
 
             # Actor network - Layer 2

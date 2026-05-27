@@ -69,7 +69,6 @@ def collect(num_steps: int, num_envs: int, out_dir: str, use_wandb: bool):
 
     # Build task
     task_config.num_envs = num_envs
-    task_config.vae_config.encode_batch_size = num_envs
     task = task_registry.make_task(
         "navigation_with_obstacles_task",
         num_envs=num_envs,

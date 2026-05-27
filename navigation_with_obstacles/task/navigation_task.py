@@ -120,10 +120,7 @@ class NavigationWithObstaclesTask(BaseTask):
             (self.sim_env.num_envs, 4), device=self.device, requires_grad=False
         )
 
-        # VAE encoder for depth images (custom DepthVAE).
-        # Match the encoder batch size to the runtime num_envs (set from YAML),
-        # so the VAE doesn't preallocate buffers for a stale value.
-        self.task_config.vae_config.encode_batch_size = self.task_config.num_envs
+        # VAE encoder for depth images (custom DepthVAE). Encodes all envs in one batch.
         if self.task_config.vae_config.use_vae:
             from vae_depth.vae_image_encoder import DepthVAEImageEncoder
             self.vae_model = DepthVAEImageEncoder(
@@ -480,17 +477,7 @@ class NavigationWithObstaclesTask(BaseTask):
         """Encode depth image through custom DepthVAE to get latent representation."""
         if self.task_config.vae_config.use_vae and self.vae_model is not None:
             image_obs = self.obs_dict["depth_range_pixels"].squeeze(1)
-            # Batch VAE encoding to avoid CUDA OOM on large num_envs
-            batch_size = self.task_config.vae_config.encode_batch_size
-            n = image_obs.shape[0]
-            if n <= batch_size:
-                self.image_latents[:] = self.vae_model.encode(image_obs)
-            else:
-                for start in range(0, n, batch_size):
-                    end = min(start + batch_size, n)
-                    self.image_latents[start:end] = self.vae_model.encode(
-                        image_obs[start:end]
-                    )
+            self.image_latents[:] = self.vae_model.encode(image_obs)
 
     def get_return_tuple(self):
         """Build and return the step/reset output tuple."""

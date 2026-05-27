@@ -35,36 +35,49 @@ class task_config:
     observation_space_dim = 12 + 32
     privileged_observation_space_dim = 0
 
-    # Per-dimension observation bounds — values derived from env_config.py bounds:
-    #   upper_bound_max - lower_bound_min: X=12m, Y=8m, Z=6m
-    # Used for spaces.Box and PopSAN encoder initialization.
-    _max_d_hor  = math.sqrt(12.0**2 + 8.0**2)   # worst-case XY diagonal
-    _max_log_hor  = math.log(_max_d_hor + 1)     # ~2.77
-    _max_log_vert = math.log(6.0 + 1)            # ~1.95
-    _max_log_dist = max(_max_log_hor, _max_log_vert)  # ~2.77
-    _v_max = 10.0                                 # m/s hard ceiling for speed obs bounds
+    # Per-dimension observation bounds for the PopSAN population encoder.
+    #
+    # Bounds are in the rl_games-normalized space (z-scores, hard-clamped to
+    # [-5, 5] by RunningMeanStd when normalize_input=True), NOT raw units.
+    # Tune from tools/collect_obs_stats.py if empirically tighter values help.
+    #
+    # observation_layout is the single source of truth for the 44D vector;
+    # observation_bounds is derived from it below. Editing the layout or the
+    # per-type bounds is enough — no per-index numbers to maintain.
+    observation_layout = [
+        (slice(0, 2),   "log_distance"),        # log(d_hor+1), log(|d_vert|+1) — world
+        (slice(2, 4),   "bearing_azimuth"),     # cos/sin bearing azimuth — world
+        (slice(4, 5),   "elevation_angle"),     # elevation angle to target — world
+        (slice(5, 7),   "yaw"),                 # cos/sin drone yaw — world
+        (slice(7, 8),   "v_xy"),                # horizontal speed — body
+        (slice(8, 9),   "v_z"),                 # vertical speed — body
+        (slice(9, 11),  "track_bearing"),       # cos/sin track azimuth — body (masked)
+        (slice(11, 12), "track_elevation"),     # track elevation — body (masked)
+        (slice(12, 44), "vae_latent"),          # DepthVAE latents
+    ]
 
-    # observation_bounds = (
-    #     [(0.0, _max_log_hor),    # [0]  log(d_hor + 1)
-    #      (0.0, _max_log_vert),   # [1]  log(d_vert + 1)
-    #      (-1.0, 1.0),            # [2]  cos(azimuth to target)
-    #      (-1.0, 1.0),            # [3]  sin(azimuth to target)
-    #      (-math.pi/2, math.pi/2),# [4]  elevation angle to target
-    #      (-1.0, 1.0),            # [5]  cos(drone yaw)
-    #      (-1.0, 1.0),            # [6]  sin(drone yaw)
-    #      (0.0, _v_max),          # [7]  horizontal speed
-    #      (-_v_max, _v_max),      # [8]  vertical speed
-    #      (-1.0, 1.0),            # [9]  cos(track azimuth)
-    #      (-1.0, 1.0),            # [10] sin(track azimuth)
-    #      (-math.pi/2, math.pi/2)]# [11] track elevation
-    #     + [(-3.0, 3.0)] * 32    # [12:44] VAE latents ≈ N(0,1)
-    # )
+    observation_type_bounds = {
+        "log_distance":    (-3.0, 3.0),
+        "bearing_azimuth": (-3.0, 3.0),
+        "elevation_angle": (-3.0, 3.0),
+        "yaw":             (-3.0, 3.0),
+        "v_xy":            (-3.0, 3.0),
+        "v_z":             (-3.0, 3.0),
+        "track_bearing":   (-3.0, 3.0),
+        "track_elevation": (-3.0, 3.0),
+        "vae_latent":      (-3.0, 3.0),
+    }
 
-    # Following PopSAN paper, 
-    # we use symmetric bounds for all obs dimensions
-    observation_bounds = (
-        [(-3, 3)] * 44      
-    )
+    # Expand layout + per-type bounds into a flat per-index list of (min, max).
+    # Runs once at class-definition time; consumed by popsan.py via
+    # task_config.observation_bounds.
+    observation_bounds = [None] * observation_space_dim
+    for obj_slice, obj_type in observation_layout:
+        lo, hi = observation_type_bounds[obj_type]
+        for idx in range(obj_slice.start, obj_slice.stop):
+            observation_bounds[idx] = (lo, hi)
+    assert all(b is not None for b in observation_bounds), \
+        "observation_layout has gaps — every index in [0, observation_space_dim) must be covered"
 
     # Action space: [accel_x, accel_y, accel_z, yaw_rate]
     action_space_dim = 4
@@ -72,6 +85,9 @@ class task_config:
     # Action scaling: network outputs [-1, 1], scaled to physical units
     max_accel = 2.0              # m/s² per axis (symmetric: [-max, +max])
     max_yaw_rate = math.pi / 3  # rad/s (~60 deg/s, symmetric: [-max, +max])
+    
+    # Speed threshold for excess speed penalty (m/s)
+    v_max = 5.0
 
     # Episode length
     episode_len_steps = 50
@@ -105,10 +121,7 @@ class task_config:
         "lambda_path_deviation": -0.005,    # velocity misalignment with target direction (encourage movement towards target)
         "lambda_jerk": 0.0,      # jerk penalty to encourage smooth control
     }
-
-    # Speed threshold for excess speed penalty (m/s)
-    v_max = 5.0
-
+    
     class vae_config:
         """Custom 32D DepthVAE configuration."""
         use_vae = True
@@ -125,7 +138,6 @@ class task_config:
         max_depth_m = 7.0
         min_depth_m = 0.1
         sensor_max_range = 10.0
-        encode_batch_size = 1024  # VAE inference batch size — single batch on A100 40GB
 
     class curriculum:
         """
@@ -160,5 +172,3 @@ class task_config:
         return processed
 
 
-# vae_config.encode_batch_size is set at runtime in NavigationWithObstaclesTask.__init__,
-# once task_config.num_envs has been populated from the YAML.

@@ -17,6 +17,7 @@ params:
       actor:
         encoder:
           pop_dim: 10
+          threshold: 0.5                   # Activation threshold for the population encoding layer (matches PopSAN reference vth=0.5)
         
         num_steps: 5                         # Number of SNN simulation timesteps per forward pass
         hidden_dims: [256, 256, 256]           # Hidden layer dimensions (matches MLP architecture)
