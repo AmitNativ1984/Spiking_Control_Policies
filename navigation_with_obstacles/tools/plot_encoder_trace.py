@@ -41,9 +41,9 @@ def plot_encoder_trace(encoder, trace, observation_layout, save_dir=None):
 
     T = obs_all.shape[0]
     pop_dim = encoder.pop_dim
-    means = encoder.means.detach().cpu().numpy().squeeze(0)        # [obs_dim, pop_dim]
-    stds  = encoder.stds.detach().cpu().numpy().squeeze(0)         # [obs_dim, pop_dim]
-    bounds = encoder.obs_bounds.detach().cpu().numpy()             # [obs_dim, 2]
+    means = encoder.means.detach().cpu().numpy().squeeze(0)                          # [obs_dim, pop_dim]
+    stds  = torch.exp(encoder.log_stds).detach().cpu().numpy().squeeze(0)            # [obs_dim, pop_dim]
+    bounds = encoder.obs_bounds.detach().cpu().numpy()                               # [obs_dim, 2]
 
     # Build the list of state-only dims (skip VAE).
     state_dims = []   # list of (dim_index, type_name)

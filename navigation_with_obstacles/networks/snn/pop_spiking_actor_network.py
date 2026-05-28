@@ -11,8 +11,7 @@ class PopulationSpikeEncoder(nn.Module):
     The input observation is already normalized and bounded [-5, 5] (RL-GAMES normalization).
     POPSAN clamps the normalized observations further to [-3, 3]
     Each dimension of the input observation is encoded into the activity of a population of neurons.
-    Each neuron in the population is modeled as a Gaussian N~(μ, σ) with fixed (non-learned)
-    parameters at this training stage — means and stds are registered as buffers.
+    Each neuron in the population is modeled as a Gaussian N~(μ, σ). The mean μ is initialized to be evenly spaced across the input range [-3, 3] and is learnable. The standard deviation σ is initialized to cover the input space with overlapping Gaussians and is also learnable.
     """
 
     def __init__(self, obs_dim: int, obs_bounds: list, num_steps: int, encoder_config: dict) -> None:
@@ -39,14 +38,16 @@ class PopulationSpikeEncoder(nn.Module):
         obs_min = self.obs_bounds[:, 0].unsqueeze(1)  # shape [obs_dim, 1]
         obs_max = self.obs_bounds[:, 1].unsqueeze(1)  # shape [obs_dim, 1]
         obs_range = obs_max - obs_min   # shape [obs_dim, 1]
-        self.register_buffer("means", (obs_min + spacing * obs_range).unsqueeze(0))  # shape [1, obs_dim, pop_dim]
+        self.means = nn.Parameter((obs_min + spacing * obs_range).unsqueeze(0)) # shape [1, obs_dim, pop_dim]
         
         # Initialize stds to cover the input range with overlapping Gaussians.
         # We want to make sure that all the range of the input is covered by Gaussian receptive fields,
         # And inits at least a single spike down the road.      
         means_spacing = torch.abs(self.means[:, :, 1] - self.means[:, :, 0])  # shape [1, obs_dim]
         init_stds = means_spacing * 0.75  # shape [1, obs_dim]
-        self.register_buffer("stds", init_stds.unsqueeze(2).expand(-1, -1, self.pop_dim).contiguous())  # shape [1, obs_dim, pop_dim]
+        init_log_stds = torch.log(init_stds.unsqueeze(2).expand(-1, -1, self.pop_dim).contiguous())  # shape [1, obs_dim, pop_dim]
+        
+        self.log_stds = nn.Parameter(init_log_stds)  # Learnable log standard deviations, shape [1, obs_dim, pop_dim]
         
         self.if1 = snn.Leaky(beta=1.0,  # no leak => IF neuron
                             threshold=self.threshold,
@@ -81,8 +82,8 @@ class PopulationSpikeEncoder(nn.Module):
 
         # Expand obs to shape [batch_size, obs_dim, pop_dim]
         obs_expanded = obs.unsqueeze(2).expand(-1, -1, self.pop_dim)
-
-        pop_activity = torch.exp(-0.5 * (obs_expanded - self.means).pow(2) / self.stds.pow(2)).view(batch_size, -1)  # shape [batch_size, obs_dim * pop_dim]
+        stds = torch.exp(self.log_stds)  # shape [1, obs_dim, pop_dim]
+        pop_activity = torch.exp(-0.5 * (obs_expanded - self.means).pow(2) / stds.pow(2)).view(batch_size, -1)  # shape [batch_size, obs_dim * pop_dim]
         pop_spikes = torch.zeros(batch_size, self.obs_dim * self.pop_dim, self.num_steps, device=obs.device)  # shape [batch_size, obs_dim * pop_dim, num_steps]
         pop_mem = self.if1.reset_mem()
         for t in range(self.num_steps):
