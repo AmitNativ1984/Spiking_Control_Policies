@@ -53,6 +53,11 @@ class PopulationSpikeEncoder(nn.Module):
                             spike_grad=surrogate.straight_through_estimator(),   # Passthrough gradient for the non-differentiable spiking function
                             reset_mechanism="subtract"
                             )
+
+        # Debug-only: when record=True, forward() appends per-step traces to _trace.
+        # Set externally (e.g. by tools/runner during --play --plot-encoding). Inert otherwise.
+        self.record = False
+        self._trace = []
         
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         """Encode the input observation into population spike activity.
@@ -83,7 +88,14 @@ class PopulationSpikeEncoder(nn.Module):
         for t in range(self.num_steps):
             spikes, pop_mem = self.if1(pop_activity, pop_mem)  # shape [batch_size, obs_dim * pop_dim]
             pop_spikes[:, :, t] = spikes
-            
+
+        if self.record:
+            self._trace.append({
+                "obs": obs.detach().cpu(),                                                    # [B, obs_dim]
+                "pop_activity": pop_activity.detach().cpu().view(batch_size, self.obs_dim, self.pop_dim),
+                "pop_spikes": pop_spikes.detach().cpu(),                                      # [B, obs_dim*pop_dim, num_steps]
+            })
+
         return pop_spikes
 
 class SpikeDecoder(nn.Module):

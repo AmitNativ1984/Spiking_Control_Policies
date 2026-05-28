@@ -84,7 +84,7 @@ params:
 
     # Player settings (for inference/testing)
     player:
-      render: True
+      render: False
       deterministic: True
       games_num: 100000
       num_actors: 1

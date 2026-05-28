@@ -226,6 +226,11 @@ def get_args():
             "default": None,
             "help": "Out-of-bounds margin multiplier (e.g. 1.5 = 50%% beyond bounds before termination)",
         },
+        {
+            "name": "--plot-encoding",
+            "action": "store_true",
+            "help": "Debug: when combined with --play, record PopSAN encoder activations and plot at end. Forces num_envs=1.",
+        },
     ]
     args = parse_arguments(
         description="Navigation with Obstacles",
@@ -301,6 +306,13 @@ if __name__ == "__main__":
     logger.info(f"Headless: {args['headless']}")
     logger.info(f"Use warp: {args['use_warp']}")
 
+    # Debug-only: --play --plot-encoding records the encoder during a single-env rollout
+    # and plots Gaussian receptive fields + spike rasters at the end.
+    plot_encoding = bool(args.get("play") and args.get("plot_encoding"))
+    if plot_encoding:
+        logger.warning("--plot-encoding set: forcing num_envs=1 for clean single-trajectory plots")
+        args["num_envs"] = 1
+
     with open(config_name, "r") as stream:
         config = yaml.safe_load(stream)
         config = update_config(config, args)
@@ -337,6 +349,43 @@ if __name__ == "__main__":
     logger.info(
         "Starting training..." if args.get("train") else "Starting playback..."
     )
+
+    if plot_encoding:
+        # Wrap run_play: enable recording on the encoder right after player construction,
+        # plot once the play loop returns. Confined to the --plot-encoding branch.
+        orig_run_play = runner.run_play
+
+        def run_play_with_recording(args_):
+            print("Started to play (with encoder recording)")
+            player = runner.create_player()
+            from rl_games.torch_runner import _restore, _override_sigma
+            _restore(player, args_)
+            _override_sigma(player, args_)
+
+            # rl_games wraps the raw network in a ModelA2C*.Network at player.model,
+            # which exposes the underlying network as `.a2c_network`. For PopSAN that's
+            # PopSANActorCriticNetwork → .snn_actor → .pop_encoder.
+            encoder = player.model.a2c_network.snn_actor.pop_encoder
+            encoder.record = True
+            encoder._trace = []
+            logger.info(f"[plot-encoding] encoder recording enabled on {type(encoder).__name__}")
+            try:
+                player.run()
+            except KeyboardInterrupt:
+                logger.info("[plot-encoding] play loop interrupted by user — proceeding to plot")
+            finally:
+                encoder.record = False
+                logger.info(f"[plot-encoding] play loop finished, recorded {len(encoder._trace)} forward passes")
+                try:
+                    from navigation_with_obstacles.tools.plot_encoder_trace import plot_encoder_trace
+                    plot_encoder_trace(encoder, encoder._trace, task_config.observation_layout)
+                except Exception:
+                    import traceback
+                    logger.error("[plot-encoding] plot helper raised — full traceback below")
+                    traceback.print_exc()
+
+        runner.run_play = run_play_with_recording
+
     runner.run(args)
 
     if args["track"] and rank == 0:

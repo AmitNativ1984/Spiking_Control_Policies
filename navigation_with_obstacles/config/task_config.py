@@ -107,9 +107,9 @@ class task_config:
     # Reward parameters
     reward_parameters = {
         # Terminal rewards
-        "arrive_bonus_min": 5.0,        # arrival reward at curriculum level 0 (easy)
-        "arrive_bonus_max": 10.0,        # arrival reward at max curriculum level (hard)
-        "collision_penalty": -2.0,     # obstacle collision termination
+        "arrive_bonus_min": 10.0,        # arrival reward at curriculum level 0 (easy)
+        "arrive_bonus_max": 15.0,        # arrival reward at max curriculum level (hard)
+        "collision_penalty": -15.0,     # obstacle collision termination
         "exceed_penalty": -20.0,        # out-of-bounds termination
         "timeout_penalty": -10.0,          # episode timeout termination
         "d_min": 0.4,                   # arrival distance threshold (meters)

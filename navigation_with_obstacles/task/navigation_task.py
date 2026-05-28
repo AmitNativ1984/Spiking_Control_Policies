@@ -163,6 +163,7 @@ class NavigationWithObstaclesTask(BaseTask):
         self.logged_success_rate = 0.0
         self.logged_crash_rate = 0.0
         self.logged_exceed_rate = 0.0
+        self.logged_timeout_rate = 0.0
 
         # EMA reward components for tensorboard (horizon-independent).
         # IsaacAlgoObserver overwrites direct_info each step and only logs the
@@ -423,6 +424,7 @@ class NavigationWithObstaclesTask(BaseTask):
         self.infos["success_rate"] = self.logged_success_rate
         self.infos["crash_rate"] = self.logged_crash_rate
         self.infos["exceed_rate"] = self.logged_exceed_rate
+        self.infos["timeout_rate"] = self.logged_timeout_rate
 
         # Reward components (EMA across steps, horizon-independent)
         self.infos["reward/r_dist_hor"] = self._reward_comp_ema["r_dist_hor"]
@@ -591,6 +593,7 @@ class NavigationWithObstaclesTask(BaseTask):
             self.logged_success_rate = float(success_rate)
             self.logged_crash_rate = float(crash_rate)
             self.logged_exceed_rate = float(exceed_rate)
+            self.logged_timeout_rate = float(timeout_rate)
 
             if success_rate > self.task_config.curriculum.success_rate_for_increase:
                 self.curriculum_level += self.task_config.curriculum.increase_step
