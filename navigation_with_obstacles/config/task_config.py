@@ -90,7 +90,7 @@ class task_config:
     v_max = 5.0
 
     # Episode length
-    episode_len_steps = 100
+    episode_len_steps = 300
 
     return_state_before_reset = False
 
