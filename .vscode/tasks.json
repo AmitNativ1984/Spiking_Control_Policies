@@ -113,9 +113,8 @@
             "command": "python",
             "args": [
                 "-m", "navigation_with_obstacles.training.runner",
-                "--file=navigation_with_obstacles/training/ppo_navigation.yaml",
+                "--file=navigation_with_obstacles/training/ppo_navigation_ann_local.yaml",
                 "--train",
-                "--num_envs=1024",
                 "--headless=True"
             ],
             "options": {
@@ -132,7 +131,6 @@
                 "-m", "navigation_with_obstacles.training.runner",
                 "--file=navigation_with_obstacles/training/ppo_navigation.yaml",
                 "--train",
-                "--num_envs=1024",
                 "--headless=True",
                 "--checkpoint=${input:navCheckpoint}"
             ],

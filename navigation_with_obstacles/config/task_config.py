@@ -90,7 +90,7 @@ class task_config:
     v_max = 5.0
 
     # Episode length
-    episode_len_steps = 50
+    episode_len_steps = 100
 
     return_state_before_reset = False
 
@@ -109,7 +109,7 @@ class task_config:
         # Terminal rewards
         "arrive_bonus_min": 10.0,        # arrival reward at curriculum level 0 (easy)
         "arrive_bonus_max": 15.0,        # arrival reward at max curriculum level (hard)
-        "collision_penalty": -15.0,     # obstacle collision termination
+        "collision_penalty": -20.0,     # obstacle collision termination
         "exceed_penalty": -20.0,        # out-of-bounds termination
         "timeout_penalty": -10.0,          # episode timeout termination
         "d_min": 0.4,                   # arrival distance threshold (meters)
