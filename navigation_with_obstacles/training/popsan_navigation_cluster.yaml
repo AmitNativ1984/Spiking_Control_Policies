@@ -17,22 +17,24 @@ params:
       actor:
         encoder:
           pop_dim: 10
+          threshold: 0.5                   # Activation threshold for the population encoding layer (matches PopSAN reference vth=0.5)
         
         num_steps: 5                         # Number of SNN simulation timesteps per forward pass
-        hidden_dims: [256, 128, 64]           # Hidden layer dimensions (matches MLP architecture)
-        beta: 0.999                           # Membrane potential decay factor (0 = no memory, 1 = perfect memory)
+        hidden_dims: [256, 256, 256]           # Hidden layer dimensions (matches MLP architecture)
+        beta: 0.9                           # Membrane potential decay factor (0 = no memory, 1 = perfect memory)
+        threshold: 0.5                        # LIF firing threshold for hidden/output populations (matches PopSAN reference vth=0.5)
         spike_grad: fast_sigmoid               # Surrogate gradient function for backprop (fast_sigmoid is more stable)
         reset_mechanism: subtract             # Reset mechanism after spike: "subtract" or "zero"
         reset_delay: False                    # Whether to delay reset by one timestep
 
       critic:
-        hidden_dims: [256, 128, 64]           # Hidden layer dimensions (matches MLP architecture)
+        hidden_dims: [256, 256, 256]           # Hidden layer dimensions (matches MLP architecture)
 
   config:
     name: navigation_with_obstacles
     env_name: navigation_with_obstacles_task
     env_config:
-      num_envs: 4096
+      num_envs: 1024
       headless: True
       use_warp: True
 
@@ -57,15 +59,15 @@ params:
     save_frequency: 50
     score_to_win: 100000
     grad_norm: 1.0
-    entropy_coef: 0.001
+    entropy_coef: 0.01
     truncate_grads: True
     e_clip: 0.2
     clip_value: False
 
     # Batch settings
-    num_actors: 4096
+    num_actors: 1024
     horizon_length: 64
-    minibatch_size: 32768
+    minibatch_size: 4096
     mini_epochs: 4
 
     # Value function
@@ -82,7 +84,7 @@ params:
 
     # Player settings (for inference/testing)
     player:
-      render: True
+      render: False
       deterministic: True
       games_num: 100000
       num_actors: 1
