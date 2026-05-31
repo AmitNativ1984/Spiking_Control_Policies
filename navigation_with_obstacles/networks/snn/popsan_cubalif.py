@@ -1,14 +1,14 @@
 import torch
 import torch.nn as nn
-from .pop_spiking_lif_actor_network import PopulationEncodedSpikingActorNetwork
+from .pop_spiking_cubalif_actor_network import PopulationEncodedCubaLifSpikingActorNetwork
 from navigation_with_obstacles.networks.ann.critic import ANNMLPCritic
 from rl_games.algos_torch.network_builder import NetworkBuilder
 from typing import Tuple
 from navigation_with_obstacles.config.task_config import task_config
 
 
-class PopSANNetworkBuilder(NetworkBuilder):
-    """rl_games NetworkBuilder for PopSANActorCriticNetwork."""
+class PopSANCubaLifNetworkBuilder(NetworkBuilder):
+    """rl_games NetworkBuilder for PopSANCubaLifActorCriticNetwork."""
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -23,7 +23,7 @@ class PopSANNetworkBuilder(NetworkBuilder):
     def build(self, name, **kwargs):
         """Build and return the actual network """
 
-        return PopSANActorCriticNetwork(
+        return PopSANCubaLifActorCriticNetwork(
             obs_dim=kwargs["input_shape"][0],
             action_dim=kwargs["actions_num"],
             obs_bounds=self.obs_bounds,
@@ -33,7 +33,7 @@ class PopSANNetworkBuilder(NetworkBuilder):
 
 
 
-class PopSANActorCriticNetwork(nn.Module):
+class PopSANCubaLifActorCriticNetwork(nn.Module):
     """Combined Actor-Critic Network for PopSAN.
     
     This class encapsulates both the spiking actor network and the non-spiking critic network.
@@ -52,9 +52,9 @@ class PopSANActorCriticNetwork(nn.Module):
             critic_config (dict): Configuration dictionary for the critic network.
         """
 
-        super(PopSANActorCriticNetwork, self).__init__()
+        super(PopSANCubaLifActorCriticNetwork, self).__init__()
 
-        self.snn_actor = PopulationEncodedSpikingActorNetwork(obs_dim=obs_dim, 
+        self.snn_actor = PopulationEncodedCubaLifSpikingActorNetwork(obs_dim=obs_dim, 
                                                               action_dim=action_dim, 
                                                               obs_bounds=obs_bounds, 
                                                               actor_config=actor_config)

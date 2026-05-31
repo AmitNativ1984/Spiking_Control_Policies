@@ -81,8 +81,14 @@ FROM aerial_gym AS dev
 
 RUN pip install \
     loguru \
-    snntorch \
     wandb
+
+# snntorch 0.9.4 fixes the Synaptic.forward bug (self.syn was assigned from mem
+# instead of syn in <=0.9.1, corrupting 2nd-order CUBA-LIF dynamics). 0.9.4 tags
+# requires_python>=3.9, but it contains no 3.8-incompatible syntax and imports +
+# runs cleanly on this image's Python 3.8 (verified), so we bypass the metadata
+# gate. --no-deps keeps the NVIDIA-tuned torch in this base image untouched.
+RUN pip install --ignore-requires-python --no-deps snntorch==0.9.4
 
 CMD ["bash"]
 

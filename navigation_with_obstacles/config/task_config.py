@@ -111,11 +111,11 @@ class task_config:
         "arrive_bonus_max": 15.0,        # arrival reward at max curriculum level (hard)
         "collision_penalty": -20.0,     # obstacle collision termination
         "exceed_penalty": -20.0,        # out-of-bounds termination
-        "timeout_penalty": -10.0,          # episode timeout termination
+        "timeout_penalty": -2.0,          # episode timeout termination
         "d_min": 0.4,                   # arrival distance threshold (meters)
         # Progress reward (dense shaping, all lambda < 0)
-        "lambda_d": -0.01,           # distance to target (horizontal + vertical)
-        "lambda_dz": -0.01,          # vertical distance to target (encourage altitude adjustments)
+        "lambda_d": -0.1,           # distance to target (horizontal + vertical)
+        "lambda_dz": -0.1,          # vertical distance to target (encourage altitude adjustments)
         "lambda_v": -0.01,         # velocity-goal direction misalignment
         "lambda_bearing": -0.01,           # projection of velocity onto target direction (encourage movement towards target)
         "lambda_path_deviation": -0.005,    # velocity misalignment with target direction (encourage movement towards target)
