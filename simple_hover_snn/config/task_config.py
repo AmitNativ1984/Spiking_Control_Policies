@@ -36,6 +36,17 @@ class task_config:
     # Body Angular Velocity (3): [wx, wy, wz]
     observation_space_dim = 13
 
+    # Per-dimension labels for the 13D observation vector. Used only by the
+    # PopSAN encoder-trace debug plot (tools/plot_encoder_trace.py) to title
+    # each row; mirrors the (slice, type_name) format used by the navigation
+    # task. There is no "vae_latent" here, so every dim is plotted.
+    observation_layout = [
+        (slice(0, 3),   "pos_error"),    # target - robot_position (x, y, z)
+        (slice(3, 7),   "orientation"),  # quaternion (qx, qy, qz, qw)
+        (slice(7, 10),  "body_linvel"),  # body linear velocity (vx, vy, vz)
+        (slice(10, 13), "body_angvel"),  # body angular velocity (wx, wy, wz)
+    ]
+
     # Action space dim (network output): [thrust_cmd, roll_cmd, pitch_cmd, yaw_rate_cmd]
     # Matches LeeAttitudeController expected format directly
     action_space_dim = 4

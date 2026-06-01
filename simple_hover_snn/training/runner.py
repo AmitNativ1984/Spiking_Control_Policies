@@ -235,6 +235,7 @@ def get_args():
         {"name": "--wandb-project-name", "type": str, "default": "aerial_gym_snn", "help": "Wandb project name"},
         {"name": "--wandb-entity", "type": str, "default": None, "help": "Wandb entity (team)"},
         {"name": "--mlp_checkpoint", "type": str, "default": None, "help": "Path to MLP checkpoint to transfer weights from (for SNN training)"},
+        {"name": "--plot-encoding", "action": "store_true", "help": "Debug: when combined with --play, record PopSAN encoder activations and plot at end (encoder_trace_*.png). Forces num_envs=1."},
     ]
     args = parse_arguments(description="Simple Hover SNN Task", custom_parameters=custom_parameters)
     args.sim_device_id = args.compute_device_id
@@ -295,6 +296,15 @@ if __name__ == "__main__":
     # Parse arguments
     args = vars(get_args())
     config_name = args["file"]
+
+    # Debug-only: --play --plot-encoding records the PopSAN encoder during a
+    # single-env rollout and plots Gaussian receptive fields + spike rasters at
+    # the end (encoder_trace_*.png). Force num_envs=1 BEFORE update_config writes
+    # it into the config, so we get one clean trajectory.
+    plot_encoding = bool(args.get("play") and args.get("plot_encoding"))
+    if plot_encoding:
+        logger.warning("--plot-encoding set: forcing num_envs=1 for clean single-trajectory plots")
+        args["num_envs"] = 1
 
     logger.info(f"Loading config: {config_name}")
     logger.info(f"Number of environments: {args['num_envs']}")
@@ -394,6 +404,53 @@ if __name__ == "__main__":
             return result
 
         A2CAgent.init_tensors = patched_init_model_with_transfer
+
+    if plot_encoding:
+        # Wrap run_play: enable recording on the encoder right after player
+        # construction, plot once the play loop returns. Mirrors the
+        # navigation_with_obstacles runner. The PopSAN network here is
+        # POPSANNetwork with the encoder directly at `.pop_encoder` (no
+        # `.snn_actor` wrapper), so the attribute path differs from navigation.
+        orig_run_play = runner.run_play
+
+        def run_play_with_recording(args_):
+            logger.info("Started to play (with encoder recording)")
+            player = runner.create_player()
+            from rl_games.torch_runner import _restore, _override_sigma
+            _restore(player, args_)
+            _override_sigma(player, args_)
+
+            # rl_games wraps the raw network in a ModelA2C*.Network at
+            # player.model, exposing it as `.a2c_network` -> POPSANNetwork.
+            encoder = player.model.a2c_network.pop_encoder
+            encoder.record = True
+            encoder._trace = []
+            logger.info(f"[plot-encoding] encoder recording enabled on {type(encoder).__name__}")
+            try:
+                player.run()
+            except KeyboardInterrupt:
+                logger.info("[plot-encoding] play loop interrupted by user — proceeding to plot")
+            finally:
+                encoder.record = False
+                logger.info(f"[plot-encoding] play loop finished, recorded {len(encoder._trace)} forward passes")
+                try:
+                    from navigation_with_obstacles.tools.plot_encoder_trace import plot_encoder_trace
+                    # Save under the same runs/ directory the simple_hover_snn
+                    # experiments use (the runner's train_dir), not the plot
+                    # helper's default (navigation_with_obstacles/runs/).
+                    runs_dir = os.path.abspath("runs")
+                    plot_encoder_trace(
+                        encoder,
+                        encoder._trace,
+                        task_config.observation_layout,
+                        save_dir=runs_dir,
+                    )
+                except Exception:
+                    import traceback
+                    logger.error("[plot-encoding] plot helper raised — full traceback below")
+                    traceback.print_exc()
+
+        runner.run_play = run_play_with_recording
 
     runner.run(args)
 

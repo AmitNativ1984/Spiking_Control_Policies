@@ -19,6 +19,23 @@
             "group": "build"
         },
         {
+            "label": "Train Hover PopSAN",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "simple_hover_snn/training/runner.py",
+                "--file=simple_hover_snn/training/ppo_hover_popsan.yaml",
+                "--train",
+                "--num_envs=2048",
+                "--headless=True"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "group": "build"
+        },
+        {
             "label": "Train MLP (with checkpoint)",
             "type": "shell",
             "command": "python",
@@ -106,6 +123,43 @@
             },
             "problemMatcher": [],
             "group": "test"
+        },
+        {
+            "label": "Play Hover PopSAN",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "simple_hover_snn/training/runner.py",
+                "--file=simple_hover_snn/training/ppo_hover_popsan.yaml",
+                "--play",
+                "--num_envs=64",
+                "--headless=False",
+                "--checkpoint=${input:snnCheckpoint}"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "group": "build"
+        },
+                {
+            "label": "PLOT ENCODING Hover PopSAN",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "simple_hover_snn/training/runner.py",
+                "--file=simple_hover_snn/training/ppo_hover_popsan.yaml",
+                "--play",
+                "--num_envs=64",
+                "--headless=False",
+                "--plot-encoding",
+                "--checkpoint=${input:snnCheckpoint}"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "group": "build"
         },
         {
             "label": "Train Navigation VAE ANN",
