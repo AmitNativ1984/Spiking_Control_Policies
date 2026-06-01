@@ -10,7 +10,7 @@ class SpikeDecoder(nn.Module):
     This module takes the latent spike activity from the last hidden layer of the actor SNN and decodes it into the parameters of the action distribution (e.g. mean and std for Gaussian policy).
     """
 
-    def __init__(self, input_dim: int, action_dim: int, pop_dim: int) -> None:
+    def __init__(self, action_dim: int, pop_dim: int) -> None:
         """Initialize the SpikeDecoder.
         
         Args:
@@ -23,23 +23,23 @@ class SpikeDecoder(nn.Module):
 
         self.action_dim = action_dim
         self.pop_dim = pop_dim
-        self.decoder = nn.Conv1d(in_channels=input_dim, 
+        self.decoder = nn.Conv1d(in_channels=action_dim, 
                                  out_channels=action_dim, 
                                  kernel_size=pop_dim,
-                                 groups=action_dim)  # Depthwise convolution to decode each action dimension from its corresponding population code
+                                 groups=action_dim)  # Shape: [batch_size, action_dim, 1] after decoding - one value per action dimension
         self.log_std = nn.Parameter(torch.zeros(action_dim))
 
     def forward(self, mean_spikes: torch.Tensor) -> torch.Tensor:
         """Decode the latent spike activity into action distribution parameters.
         
         Args:
-            latent_mean_spikes (torch.Tensor): Input latent mean spike activity tensor of shape [batch_size, input_dim].
+            mean_spikes(torch.Tensor): Tensor of shape [batch_size, action_dim, pop_dim]
         Returns:
             torch.Tensor: Action distribution parameters tensor of shape [batch_size, action_dim].
         """
 
-        x = mean_spikes.view(-1, self.action_dim, self.pop_dim)  # Reshape to [batch_size, action_dim, pop_dim]
-        action_mu = self.decoder(x).view(-1, self.action_dim)  # Decode and reshape to [batch_size, action_dim]
-        action_log_std = self.log_std.expand_as(action_mu)  # Expand log std to match action_mu shape
+        
+        action_mu = self.decoder(mean_spikes).squeeze(-1)  # Shape: [batch_size, action_dim]
+        action_log_std = self.log_std.expand_as(action_mu)
         return action_mu, action_log_std
     
