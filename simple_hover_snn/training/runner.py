@@ -16,6 +16,8 @@ import yaml
 import shutil
 import numpy as np
 from datetime import datetime
+
+from simple_hover_snn.networks.popsan_network import POPSANNetworkBuilder
 sys.path.insert(0, "/workspaces/aerial_gym_docker")
 import wandb
 import torch
@@ -64,6 +66,7 @@ task_registry.register_task("simple_hover_snn_task",
 # Register both network types (choose via YAML config)
 model_builder.register_network('snn_actor_critic', SNNNetworkBuilder)
 model_builder.register_network('mlp_actor_critic', MLPNetworkBuilder)
+model_builder.register_network('PopSAN', POPSANNetworkBuilder)
 
 # =============================================================================
 # Monkey Patch: Simplify Checkpoint Naming (Remove Reward Suffix)
@@ -182,6 +185,7 @@ class AERIALRLGPUEnv(vecenv.IVecEnv):
 def create_hover_task(**kwargs):
     """Create task, extracting reward_params to pass directly to HoverSNNTask."""
     reward_params = kwargs.pop("reward_params", None)
+    success_rate_window_episodes = kwargs.pop("success_rate_window_episodes", None)
     task = task_registry.make_task("simple_hover_snn_task", **kwargs)
     # If reward_params provided, override the task's reward parameters
     if reward_params is not None:
@@ -189,6 +193,10 @@ def create_hover_task(**kwargs):
             if key in task.task_config.reward_parameters:
                 task.task_config.reward_parameters[key] = torch.tensor([value], device=task.device)
                 logger.info(f"Reward param override: {key} = {value}")
+    # Override the windowed success-rate buffer size if provided via YAML
+    if success_rate_window_episodes is not None:
+        task.set_success_rate_window(int(success_rate_window_episodes))
+        logger.info(f"Success rate window episodes = {success_rate_window_episodes}")
     return task
 
 # Register task with rl_games env_configurations
@@ -241,6 +249,17 @@ def update_config(config, args):
     # Use experiment name from config if not provided via CLI
     if args["experiment_name"] is not None:
         config["params"]["config"]["name"] = args["experiment_name"]
+
+    # Build the run folder name with a FULL timestamp (year-month-day_hour-min-sec).
+    # rl_games' default only uses "_%d-%H-%M-%S" (no year/month), so runs can
+    # collide across months. Setting full_experiment_name overrides rl_games'
+    # naming entirely (see a2c_common.py: full_experiment_name short-circuits the
+    # default timestamped name). The run dir becomes runs/<full_experiment_name>.
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    config["params"]["config"]["full_experiment_name"] = (
+        f"{config['params']['config']['name']}_{timestamp}"
+    )
+
     config["params"]["config"]["env_config"]["headless"] = args["headless"]
     config["params"]["config"]["env_config"]["num_envs"] = args["num_envs"]
     config["params"]["config"]["env_config"]["use_warp"] = args["use_warp"]
@@ -248,6 +267,11 @@ def update_config(config, args):
     # Pass reward parameters from YAML to env_config (will be picked up by task)
     if "reward_params" in config["params"]["config"]:
         config["params"]["config"]["env_config"]["reward_params"] = config["params"]["config"]["reward_params"]
+
+    # Pass windowed success-rate window size from YAML to env_config (picked up by task)
+    if "success_rate_window_episodes" in config["params"]["config"]:
+        config["params"]["config"]["env_config"]["success_rate_window_episodes"] = \
+            config["params"]["config"]["success_rate_window_episodes"]
 
     if args["num_envs"] > 0:
         config["params"]["config"]["num_actors"] = args["num_envs"]

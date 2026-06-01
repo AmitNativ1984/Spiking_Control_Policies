@@ -190,6 +190,20 @@ class HoverSNNTask(BaseTask):
         self.total_successes = 0  # Total number of successful episode completions
         self.total_episodes = 0   # Total number of episodes completed (success or failure)
 
+        # Windowed success rate: rolling buffer of the last N completed-episode
+        # outcomes (1.0 = success, 0.0 = failure). success_rate over the window
+        # = mean of the filled portion of the buffer.
+        self.success_rate_window_episodes = int(
+            getattr(self.task_config, "success_rate_window_episodes", 4096)
+        )
+        self.success_window = torch.zeros(
+            self.success_rate_window_episodes,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        self.success_window_ptr = 0      # next write index (circular)
+        self.success_window_filled = 0   # number of valid entries (<= window size)
+
         # Episode step counter for each environment
         self.episode_steps = torch.zeros(
             self.num_envs,
@@ -218,6 +232,55 @@ class HoverSNNTask(BaseTask):
         self.sim_env.delete_env()
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
+
+    def set_success_rate_window(self, num_episodes):
+        """
+        (Re)allocate the windowed success-rate buffer.
+
+        Used to override the window size from the YAML config after the task
+        is constructed. Resets any accumulated window statistics.
+
+        Args:
+            num_episodes: Number of most-recent completed episodes to average over.
+        """
+        self.success_rate_window_episodes = int(num_episodes)
+        self.success_window = torch.zeros(
+            self.success_rate_window_episodes,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        self.success_window_ptr = 0
+        self.success_window_filled = 0
+
+    def _record_episode_outcomes(self, outcomes):
+        """
+        Append per-episode outcomes (1.0 success / 0.0 failure) into the rolling
+        success-rate window (circular buffer).
+
+        Args:
+            outcomes: 1D float tensor, one entry per completed episode this step.
+        """
+        n = outcomes.numel()
+        if n == 0:
+            return
+        window_size = self.success_rate_window_episodes
+        # If more episodes complete this step than the window holds, keep only
+        # the most recent `window_size` of them.
+        if n >= window_size:
+            self.success_window[:] = outcomes[-window_size:]
+            self.success_window_ptr = 0
+            self.success_window_filled = window_size
+            return
+        ptr = self.success_window_ptr
+        end = ptr + n
+        if end <= window_size:
+            self.success_window[ptr:end] = outcomes
+        else:
+            first = window_size - ptr
+            self.success_window[ptr:] = outcomes[:first]
+            self.success_window[: end - window_size] = outcomes[first:]
+        self.success_window_ptr = end % window_size
+        self.success_window_filled = min(self.success_window_filled + n, window_size)
 
     def reset(self):
         """
@@ -308,11 +371,26 @@ class HoverSNNTask(BaseTask):
             torch.zeros_like(self.success_counter)
         )
 
-        # Mark as truncated (success) if held position for required steps
-        # Note: We use truncations instead of terminations because
-        # post_reward_calculation_step() only checks truncations for reset
+        # Success = held position within threshold for the required # of steps.
+        # Success TERMINATES the episode (truncation). This is safe now that the
+        # per-step time penalty (-k_time) exceeds the per-step hover bonus
+        # ceiling (k_hover < k_time), so loitering is net-negative: the agent can
+        # no longer profit by hovering well while avoiding the success condition.
+        # Succeeding quickly and ending the episode (with success_bonus) is the
+        # reward-optimal behavior, re-coupling reward with the success metric.
         success = self.success_counter >= self.task_config.success_hold_steps
         num_successes = success.sum().item()
+
+        # One-time terminal success bonus, awarded the step success is first met.
+        # The success_achieved latch ensures it is awarded once per episode; it
+        # is reset to 0 in reset()/reset_idx(), so it re-arms each episode.
+        newly_successful = success.bool() & (self.success_achieved < 0.5)
+        self.rewards = self.rewards + newly_successful.float() * self.task_config.success_bonus
+        # Latch: mark envs that have achieved success at any point this episode.
+        self.success_achieved = torch.where(success.bool(), 1.0, self.success_achieved)
+
+        # Terminate on success (use truncations: post_reward_calculation_step()
+        # resets envs whose truncation flag is set).
         self.truncations[:] = torch.where(
             success,
             torch.ones_like(self.truncations),
@@ -329,22 +407,42 @@ class HoverSNNTask(BaseTask):
             timeout, 1, self.truncations
         )
 
-        # Track cumulative statistics before reset
-        # Count episodes that will be reset (either success, crash, or timeout)
+        # One-time timeout penalty for episodes that hit the time limit WITHOUT
+        # ever achieving success. Mirrors the crash penalty so that crashing to
+        # escape the per-step time penalty is not a profitable shortcut (giving
+        # up ends with a comparable terminal cost whether by crash or timeout).
+        # Computed from the success_achieved latch before reset_idx() clears it.
+        timeout_failure = timeout.bool() & (self.success_achieved < 0.5)
+        self.rewards = self.rewards - timeout_failure.float() * self.task_config.timeout_penalty
+
+        # Track statistics before reset.
+        # Episodes end on success, crash, or timeout. An episode counts as a
+        # success if the hover-hold condition was achieved at any point during it
+        # -> use the success_achieved latch, captured here before reset_idx()
+        # clears it (the latch is set this same step when success fires).
         will_reset = (self.terminations | self.truncations).bool()
         num_resets = will_reset.sum().item()
 
-        # Track average episode length for successful episodes
+        # Per-episode success outcome (1.0 if the episode ever achieved success).
+        episode_success = self.success_achieved.bool()
+
+        # Record per-episode outcomes into the rolling success-rate window.
+        if num_resets > 0:
+            episode_outcomes = episode_success[will_reset].float()
+            self._record_episode_outcomes(episode_outcomes)
+
+        # Track average episode length for episodes that succeeded and are
+        # resetting this step (steps elapsed up to crash/timeout).
         avg_success_steps = 0.0
-        if num_successes > 0:
-            # Get episode lengths for successful environments
-            success_mask = success.bool()
-            successful_episode_lengths = self.episode_steps[success_mask]
+        successful_resets_mask = episode_success & will_reset
+        num_successful_episodes = successful_resets_mask.sum().item()
+        if num_successful_episodes > 0:
+            successful_episode_lengths = self.episode_steps[successful_resets_mask]
             avg_success_steps = successful_episode_lengths.float().mean().item()
 
         if num_resets > 0:
             self.total_episodes += num_resets
-            self.total_successes += num_successes
+            self.total_successes += num_successful_episodes
 
         reset_envs = self.sim_env.post_reward_calculation_step()
         if len(reset_envs) > 0:
@@ -355,17 +453,29 @@ class HoverSNNTask(BaseTask):
         # Calculate success rate (percentage of completed episodes that were successful)
         success_rate = (self.total_successes / self.total_episodes * 100.0) if self.total_episodes > 0 else 0.0
 
+        # Windowed success rate: fraction of the last N completed episodes that
+        # were successful (percentage). N = success_rate_window_episodes.
+        if self.success_window_filled > 0:
+            success_rate_window = (
+                self.success_window[: self.success_window_filled].mean().item() * 100.0
+            )
+        else:
+            success_rate_window = 0.0
+
         # Log metrics for tensorboard (IsaacAlgoObserver logs scalar values from infos)
         self.infos = {
             # Instantaneous metrics (per step)
-            "successes": num_successes,           # Number of successful completions this step
+            "successes": num_successes,           # Envs currently holding the success condition this step
             "timeouts": num_timeouts,             # Number of timeouts this step
-            "avg_success_episode_length": avg_success_steps,  # Avg steps to success (for successes this step)
+            "avg_success_episode_length": avg_success_steps,  # Avg episode length of successful episodes resetting this step
 
             # Cumulative metrics (over entire training run)
-            "total_successes": self.total_successes,  # Total successful completions
+            "total_successes": self.total_successes,  # Total episodes that achieved success
             "total_episodes": self.total_episodes,    # Total episodes completed
-            "success_rate": success_rate,             # Success rate percentage (successes/total_episodes)
+            "success_rate": success_rate,             # Success rate percentage (successful episodes / total episodes)
+
+            # Windowed metric: success rate over the last N completed episodes
+            "success_rate_window": success_rate_window,  # Logged as success_rate_window/iter, /frame, /time
         }
 
         if not self.task_config.return_state_before_reset:
@@ -486,6 +596,10 @@ def compute_reward(
     5. Hover bonus: +k_hover * exp(-||vel|| / vel_scale) when dist < threshold
        - Rewards being near goal with low velocity (exponential decay, no hard cutoff)
     6. Crash penalty: -k_crash (one-time)
+    7. Time penalty: -k_time every (non-crash) step
+       - Constant per-step cost. With k_hover < k_time, loitering is net-negative,
+         so the agent is pushed to achieve hover quickly and end the episode on
+         success rather than farm the hover bonus.
 
     Optimal behavior: approach goal quickly, then stabilize with level attitude,
     minimal rotation, minimal velocity, and smooth control.
@@ -503,6 +617,7 @@ def compute_reward(
     vel_scale_hover = parameter_dict["vel_scale_hover"][0]
     k_crash = parameter_dict["k_crash"][0]
     max_distance = parameter_dict["max_distance"][0]
+    k_time = parameter_dict["k_time"][0]
 
     # Current distance to target
     curr_dist = torch.norm(pos_error, dim=1)
@@ -578,7 +693,7 @@ def compute_reward(
     R_total = torch.where(
         crashes > 0.0,
         -k_crash * torch.ones_like(curr_dist),
-        -k_dist * curr_dist + R_progress - R_tilt - R_angvel - R_jitter + R_hover
+        -k_dist * curr_dist + R_progress - R_tilt - R_angvel - R_jitter + R_hover - k_time
     )
 
     # Update prev_dist for next step (return as output)
