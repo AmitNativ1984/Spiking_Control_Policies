@@ -81,7 +81,9 @@ class POPSANNetwork(nn.Module):
         self.pop_dim = snn_config["pop_dim"]
         
         self.pop_encoder = PopulationSpikeEncoder(obs_dim=input_dim, 
-                                                obs_bounds=[(-1.0, 1.0)] * input_dim,
+                                                obs_bounds=[
+                                                    (-3.0, 3.0) * input_dim
+                                                ],
                                                 num_steps=self.num_steps,
                                                 encoder_config=snn_config["encoder"])
         
