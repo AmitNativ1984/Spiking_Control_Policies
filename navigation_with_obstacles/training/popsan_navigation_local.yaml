@@ -1,0 +1,90 @@
+params:
+  seed: 42
+  
+  algo:
+    name: a2c_continuous
+  
+  model:
+    name: continuous_a2c_logstd
+
+  load_checkpoint: False
+
+  network:
+      name: PopSAN                  # Custom SNN network (registered in runner.py)
+      device: cuda
+
+      # SNN-specific configuration
+      actor:
+        encoder:
+          pop_dim: 10
+          threshold: 0.5                   # Activation threshold for the population encoding layer (matches PopSAN reference vth=0.5)
+        
+        num_steps: 5                         # Number of SNN simulation timesteps per forward pass
+        hidden_dims: [256, 256, 256]           # Hidden layer dimensions (matches MLP architecture)
+        beta: 0.9                           # Membrane potential decay factor (0 = no memory, 1 = perfect memory)
+        threshold: 0.5                        # LIF firing threshold for hidden/output populations (matches PopSAN reference vth=0.5)
+        spike_grad: fast_sigmoid               # Surrogate gradient function for backprop (fast_sigmoid is more stable)
+        reset_mechanism: subtract             # Reset mechanism after spike: "subtract" or "zero"
+        reset_delay: False                    # Whether to delay reset by one timestep
+
+      critic:
+        hidden_dims: [256, 256, 256]           # Hidden layer dimensions (matches MLP architecture)
+
+  config:
+    name: navigation_with_obstacles
+    env_name: navigation_with_obstacles_task
+    env_config:
+      num_envs: 256
+      headless: True
+      use_warp: True
+
+    # Reward scaling
+    reward_shaper:
+      scale_value: 1.0
+
+    # PPO settings
+    normalize_advantage: True
+    gamma: 0.99
+    tau: 0.95
+    ppo: True
+
+    # Learning rate
+    learning_rate: 1e-4
+    lr_schedule: adaptive
+    kl_threshold: 0.016
+    min_lr: 1e-6
+
+    # Training params
+    save_best_after: 10
+    save_frequency: 50
+    score_to_win: 100000
+    grad_norm: 1.0
+    entropy_coef: 0.01
+    truncate_grads: True
+    e_clip: 0.2
+    clip_value: False
+
+    # Batch settings
+    num_actors: 256
+    horizon_length: 128
+    minibatch_size: 512
+    mini_epochs: 4
+
+    # Value function
+    critic_coef: 2
+    normalize_value: True
+    value_bootstrap: True
+
+    normalize_input: True   # RL-GAMES normalization of observations
+
+    # Other settings
+    bounds_loss_coef: 0.0001
+    max_epochs: 1000
+    use_diagnostics: True
+
+    # Player settings (for inference/testing)
+    player:
+      render: False
+      deterministic: True
+      games_num: 100000
+      num_actors: 1

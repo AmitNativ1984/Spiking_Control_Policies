@@ -19,6 +19,23 @@
             "group": "build"
         },
         {
+            "label": "Train Hover PopSAN",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "simple_hover_snn/training/runner.py",
+                "--file=simple_hover_snn/training/ppo_hover_popsan.yaml",
+                "--train",
+                "--num_envs=2048",
+                "--headless=True"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "group": "build"
+        },
+        {
             "label": "Train MLP (with checkpoint)",
             "type": "shell",
             "command": "python",
@@ -108,15 +125,86 @@
             "group": "test"
         },
         {
+            "label": "Play Hover PopSAN",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "simple_hover_snn/training/runner.py",
+                "--file=simple_hover_snn/training/ppo_hover_popsan.yaml",
+                "--play",
+                "--num_envs=64",
+                "--headless=False",
+                "--checkpoint=${input:snnCheckpoint}"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "group": "build"
+        },
+                {
+            "label": "PLOT ENCODING Hover PopSAN",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "simple_hover_snn/training/runner.py",
+                "--file=simple_hover_snn/training/ppo_hover_popsan.yaml",
+                "--play",
+                "--num_envs=64",
+                "--headless=False",
+                "--plot-encoding",
+                "--checkpoint=${input:snnCheckpoint}"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "group": "build"
+        },
+        {
             "label": "Train Navigation VAE ANN",
             "type": "shell",
             "command": "python",
             "args": [
                 "-m", "navigation_with_obstacles.training.runner",
-                "--file=navigation_with_obstacles/training/ppo_navigation.yaml",
+                "--file=navigation_with_obstacles/training/ppo_navigation_ann_local.yaml",
                 "--train",
-                "--num_envs=1024",
                 "--headless=True"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "group": "build"
+        },
+        {
+            "label": "Train Navigation POPSAN",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "-m", "navigation_with_obstacles.training.runner",
+                "--file=navigation_with_obstacles/training/popsan_cubalif_navigation_local.yaml",
+                "--train",
+                "--headless=True"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "group": "build"
+        },
+        {
+            "label": "Play Navigation POPSAN",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "-m", "navigation_with_obstacles.training.runner",
+                "--file=navigation_with_obstacles/training/popsan_cubalif_navigation_local.yaml",
+                "--play",
+                "--num_envs=1",
+                "--plot-encoding",
+                "--checkpoint=${input:navCheckpoint}",
+                "--headless=False"
             ],
             "options": {
                 "cwd": "${workspaceFolder}"
@@ -132,7 +220,6 @@
                 "-m", "navigation_with_obstacles.training.runner",
                 "--file=navigation_with_obstacles/training/ppo_navigation.yaml",
                 "--train",
-                "--num_envs=1024",
                 "--headless=True",
                 "--checkpoint=${input:navCheckpoint}"
             ],

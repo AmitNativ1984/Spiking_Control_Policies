@@ -33,7 +33,8 @@ class NavigationObstacleEnvCfg:
         env_spacing = 5.0
 
         # Physics simulation
-        num_physics_steps_per_env_step_mean = 10
+        # simulation dt is fixed at 0.01s in the sim config; (can be changed)
+        num_physics_steps_per_env_step_mean = 10 # 100msec = 10Hz control policy rate
         num_physics_steps_per_env_step_std = 1
 
         # Rendering

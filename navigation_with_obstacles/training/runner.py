@@ -11,10 +11,13 @@ Usage:
 """
 import isaacgym
 import argparse
+import logging
 import os
 import sys
 import yaml
 import numpy as np
+
+logging.getLogger("asset_manager").setLevel(logging.ERROR)
 
 sys.path.insert(0, "/workspaces/aerial_gym_docker")
 import wandb
@@ -25,6 +28,7 @@ from loguru import logger
 from rl_games.common import env_configurations, vecenv
 from rl_games.common.algo_observer import IsaacAlgoObserver
 from rl_games.torch_runner import Runner
+
 
 from aerial_gym.registry.task_registry import task_registry
 from aerial_gym.registry.env_registry import env_config_registry
@@ -38,12 +42,14 @@ from navigation_with_obstacles.task.navigation_task import (
 from navigation_with_obstacles.config.task_config import task_config
 from navigation_with_obstacles.config.env_config import NavigationObstacleEnvCfg
 from navigation_with_obstacles.config.robot_config import NavQuadWithCameraCfg
-from navigation_with_obstacles.networks.ann.ann_mlp_network import MLPActorCriticNetworkBuilder
-from navigation_with_obstacles.networks.ann.mlp_gru_network import GRUActorCriticNetworkBuilder
+from navigation_with_obstacles.networks.snn.popsan import PopSANNetworkBuilder
+from navigation_with_obstacles.networks.snn.popsan_cubalif import PopSANCubaLifNetworkBuilder
+from navigation_with_obstacles.networks.ann.actor_critic import MLPActorCriticNetworkBuilder
+from navigation_with_obstacles.networks.ann.gru_actor_critic import GRUActorCriticNetworkBuilder
 from rl_games.algos_torch import model_builder
 
 # =============================================================================
-# Register Custom Environment and Task
+# Register Custom Environment, Task, and Networks
 # =============================================================================
 
 # Register environment configuration
@@ -61,7 +67,9 @@ task_registry.register_task(
     task_config,
 )
 
-# Register network architecture with rl_games
+# Register custom SNN network builder with rl_games
+model_builder.register_network("PopSAN", PopSANNetworkBuilder)
+model_builder.register_network("PopSAN_CubaLif", PopSANCubaLifNetworkBuilder)
 model_builder.register_network('mlp_actor_critic', MLPActorCriticNetworkBuilder)
 model_builder.register_network('mlp_gru_actor_critic', GRUActorCriticNetworkBuilder)
 
@@ -220,6 +228,11 @@ def get_args():
             "default": None,
             "help": "Out-of-bounds margin multiplier (e.g. 1.5 = 50%% beyond bounds before termination)",
         },
+        {
+            "name": "--plot-encoding",
+            "action": "store_true",
+            "help": "Debug: when combined with --play, record PopSAN encoder activations and plot at end. Forces num_envs=1.",
+        },
     ]
     args = parse_arguments(
         description="Navigation with Obstacles",
@@ -295,6 +308,13 @@ if __name__ == "__main__":
     logger.info(f"Headless: {args['headless']}")
     logger.info(f"Use warp: {args['use_warp']}")
 
+    # Debug-only: --play --plot-encoding records the encoder during a single-env rollout
+    # and plots Gaussian receptive fields + spike rasters at the end.
+    plot_encoding = bool(args.get("play") and args.get("plot_encoding"))
+    if plot_encoding:
+        logger.warning("--plot-encoding set: forcing num_envs=1 for clean single-trajectory plots")
+        args["num_envs"] = 1
+
     with open(config_name, "r") as stream:
         config = yaml.safe_load(stream)
         config = update_config(config, args)
@@ -331,6 +351,43 @@ if __name__ == "__main__":
     logger.info(
         "Starting training..." if args.get("train") else "Starting playback..."
     )
+
+    if plot_encoding:
+        # Wrap run_play: enable recording on the encoder right after player construction,
+        # plot once the play loop returns. Confined to the --plot-encoding branch.
+        orig_run_play = runner.run_play
+
+        def run_play_with_recording(args_):
+            print("Started to play (with encoder recording)")
+            player = runner.create_player()
+            from rl_games.torch_runner import _restore, _override_sigma
+            _restore(player, args_)
+            _override_sigma(player, args_)
+
+            # rl_games wraps the raw network in a ModelA2C*.Network at player.model,
+            # which exposes the underlying network as `.a2c_network`. For PopSAN that's
+            # PopSANActorCriticNetwork → .snn_actor → .pop_encoder.
+            encoder = player.model.a2c_network.snn_actor.pop_encoder
+            encoder.record = True
+            encoder._trace = []
+            logger.info(f"[plot-encoding] encoder recording enabled on {type(encoder).__name__}")
+            try:
+                player.run()
+            except KeyboardInterrupt:
+                logger.info("[plot-encoding] play loop interrupted by user — proceeding to plot")
+            finally:
+                encoder.record = False
+                logger.info(f"[plot-encoding] play loop finished, recorded {len(encoder._trace)} forward passes")
+                try:
+                    from navigation_with_obstacles.tools.plot_encoder_trace import plot_encoder_trace
+                    plot_encoder_trace(encoder, encoder._trace, task_config.observation_layout)
+                except Exception:
+                    import traceback
+                    logger.error("[plot-encoding] plot helper raised — full traceback below")
+                    traceback.print_exc()
+
+        runner.run_play = run_play_with_recording
+
     runner.run(args)
 
     if args["track"] and rank == 0:

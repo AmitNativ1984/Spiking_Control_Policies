@@ -22,10 +22,10 @@ params:
           val: 0
         fixed_sigma: True
     actor:
-      hidden_dims: [256, 256, 64]
+      hidden_dims: [256, 256, 256]
       activation: elu
     critic: 
-      hidden_dims: [256, 256, 64]
+      hidden_dims: [256, 256, 256]
       activation: elu
 
   config:
@@ -63,9 +63,9 @@ params:
     clip_value: False
 
     # Batch settings
-    num_actors: 1024
+    num_actors: 256
     horizon_length: 64
-    minibatch_size: 4096
+    minibatch_size: 512
     mini_epochs: 4
     seq_length: 8
 
@@ -84,7 +84,7 @@ params:
 
     # Player settings (for inference/testing)
     player:
-      render: True
+      render: False
       deterministic: True
       games_num: 100000
       num_actors: 1
