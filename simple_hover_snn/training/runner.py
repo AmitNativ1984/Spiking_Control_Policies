@@ -16,6 +16,8 @@ import yaml
 import shutil
 import numpy as np
 from datetime import datetime
+
+from simple_hover_snn.networks.popsan_network import POPSANNetworkBuilder
 sys.path.insert(0, "/workspaces/aerial_gym_docker")
 import wandb
 import torch
@@ -64,6 +66,7 @@ task_registry.register_task("simple_hover_snn_task",
 # Register both network types (choose via YAML config)
 model_builder.register_network('snn_actor_critic', SNNNetworkBuilder)
 model_builder.register_network('mlp_actor_critic', MLPNetworkBuilder)
+model_builder.register_network('PopSAN', POPSANNetworkBuilder)
 
 # =============================================================================
 # Monkey Patch: Simplify Checkpoint Naming (Remove Reward Suffix)
@@ -182,6 +185,7 @@ class AERIALRLGPUEnv(vecenv.IVecEnv):
 def create_hover_task(**kwargs):
     """Create task, extracting reward_params to pass directly to HoverSNNTask."""
     reward_params = kwargs.pop("reward_params", None)
+    success_rate_window_episodes = kwargs.pop("success_rate_window_episodes", None)
     task = task_registry.make_task("simple_hover_snn_task", **kwargs)
     # If reward_params provided, override the task's reward parameters
     if reward_params is not None:
@@ -189,6 +193,10 @@ def create_hover_task(**kwargs):
             if key in task.task_config.reward_parameters:
                 task.task_config.reward_parameters[key] = torch.tensor([value], device=task.device)
                 logger.info(f"Reward param override: {key} = {value}")
+    # Override the windowed success-rate buffer size if provided via YAML
+    if success_rate_window_episodes is not None:
+        task.set_success_rate_window(int(success_rate_window_episodes))
+        logger.info(f"Success rate window episodes = {success_rate_window_episodes}")
     return task
 
 # Register task with rl_games env_configurations
@@ -227,6 +235,7 @@ def get_args():
         {"name": "--wandb-project-name", "type": str, "default": "aerial_gym_snn", "help": "Wandb project name"},
         {"name": "--wandb-entity", "type": str, "default": None, "help": "Wandb entity (team)"},
         {"name": "--mlp_checkpoint", "type": str, "default": None, "help": "Path to MLP checkpoint to transfer weights from (for SNN training)"},
+        {"name": "--plot-encoding", "action": "store_true", "help": "Debug: when combined with --play, record PopSAN encoder activations and plot at end (encoder_trace_*.png). Forces num_envs=1."},
     ]
     args = parse_arguments(description="Simple Hover SNN Task", custom_parameters=custom_parameters)
     args.sim_device_id = args.compute_device_id
@@ -241,6 +250,17 @@ def update_config(config, args):
     # Use experiment name from config if not provided via CLI
     if args["experiment_name"] is not None:
         config["params"]["config"]["name"] = args["experiment_name"]
+
+    # Build the run folder name with a FULL timestamp (year-month-day_hour-min-sec).
+    # rl_games' default only uses "_%d-%H-%M-%S" (no year/month), so runs can
+    # collide across months. Setting full_experiment_name overrides rl_games'
+    # naming entirely (see a2c_common.py: full_experiment_name short-circuits the
+    # default timestamped name). The run dir becomes runs/<full_experiment_name>.
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    config["params"]["config"]["full_experiment_name"] = (
+        f"{config['params']['config']['name']}_{timestamp}"
+    )
+
     config["params"]["config"]["env_config"]["headless"] = args["headless"]
     config["params"]["config"]["env_config"]["num_envs"] = args["num_envs"]
     config["params"]["config"]["env_config"]["use_warp"] = args["use_warp"]
@@ -248,6 +268,11 @@ def update_config(config, args):
     # Pass reward parameters from YAML to env_config (will be picked up by task)
     if "reward_params" in config["params"]["config"]:
         config["params"]["config"]["env_config"]["reward_params"] = config["params"]["config"]["reward_params"]
+
+    # Pass windowed success-rate window size from YAML to env_config (picked up by task)
+    if "success_rate_window_episodes" in config["params"]["config"]:
+        config["params"]["config"]["env_config"]["success_rate_window_episodes"] = \
+            config["params"]["config"]["success_rate_window_episodes"]
 
     if args["num_envs"] > 0:
         config["params"]["config"]["num_actors"] = args["num_envs"]
@@ -271,6 +296,15 @@ if __name__ == "__main__":
     # Parse arguments
     args = vars(get_args())
     config_name = args["file"]
+
+    # Debug-only: --play --plot-encoding records the PopSAN encoder during a
+    # single-env rollout and plots Gaussian receptive fields + spike rasters at
+    # the end (encoder_trace_*.png). Force num_envs=1 BEFORE update_config writes
+    # it into the config, so we get one clean trajectory.
+    plot_encoding = bool(args.get("play") and args.get("plot_encoding"))
+    if plot_encoding:
+        logger.warning("--plot-encoding set: forcing num_envs=1 for clean single-trajectory plots")
+        args["num_envs"] = 1
 
     logger.info(f"Loading config: {config_name}")
     logger.info(f"Number of environments: {args['num_envs']}")
@@ -370,6 +404,53 @@ if __name__ == "__main__":
             return result
 
         A2CAgent.init_tensors = patched_init_model_with_transfer
+
+    if plot_encoding:
+        # Wrap run_play: enable recording on the encoder right after player
+        # construction, plot once the play loop returns. Mirrors the
+        # navigation_with_obstacles runner. The PopSAN network here is
+        # POPSANNetwork with the encoder directly at `.pop_encoder` (no
+        # `.snn_actor` wrapper), so the attribute path differs from navigation.
+        orig_run_play = runner.run_play
+
+        def run_play_with_recording(args_):
+            logger.info("Started to play (with encoder recording)")
+            player = runner.create_player()
+            from rl_games.torch_runner import _restore, _override_sigma
+            _restore(player, args_)
+            _override_sigma(player, args_)
+
+            # rl_games wraps the raw network in a ModelA2C*.Network at
+            # player.model, exposing it as `.a2c_network` -> POPSANNetwork.
+            encoder = player.model.a2c_network.pop_encoder
+            encoder.record = True
+            encoder._trace = []
+            logger.info(f"[plot-encoding] encoder recording enabled on {type(encoder).__name__}")
+            try:
+                player.run()
+            except KeyboardInterrupt:
+                logger.info("[plot-encoding] play loop interrupted by user — proceeding to plot")
+            finally:
+                encoder.record = False
+                logger.info(f"[plot-encoding] play loop finished, recorded {len(encoder._trace)} forward passes")
+                try:
+                    from navigation_with_obstacles.tools.plot_encoder_trace import plot_encoder_trace
+                    # Save under the same runs/ directory the simple_hover_snn
+                    # experiments use (the runner's train_dir), not the plot
+                    # helper's default (navigation_with_obstacles/runs/).
+                    runs_dir = os.path.abspath("runs")
+                    plot_encoder_trace(
+                        encoder,
+                        encoder._trace,
+                        task_config.observation_layout,
+                        save_dir=runs_dir,
+                    )
+                except Exception:
+                    import traceback
+                    logger.error("[plot-encoding] plot helper raised — full traceback below")
+                    traceback.print_exc()
+
+        runner.run_play = run_play_with_recording
 
     runner.run(args)
 

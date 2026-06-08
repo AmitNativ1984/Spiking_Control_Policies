@@ -43,6 +43,7 @@ from navigation_with_obstacles.config.task_config import task_config
 from navigation_with_obstacles.config.env_config import NavigationObstacleEnvCfg
 from navigation_with_obstacles.config.robot_config import NavQuadWithCameraCfg
 from navigation_with_obstacles.networks.snn.popsan import PopSANNetworkBuilder
+from navigation_with_obstacles.networks.snn.popsan_cubalif import PopSANCubaLifNetworkBuilder
 from navigation_with_obstacles.networks.ann.actor_critic import MLPActorCriticNetworkBuilder
 from navigation_with_obstacles.networks.ann.gru_actor_critic import GRUActorCriticNetworkBuilder
 from rl_games.algos_torch import model_builder
@@ -68,6 +69,7 @@ task_registry.register_task(
 
 # Register custom SNN network builder with rl_games
 model_builder.register_network("PopSAN", PopSANNetworkBuilder)
+model_builder.register_network("PopSAN_CubaLif", PopSANCubaLifNetworkBuilder)
 model_builder.register_network('mlp_actor_critic', MLPActorCriticNetworkBuilder)
 model_builder.register_network('mlp_gru_actor_critic', GRUActorCriticNetworkBuilder)
 

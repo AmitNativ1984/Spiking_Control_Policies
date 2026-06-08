@@ -36,18 +36,51 @@ class task_config:
     # Body Angular Velocity (3): [wx, wy, wz]
     observation_space_dim = 13
 
+    # Per-dimension labels for the 13D observation vector. Used only by the
+    # PopSAN encoder-trace debug plot (tools/plot_encoder_trace.py) to title
+    # each row; mirrors the (slice, type_name) format used by the navigation
+    # task. There is no "vae_latent" here, so every dim is plotted.
+    observation_layout = [
+        (slice(0, 3),   "pos_error"),    # target - robot_position (x, y, z)
+        (slice(3, 7),   "orientation"),  # quaternion (qx, qy, qz, qw)
+        (slice(7, 10),  "body_linvel"),  # body linear velocity (vx, vy, vz)
+        (slice(10, 13), "body_angvel"),  # body angular velocity (wx, wy, wz)
+    ]
+
     # Action space dim (network output): [thrust_cmd, roll_cmd, pitch_cmd, yaw_rate_cmd]
     # Matches LeeAttitudeController expected format directly
     action_space_dim = 4
 
     # Episode length
-    episode_len_steps = 800  # 30 seconds per episode (600 * 0.05s)
+    # Shortened 800 -> 400 (20s) to bound the accumulated per-step time penalty
+    # so giving-up-via-crash is not a profitable escape (still >> the 3s hold
+    # needed for success). See k_time / timeout_penalty below.
+    episode_len_steps = 400  # 20 seconds per episode (400 * 0.05s)
     return_state_before_reset = False
 
     # Success condition: hover at target for 3 seconds
     success_threshold = 0.10      # Distance threshold (meters) - 10cm
     success_hold_duration = 3.0   # Time to hold position (seconds)
     success_hold_steps = 60       # = success_hold_duration / env_step_dt (0.05s)
+
+    # One-time terminal reward when the hover-hold success condition fires
+    # (held within success_threshold for success_hold_steps). Applied in the
+    # task's step() against the authoritative `success` flag, so it directly
+    # rewards the exact success event and keeps reward correlated with the
+    # success metric. Success also terminates the episode, so this is the
+    # dominant terminal positive signal.
+    success_bonus = 100.0
+
+    # One-time terminal penalty when an episode ends in timeout WITHOUT ever
+    # achieving success. Mirrors the crash penalty so that "give up and crash to
+    # stop the per-step time penalty" is not a profitable escape: crashing and
+    # timing-out end with a comparable terminal cost. Applied in step().
+    timeout_penalty = 50.0
+
+    # Windowed success rate: success rate computed over the last N completed
+    # episodes (success or failure). Logged to tensorboard as success_rate_window.
+    # Can be overridden from the YAML via config.success_rate_window_episodes.
+    success_rate_window_episodes = 4096
 
     # Reward parameters - Potential-based reward
     # R_total = R_progress + R_velocity + R_jitter + R_success + R_crash
@@ -70,6 +103,13 @@ class task_config:
         # Progress reward: k_progress * (prev_dist - curr_dist)
         "k_progress": [10.0],         # Reward for moving toward goal (increased for faster progress)
 
+        # Per-step time penalty: -k_time every step (non-crash branch).
+        # Conservative value chosen ABOVE the hover-bonus ceiling (k_hover=0.3
+        # below) so each loitering step is net-negative (~-0.2/step), pushing the
+        # agent to achieve hover quickly and let the episode end on success,
+        # while staying far below k_progress(=10) so approaching remains rewarding.
+        "k_time": [0.5],
+
         # Gated velocity penalty: -k_vel * g(dist) * ||v||
         # g(dist) = sigmoid((gate_center - dist) / gate_width)
         "gate_center": [0.5],         # Distance at which gate is 0.5 (meters)
@@ -87,8 +127,15 @@ class task_config:
         "k_angvel": [0.5],            # Angular velocity penalty coefficient
 
         # Hover bonus: +k_hover * exp(-||vel|| / vel_scale) - reward for stable hovering
-        # Active when dist < threshold_hover, bonus decays exponentially with velocity
-        "k_hover": [5.0],             # Hover bonus coefficient (must dominate other rewards)
-        "threshold_hover": [0.2],     # Distance threshold for hover (meters) - 20cm
+        # Active when dist < threshold_hover, bonus decays exponentially with velocity.
+        # Shrunk 5.0 -> 0.3 so the per-step ceiling (0.3) is BELOW k_time (0.5):
+        # this makes loitering net-negative and removes the "farm hover bonus for
+        # the whole episode" trap that previously dominated the return.
+        "k_hover": [0.3],             # Hover bonus coefficient (kept below k_time)
+        # Tightened from 0.20m -> 0.12m to align the per-step hover bonus with the
+        # success zone (success_threshold = 0.10m). A small 2cm margin keeps an
+        # approach gradient at the boundary while removing the "loiter at ~15cm
+        # and farm hover bonus without ever succeeding" reward-optimal trap.
+        "threshold_hover": [0.12],    # Distance threshold for hover (meters) - 12cm
         "vel_scale_hover": [0.1],     # Velocity decay scale (m/s) - smaller = stricter
     }

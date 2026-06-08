@@ -9,6 +9,8 @@ On a machine with Docker:
 ```bash
 cd aerial_gym_docker
 docker build -f Dockerfile.base -t aerial-gym:latest .
+# Pull from Docker Hub and build the squashfs image
+enroot import -o aerial-gym.sqsh docker://YOUR_DOCKERHUB_USER/aerial-gym:latest
 ```
 
 **Option A — Push to a registry** (if your cluster can pull):

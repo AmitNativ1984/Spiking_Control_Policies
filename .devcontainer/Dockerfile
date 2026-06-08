@@ -3,10 +3,15 @@
 
 FROM localhost:5000/aerial-gym:latest
 
-# Install dev dependencies
+# Install dev dependencies.
+# NOTE: loguru and snntorch are already installed in the base image
+# (aerial-gym:latest). snntorch in particular is pinned there to ==0.9.4 via
+# --ignore-requires-python (the 0.9.4 Synaptic CUBA-LIF fix doesn't ship a
+# Python 3.8 wheel tag). Do NOT `pip install snntorch` here unpinned — on 3.8
+# that can downgrade it back to the buggy 0.9.1. Keep this layer for any
+# dev-only extras instead.
 RUN pip install \
-    loguru \
-    snntorch
+    loguru
 
 # Create non-root user matching host UID/GID
 ARG USERNAME=devuser
