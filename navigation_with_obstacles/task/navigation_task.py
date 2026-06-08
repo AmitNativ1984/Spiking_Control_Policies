@@ -524,10 +524,10 @@ class NavigationWithObstaclesTask(BaseTask):
         d_vert = torch.abs(disp[:, 2])
 
         # [0] log(horizontal distance)
-        self.task_obs["observations"][:, 0] = torch.log(d_hor + 1)
+        self.task_obs["observations"][:, 0] = d_hor #torch.log(d_hor + 1)
 
         # [1] log(vertical distance)
-        self.task_obs["observations"][:, 1] = torch.log(d_vert + 1)
+        self.task_obs["observations"][:, 1] = d_vert #torch.log(d_vert + 1)
 
         # [2:4] cos/sinazimuth (bearing) to target in world frame
         bearing_azimuth = torch.atan2(disp[:, 1], disp[:, 0])
