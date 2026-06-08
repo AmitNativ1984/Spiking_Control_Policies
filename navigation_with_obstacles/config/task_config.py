@@ -9,7 +9,7 @@ class task_config:
     Configuration for NavigationWithObstaclesTask.
 
     Key features:
-    - Acceleration control (accel_x, accel_y, accel_z, yaw_rate)
+    - Attitude control (thrust, roll, pitch, yaw_rate)
     - Custom 32D DepthVAE encoding
     - 30-level curriculum (panels then cumulative panels + objects)
     - Randomized environment bounds
@@ -21,7 +21,7 @@ class task_config:
     sim_name = "base_sim"
     env_name = "navigation_obstacle_env"
     robot_name = "nav_quadrotor_with_camera"
-    controller_name = "lee_acceleration_control"
+    controller_name = "lee_attitude_control"
     args = {}
 
     # Environment settings
@@ -79,12 +79,14 @@ class task_config:
     assert all(b is not None for b in observation_bounds), \
         "observation_layout has gaps — every index in [0, observation_space_dim) must be covered"
 
-    # Action space: [accel_x, accel_y, accel_z, yaw_rate]
+    # Action space: [thrust, roll, pitch, yaw_rate] for lee_attitude_control
     action_space_dim = 4
 
-    # Action scaling: network outputs [-1, 1], scaled to physical units
-    max_accel = 2.0              # m/s² per axis (symmetric: [-max, +max])
-    max_yaw_rate = math.pi / 3  # rad/s (~60 deg/s, symmetric: [-max, +max])
+    # Action scaling: network outputs [-1, 1].
+    # thrust is kept in [-1, 1] (controller maps it to [0, 2*m*g], hover at 0);
+    # roll/pitch and yaw_rate are scaled to physical units below.
+    max_inclination_angle_rad = math.pi / 4  # max roll/pitch (45 deg, symmetric: [-max, +max])
+    max_yaw_rate = math.pi / 3               # rad/s (~60 deg/s, symmetric: [-max, +max])
     
     # Speed threshold for excess speed penalty (m/s)
     v_max = 5.0
@@ -156,19 +158,24 @@ class task_config:
     @staticmethod
     def action_transformation_function(action):
         """
-        Transform network output [-1, 1] to acceleration commands.
+        Transform network output [-1, 1] to attitude commands for
+        lee_attitude_control: [thrust, roll, pitch, yaw_rate] (vehicle frame).
 
-        Scaling is driven by task_config.max_accel and task_config.max_yaw_rate.
-        Input: action tensor (num_envs, 4) in range [-1, 1]
-        Output: [accel_x, accel_y, accel_z, yaw_rate] for lee_acceleration_control
+        The network outputs are in [-1, 1] for all 4 dimensions.
+        - thrust  : kept in [-1, 1]; controller maps it via (thrust+1)*m*g,
+                    so 0 = hover, -1 = zero thrust, +1 = 2*hover.
+        - roll/pitch: scaled to [-max_inclination_angle_rad, +max_inclination_angle_rad] (radians).
+        - yaw_rate: scaled to [-max_yaw_rate, +max_yaw_rate] (rad/s).
         """
         import torch
         clamped_action = torch.clamp(action, -1.0, 1.0)
 
         processed = torch.zeros_like(clamped_action)
-        processed[:, 0:3] = clamped_action[:, 0:3] * task_config.max_accel
+        processed[:, 0] = clamped_action[:, 0]                                          # thrust: no scaling
+        processed[:, 1:3] = clamped_action[:, 1:3] * task_config.max_inclination_angle_rad
         processed[:, 3] = clamped_action[:, 3] * task_config.max_yaw_rate
 
         return processed
+
 
 

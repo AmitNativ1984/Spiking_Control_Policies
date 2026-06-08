@@ -42,8 +42,7 @@ from navigation_with_obstacles.task.navigation_task import (
 from navigation_with_obstacles.config.task_config import task_config
 from navigation_with_obstacles.config.env_config import NavigationObstacleEnvCfg
 from navigation_with_obstacles.config.robot_config import NavQuadWithCameraCfg
-from navigation_with_obstacles.networks.snn.popsan import PopSANNetworkBuilder
-from navigation_with_obstacles.networks.snn.popsan_cubalif import PopSANCubaLifNetworkBuilder
+from navigation_with_obstacles.networks.snn.popsan import POPSANNetworkBuilder
 from navigation_with_obstacles.networks.ann.actor_critic import MLPActorCriticNetworkBuilder
 from navigation_with_obstacles.networks.ann.gru_actor_critic import GRUActorCriticNetworkBuilder
 from rl_games.algos_torch import model_builder
@@ -68,8 +67,7 @@ task_registry.register_task(
 )
 
 # Register custom SNN network builder with rl_games
-model_builder.register_network("PopSAN", PopSANNetworkBuilder)
-model_builder.register_network("PopSAN_CubaLif", PopSANCubaLifNetworkBuilder)
+model_builder.register_network("PopSAN", POPSANNetworkBuilder)
 model_builder.register_network('mlp_actor_critic', MLPActorCriticNetworkBuilder)
 model_builder.register_network('mlp_gru_actor_critic', GRUActorCriticNetworkBuilder)
 
@@ -366,8 +364,8 @@ if __name__ == "__main__":
 
             # rl_games wraps the raw network in a ModelA2C*.Network at player.model,
             # which exposes the underlying network as `.a2c_network`. For PopSAN that's
-            # PopSANActorCriticNetwork → .snn_actor → .pop_encoder.
-            encoder = player.model.a2c_network.snn_actor.pop_encoder
+            # POPSANNetwork → .spiking_actor → .pop_encoder.
+            encoder = player.model.a2c_network.spiking_actor.pop_encoder
             encoder.record = True
             encoder._trace = []
             logger.info(f"[plot-encoding] encoder recording enabled on {type(encoder).__name__}")

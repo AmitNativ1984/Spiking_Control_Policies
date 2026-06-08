@@ -4,7 +4,7 @@ Navigation with Obstacles Task for Aerial Gym Simulator.
 A navigation task where a quadrotor must:
 1. Navigate to a target waypoint in a box-shaped environment
 2. Avoid obstacles using depth camera observations encoded by a custom DepthVAE
-3. Use acceleration control (accel_x, accel_y, accel_z, yaw_rate)
+3. Use attitude control (thrust, roll, pitch, yaw_rate)
 
 Features:
 - 25-level curriculum: panels (levels 0-5), cumulative panels + objects (levels 6-25)
@@ -39,14 +39,16 @@ logger = CustomLogger("navigation_with_obstacles_task")
 
 class NavigationWithObstaclesTask(BaseTask):
     """
-    Navigation task with obstacle curriculum and acceleration control.
+    Navigation task with obstacle curriculum and attitude control.
 
     Observation (44D): see process_obs_for_task() for full layout.
         [0:12]  state: distances, bearing, yaw, velocities, track angles
         [12:44] VAE latent encoding (32D)
 
-    Action (4D):
-        [0:3]   acceleration command (body frame, m/s²)
+    Action (4D) for lee_attitude_control (vehicle frame):
+        [0]     thrust command (in [-1, 1]; controller maps to [0, 2*m*g])
+        [1]     roll command (rad)
+        [2]     pitch command (rad)
         [3]     yaw rate command (rad/s)
     """
 

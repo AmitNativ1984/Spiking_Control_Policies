@@ -47,6 +47,28 @@ class task_config:
         (slice(10, 13), "body_angvel"),  # body angular velocity (wx, wy, wz)
     ]
 
+    # Per-dimension (min, max) bounds for the PopSAN population encoder.
+    #
+    # Bounds are in the rl_games-normalized space (z-scores, hard-clamped to
+    # [-5, 5] by RunningMeanStd when normalize_input=True), NOT raw units.
+    # Consumed by popsan_network.py via task_config.observation_bounds; it must
+    # be length observation_space_dim so the encoder builds means/stds of shape
+    # [1, obs_dim, pop_dim] (one learnable Gaussian set PER dimension).
+    observation_type_bounds = {
+        "pos_error":   (-3.0, 3.0),
+        "orientation": (-3.0, 3.0),
+        "body_linvel": (-3.0, 3.0),
+        "body_angvel": (-3.0, 3.0),
+    }
+
+    observation_bounds = [None] * observation_space_dim
+    for obj_slice, obj_type in observation_layout:
+        lo, hi = observation_type_bounds[obj_type]
+        for idx in range(obj_slice.start, obj_slice.stop):
+            observation_bounds[idx] = (lo, hi)
+    assert all(b is not None for b in observation_bounds), \
+        "observation_layout has gaps — every index in [0, observation_space_dim) must be covered"
+
     # Action space dim (network output): [thrust_cmd, roll_cmd, pitch_cmd, yaw_rate_cmd]
     # Matches LeeAttitudeController expected format directly
     action_space_dim = 4
