@@ -33,7 +33,7 @@ params:
     name: navigation_with_obstacles
     env_name: navigation_with_obstacles_task
     env_config:
-      num_envs: 128
+      num_envs: 4096
       headless: True
       use_warp: True
 
@@ -64,9 +64,9 @@ params:
     clip_value: False
 
     # Batch settings
-    num_actors: 128
+    num_actors: 4096
     horizon_length: 64
-    minibatch_size: 256
+    minibatch_size: 4096
     mini_epochs: 4
 
     # Value function
