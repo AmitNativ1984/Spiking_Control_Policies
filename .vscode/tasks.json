@@ -183,7 +183,7 @@
             "command": "python",
             "args": [
                 "-m", "navigation_with_obstacles.training.runner",
-                "--file=navigation_with_obstacles/training/popsan_cubalif_navigation_local.yaml",
+                "--file=navigation_with_obstacles/training/popsan_navigation_local.yaml",
                 "--train",
                 "--headless=True"
             ],
@@ -199,7 +199,7 @@
             "command": "python",
             "args": [
                 "-m", "navigation_with_obstacles.training.runner",
-                "--file=navigation_with_obstacles/training/popsan_cubalif_navigation_local.yaml",
+                "--file=navigation_with_obstacles/training/popsan_navigation_local.yaml",
                 "--play",
                 "--num_envs=1",
                 "--plot-encoding",
