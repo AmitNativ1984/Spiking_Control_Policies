@@ -82,7 +82,7 @@ srun \
             --train \
             --track \
             --experiment_name=${EXPERIMENT} \
-            --wandb-project-name=aerial_gym_snn \
+            --wandb-project-name=hover_popsan \
             ${CHECKPOINT_ARG}
     "
 
