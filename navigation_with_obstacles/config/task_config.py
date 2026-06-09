@@ -3,6 +3,7 @@ Task configuration for navigation with obstacles.
 Defines observation/action spaces, reward parameters, curriculum, and VAE settings.
 """
 import math
+import torch
 
 class task_config:
     """
@@ -167,7 +168,6 @@ class task_config:
         - roll/pitch: scaled to [-max_inclination_angle_rad, +max_inclination_angle_rad] (radians).
         - yaw_rate: scaled to [-max_yaw_rate, +max_yaw_rate] (rad/s).
         """
-        import torch
         clamped_action = torch.clamp(action, -1.0, 1.0)
 
         processed = torch.zeros_like(clamped_action)
