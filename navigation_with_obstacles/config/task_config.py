@@ -32,15 +32,40 @@ class task_config:
     headless = True
     device = "cuda:0"
 
-    # Observation space: 17 (state) + 32 (VAE latents) = 49
+    class vae_config:
+        """Custom 32D DepthVAE configuration.
+
+        use_vae is the single source of truth for whether depth-VAE latents are part
+        of the observation. Set use_vae = False to train a state-only (17D) policy
+        with NO vision input: the observation layout/dim, the PopSAN encoder bounds,
+        and the VAE encode step in the task all key off this flag and stay in sync.
+        (The depth camera stays attached to the robot; to also stop rendering it,
+        disable enable_camera in robot_config.)
+        """
+        use_vae = False
+        latent_dims = 32
+
+        # Path to trained DepthVAE checkpoint
+        model_file = "/workspaces/aerial_gym_docker/vae_depth/runs/20260218_204641/checkpoints/epoch_150.pth"
+
+        # DepthVAE input resolution
+        target_height = 180
+        target_width = 320
+
+        # Depth range parameters
+        max_depth_m = 7.0
+        min_depth_m = 0.1
+        sensor_max_range = 10.0
+
+    # Observation space: 17 (state) [+ latent_dims (VAE latents) when use_vae].
     #   [0:3]   unit vector to target (vehicle frame)
     #   [3]     normalized distance to target, clamped [0, 1]
     #   [4:7]   body linear velocity
     #   [7:10]  body angular velocity
     #   [10:13] gravity vector in body frame (normalized)
     #   [13:17] previous (transformed) action: thrust, roll, pitch, yaw_rate
-    #   [17:49] DepthVAE latents
-    observation_space_dim = 17 + 32
+    #   [17:17+latent_dims] DepthVAE latents (only when vae_config.use_vae)
+    observation_space_dim = 17 + (vae_config.latent_dims if vae_config.use_vae else 0)
     privileged_observation_space_dim = 0
 
     # Per-dimension observation bounds for the PopSAN population encoder.
@@ -60,8 +85,12 @@ class task_config:
         (slice(7, 10),  "angvel"),              # body angular velocity
         (slice(10, 13), "gravity"),             # gravity in body frame (normalized)
         (slice(13, 17), "prev_action"),         # transformed action: thrust, roll, pitch, yaw_rate
-        (slice(17, 49), "vae_latent"),          # DepthVAE latents
     ]
+    # VAE latents only when enabled; appended so the state dims keep indices [0:17].
+    if vae_config.use_vae:
+        observation_layout.append(
+            (slice(17, 17 + vae_config.latent_dims), "vae_latent")  # DepthVAE latents
+        )
 
     observation_type_bounds = {
         "direction_to_target": (-3.0, 3.0),
@@ -128,23 +157,6 @@ class task_config:
         "lambda_v": -0.01,         # Penlizes velocity above v_max (encourage speed control for safety)
         "lambda_jerk": -0.001,      # Penalty on jerk (change in acceleration) to encourage smooth control
     }
-    
-    class vae_config:
-        """Custom 32D DepthVAE configuration."""
-        use_vae = True
-        latent_dims = 32
-
-        # Path to trained DepthVAE checkpoint
-        model_file = "/workspaces/aerial_gym_docker/vae_depth/runs/20260218_204641/checkpoints/epoch_150.pth"
-
-        # DepthVAE input resolution
-        target_height = 180
-        target_width = 320
-
-        # Depth range parameters
-        max_depth_m = 7.0
-        min_depth_m = 0.1
-        sensor_max_range = 10.0
 
     class curriculum:
         """
