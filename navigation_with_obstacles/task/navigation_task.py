@@ -456,6 +456,10 @@ class NavigationWithObstaclesTask(BaseTask):
         self.infos["metrics/v_horizontal"] = float(
             torch.norm(self.obs_dict["robot_linvel"][:, :2], dim=1).mean()
         )
+        # Vertical velocity = world-frame z component (signed mean: +up / -down)
+        self.infos["metrics/v_vertical"] = float(
+            self.obs_dict["robot_linvel"][:, 2].mean()
+        )
         self.infos["metrics/episode_length"] = float(self.sim_env.sim_steps.float().mean())
 
         # Update curriculum
