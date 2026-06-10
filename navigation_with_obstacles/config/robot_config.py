@@ -23,7 +23,7 @@ class NavQuadWithCameraCfg(BaseQuadWithCameraCfg):
         min_init_state = [
             0.00,                    # X: 0% of env bounds
             0.10,                    # Y: 10% of env bounds
-            0.10,                    # Z: 10% of env bounds
+            0.40,                    # Z: 40% of env bounds (mid-height; keeps the drone clear of the floor/bottom_wall so an untrained policy has vertical room to learn altitude hold before crashing)
             0.0,                     # Roll:  0 rad (no randomization)
             0.0,                     # Pitch: 0 rad (no randomization)
             0.0,                     # Yaw:   0 rad (no randomization)
@@ -38,7 +38,7 @@ class NavQuadWithCameraCfg(BaseQuadWithCameraCfg):
         max_init_state = [
             0.05,                    # X: 5% of env bounds  -> position is randomized in [0%, 5%]
             0.90,                    # Y: 90% of env bounds -> position is randomized in [10%, 90%]
-            0.90,                    # Z: 90% of env bounds -> position is randomized in [10%, 90%]
+            0.60,                    # Z: 60% of env bounds -> position is randomized in [40%, 60%] (mid-height band, clear of floor and ceiling)
             0.0,                     # Roll:  0 rad (== min -> level, not randomized)
             0.0,                     # Pitch: 0 rad (== min -> level, not randomized)
             0.0,                     # Yaw:   0 rad (== min -> fixed heading, not randomized)
