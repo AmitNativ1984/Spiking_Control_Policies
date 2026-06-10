@@ -32,8 +32,15 @@ class task_config:
     headless = True
     device = "cuda:0"
 
-    # Observation space: 12 (state) + 32 (VAE latents) = 44
-    observation_space_dim = 12 + 32
+    # Observation space: 17 (state) + 32 (VAE latents) = 49
+    #   [0:3]   unit vector to target (vehicle frame)
+    #   [3]     normalized distance to target, clamped [0, 1]
+    #   [4:7]   body linear velocity
+    #   [7:10]  body angular velocity
+    #   [10:13] gravity vector in body frame (normalized)
+    #   [13:17] previous (transformed) action: thrust, roll, pitch, yaw_rate
+    #   [17:49] DepthVAE latents
+    observation_space_dim = 17 + 32
     privileged_observation_space_dim = 0
 
     # Per-dimension observation bounds for the PopSAN population encoder.
@@ -42,31 +49,28 @@ class task_config:
     # [-5, 5] by RunningMeanStd when normalize_input=True), NOT raw units.
     # Tune from tools/collect_obs_stats.py if empirically tighter values help.
     #
-    # observation_layout is the single source of truth for the 44D vector;
+    # observation_layout is the single source of truth for the observation
+    # vector and MUST match process_obs_for_task() in navigation_task.py;
     # observation_bounds is derived from it below. Editing the layout or the
     # per-type bounds is enough — no per-index numbers to maintain.
     observation_layout = [
-        (slice(0, 2),   "log_distance"),        # log(d_hor+1), log(|d_vert|+1) — world
-        (slice(2, 4),   "bearing_azimuth"),     # cos/sin bearing azimuth — world
-        (slice(4, 5),   "elevation_angle"),     # elevation angle to target — world
-        (slice(5, 7),   "yaw"),                 # cos/sin drone yaw — world
-        (slice(7, 8),   "v_xy"),                # horizontal speed — body
-        (slice(8, 9),   "v_z"),                 # vertical speed — body
-        (slice(9, 11),  "track_bearing"),       # cos/sin track azimuth — body (masked)
-        (slice(11, 12), "track_elevation"),     # track elevation — body (masked)
-        (slice(12, 44), "vae_latent"),          # DepthVAE latents
+        (slice(0, 3),   "direction_to_target"), # unit vector to target — vehicle frame
+        (slice(3, 4),   "distance"),            # normalized distance to target, clamped [0,1]
+        (slice(4, 7),   "linvel"),              # body linear velocity
+        (slice(7, 10),  "angvel"),              # body angular velocity
+        (slice(10, 13), "gravity"),             # gravity in body frame (normalized)
+        (slice(13, 17), "prev_action"),         # transformed action: thrust, roll, pitch, yaw_rate
+        (slice(17, 49), "vae_latent"),          # DepthVAE latents
     ]
 
     observation_type_bounds = {
-        "log_distance":    (-3.0, 3.0),
-        "bearing_azimuth": (-3.0, 3.0),
-        "elevation_angle": (-3.0, 3.0),
-        "yaw":             (-3.0, 3.0),
-        "v_xy":            (-3.0, 3.0),
-        "v_z":             (-3.0, 3.0),
-        "track_bearing":   (-3.0, 3.0),
-        "track_elevation": (-3.0, 3.0),
-        "vae_latent":      (-3.0, 3.0),
+        "direction_to_target": (-3.0, 3.0),
+        "distance":            (-3.0, 3.0),
+        "linvel":              (-3.0, 3.0),
+        "angvel":              (-3.0, 3.0),
+        "gravity":             (-3.0, 3.0),
+        "prev_action":         (-3.0, 3.0),
+        "vae_latent":          (-3.0, 3.0),
     }
 
     # Expand layout + per-type bounds into a flat per-index list of (min, max).
@@ -110,19 +114,19 @@ class task_config:
     # Reward parameters
     reward_parameters = {
         # Terminal rewards
-        "arrive_bonus_min": 10.0,        # arrival reward at curriculum level 0 (easy)
-        "arrive_bonus_max": 15.0,        # arrival reward at max curriculum level (hard)
+        "arrive_bonus_min": 50.0,        # arrival reward at curriculum level 0 (easy)
+        "arrive_bonus_max": 75.0,        # arrival reward at max curriculum level (hard)
         "collision_penalty": -20.0,     # obstacle collision termination
-        "exceed_penalty": -20.0,        # out-of-bounds termination
+        "exceed_penalty": -200.0,        # out-of-bounds termination
         "timeout_penalty": -2.0,          # episode timeout termination
         "d_min": 0.4,                   # arrival distance threshold (meters)
-        # Progress reward (dense shaping, all lambda < 0)
-        "lambda_d": -0.1,           # distance to target (horizontal + vertical)
-        "lambda_dz": -0.1,          # vertical distance to target (encourage altitude adjustments)
-        "lambda_v": -0.01,         # velocity-goal direction misalignment
-        "lambda_bearing": -0.01,           # projection of velocity onto target direction (encourage movement towards target)
-        "lambda_path_deviation": -0.005,    # velocity misalignment with target direction (encourage movement towards target)
-        "lambda_jerk": 0.0,      # jerk penalty to encourage smooth control
+        
+        # Progress reward (dense shaping)
+        "lambda_b": 0.1,          # Rewards velocity in target direction (encourage movement towards target)
+        "lambda_p": 0.1,           # Rewards closing distance to target (encourage progress)
+
+        "lambda_v": -0.01,         # Penlizes velocity above v_max (encourage speed control for safety)
+        "lambda_jerk": -0.001,      # Penalty on jerk (change in acceleration) to encourage smooth control
     }
     
     class vae_config:
