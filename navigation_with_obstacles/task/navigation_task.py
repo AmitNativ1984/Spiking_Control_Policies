@@ -10,7 +10,7 @@ Features:
 - 25-level curriculum: panels (levels 0-5), cumulative panels + objects (levels 6-25)
 - Custom 32D DepthVAE encoding (matching VAE training distribution)
 - Randomized environment bounds: L×W×H in [8,12]×[5,8]×[4,6]
-- Observation (44D): state(12) + VAE latent(32). See process_obs_for_task() for layout.
+- Observation (49D): state(17) + VAE latent(32). See process_obs_for_task() for layout.
 """
 from aerial_gym.task.base_task import BaseTask
 from aerial_gym.sim.sim_builder import SimBuilder
@@ -524,7 +524,7 @@ class NavigationWithObstaclesTask(BaseTask):
         - [4:7]     linear velocity (vx, vy, vz)                        body
         - [7:10]    angular velocity (wx, wy, wz)                       body
         - [10:13]   gravity vector in body frame (gx, gy, gz)           body
-        - [13:17]   previous action (thrust, roll, pitch, yaw_rate)     world
+        - [13:17]   previous action (thrust, roll, pitch, yaw_rate)     cmd (frameless)
         - [17:49]   VAE latent encoding (32D)                           N/A
 
         Total: 49D observation vector (can be reduced by removing components if needed)."""
@@ -557,7 +557,9 @@ class NavigationWithObstaclesTask(BaseTask):
             gravity_world
         )
         self.task_obs["observations"][:, 10:13] = gravity_body / torch.linalg.norm(gravity_body + 1e-6, dim=-1, keepdim=True)
-        # [13:17] Previous action (thrust, roll, pitch, yaw_rate) in world frame
+        # [13:17] Previous action (thrust, roll, pitch, yaw_rate). This is a controller
+        # command vector, not a spatial vector, so it has no coordinate frame; roll/pitch/
+        # yaw_rate are body-axis attitude setpoints for lee_attitude_control.
         self.task_obs["observations"][:, 13:17] = self.prev_action
         
         # ADD VAE LATENTS (32D) TO OBSERVATION VECTOR
