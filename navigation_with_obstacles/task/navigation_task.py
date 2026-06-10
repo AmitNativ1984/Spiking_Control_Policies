@@ -508,7 +508,7 @@ class NavigationWithObstaclesTask(BaseTask):
             dist:      (num_envs, 1) distance to target in raw meters
         """
         vec_to_tgt = quat_rotate_inverse(
-            self.obs_dict["robot_orientation"],
+            self.obs_dict["robot_vehicle_orientation"],
             self.target_position - self.obs_dict["robot_position"],
         )
         dist = torch.linalg.norm(vec_to_tgt + 1e-6, dim=1, keepdim=True)
@@ -519,22 +519,20 @@ class NavigationWithObstaclesTask(BaseTask):
         """
         Build observation vector.
 
-        - [0:3]     unit vector from drone to target                    body
-        - [3]       distance to target (normalized & clamped)           body 
-        - [4:7]     linear velocity (vx, vy, vz)                        body
+        - [0:3]     unit vector from drone to target                    vehicle
+        - [3]       distance to target (normalized & clamped)           vehicle 
+        - [4:7]     linear velocity (vx, vy, vz)                        vehicle
         - [7:10]    angular velocity (wx, wy, wz)                       body
         - [10:13]   gravity vector in body frame (gx, gy, gz)           body
-        - [13:17]   previous action (thrust, roll, pitch, yaw_rate)     cmd (frameless)
+        - [13:17]   previous action (thrust, roll, pitch, yaw_rate)     cmd (vehicle)
         - [17:49]   VAE latent encoding (32D)                           N/A
 
         Total: 49D observation vector (can be reduced by removing components if needed)."""
         
-        # Body-frame direction (unit) and raw distance to target. Shared with the
-        # heading reward via _direction_and_distance_to_target so the obs vector
-        # and the reward stay consistent in frame and step.
+        # Vehicle-frame unit vector and distance to target (used by both obs and reward, so single source of truth)
         direction_to_target, dist_to_tgt = self._direction_and_distance_to_target()
 
-        # [0:3] Unit vector to target in body frame
+        # [0:3] Unit vector to target in vehicle frame
         self.task_obs["observations"][:, 0:3] = direction_to_target
 
         # [3] Distance to target, normalized by env diagonal and clamped to [0, 1].
@@ -544,8 +542,8 @@ class NavigationWithObstaclesTask(BaseTask):
         self.task_obs["observations"][:, 3] = torch.clamp(
             dist_to_tgt.squeeze(1) / (max_dist + 1e-6), 0.0, 1.0)
         
-        # [4:7] Linear velocity in body frame
-        self.task_obs["observations"][:, 4:7] = self.obs_dict["robot_body_linvel"]  # TODO: NORMALIZE?
+        # [4:7] Linear velocity in vehicle frame
+        self.task_obs["observations"][:, 4:7] = self.obs_dict["robot_vehicle_linvel"]  # TODO: NORMALIZE?
 
         # [7:10] Angular velocity in body frame
         self.task_obs["observations"][:, 7:10] = self.obs_dict["robot_body_angvel"] # TODO: NORMALIZE?
@@ -741,15 +739,14 @@ class NavigationWithObstaclesTask(BaseTask):
             Reward tensor for masked envs
         """
         params = self.task_config.reward_parameters
-        target_pos = self.target_position
 
         # 1. Reward heading towards target: λ_b * dot(unit_vec_to_target, unit_vec_velocity)
         # Compute n/v from the current-step state (NOT task_obs["observations"],
         # which is only refreshed after compute_rewards in step() and would be one
         # step stale). The helper is the same source process_obs_for_task uses for
-        # observations[:, 0:3]; robot_body_linvel is the source for [:, 4:7].
-        n, _ = self._direction_and_distance_to_target()  # current-step, body frame
-        v = self.obs_dict["robot_body_linvel"]           # current-step, body frame
+        # observations[:, 0:3]; robot_vehicle_linvel is the source for [:, 4:7].
+        n, _ = self._direction_and_distance_to_target()  # current-step, vehicle frame
+        v = self.obs_dict["robot_vehicle_linvel"]           # current-step, vehicle frame
 
         r_bearing = params["lambda_b"] *  torch.linalg.vecdot(n, v / (torch.linalg.norm(v, dim=1, keepdim=True) + 1e-6), dim=1)
 
@@ -758,14 +755,14 @@ class NavigationWithObstaclesTask(BaseTask):
         # see step()/reset_idx). Compute it from positions here rather than using
         # observations[:, 3], which is normalized by the env diagonal to [0, 1].
         current_dist = torch.norm(
-            target_pos - self.obs_dict["robot_position"], dim=1
+            self.target_position - self.obs_dict["robot_position"], dim=1
         )
         r_progress = params["lambda_p"] * (self.prev_dist - current_dist)
         
-        # 3. Excess speed penalty: λ_v * v_hor * max(0, v_hor - v_max)
-        v_hor = torch.linalg.norm(v[:, :2], dim=1)
-        p_speed = params["lambda_v"] * v_hor * torch.clamp(
-            v_hor - self.task_config.v_max, min=0.0
+        # 3. Excess speed penalty: λ_v * v * max(0, v - v_max)
+        speed = torch.linalg.norm(v, dim=1)
+        p_speed = params["lambda_v"] * speed * torch.clamp(
+            speed - self.task_config.v_max, min=0.0
         )
 
         # 4. Penalize jerk (difference between current and previous transformed actions)

@@ -60,7 +60,7 @@ class task_config:
     # Observation space: 17 (state) [+ latent_dims (VAE latents) when use_vae].
     #   [0:3]   unit vector to target (vehicle frame)
     #   [3]     normalized distance to target, clamped [0, 1]
-    #   [4:7]   body linear velocity
+    #   [4:7]   vehicle linear velocity
     #   [7:10]  body angular velocity
     #   [10:13] gravity vector in body frame (normalized)
     #   [13:17] previous (transformed) action: thrust, roll, pitch, yaw_rate
@@ -81,7 +81,7 @@ class task_config:
     observation_layout = [
         (slice(0, 3),   "direction_to_target"), # unit vector to target — vehicle frame
         (slice(3, 4),   "distance"),            # normalized distance to target, clamped [0,1]
-        (slice(4, 7),   "linvel"),              # body linear velocity
+        (slice(4, 7),   "linvel"),              # vehicle linear velocity
         (slice(7, 10),  "angvel"),              # body angular velocity
         (slice(10, 13), "gravity"),             # gravity in body frame (normalized)
         (slice(13, 17), "prev_action"),         # transformed action: thrust, roll, pitch, yaw_rate
