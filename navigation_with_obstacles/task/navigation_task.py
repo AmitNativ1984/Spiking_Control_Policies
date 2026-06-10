@@ -669,6 +669,18 @@ class NavigationWithObstaclesTask(BaseTask):
             (robot_pos < bounds_min).any(dim=1)
             | (robot_pos > bounds_max).any(dim=1)
         )
+
+        # Ground handling: classify near-floor positions as exceed (out-of-bounds-bottom)
+        # rather than as an obstacle collision. The drone makes contact slightly ABOVE
+        # the bottom bound (bottom_wall sits at env_bounds_min[z]), so a pure
+        # robot_pos < bounds_min check would miss it and it would fall through to
+        # collision_mask. Fold a margin band above the bottom bound into exceed so the
+        # collision/"crash" path means a real obstacle hit. See task_config.ground_*.
+        if getattr(self.task_config, "ground_as_exceed", False):
+            ground_z = bounds_min[:, 2] + self.task_config.ground_collision_margin
+            ground_mask = robot_pos[:, 2] < ground_z
+            exceed_mask = exceed_mask | ground_mask
+
         arrive_mask = (~exceed_mask) & (
             dist < self.task_config.reward_parameters["d_min"]
         )

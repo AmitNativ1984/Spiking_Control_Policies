@@ -135,6 +135,17 @@ class task_config:
     # 1.5 = allow drone to fly 50% beyond bounds before terminating (useful for inference).
     exceed_bounds_margin = 1.0
 
+    # Ground-collision handling. The bottom_wall (floor) sits at env_bounds_min[z] and
+    # is always present (keep_in_env=True), so floor contact would otherwise register as
+    # a generic obstacle "crash". When ground_as_exceed is True, a robot whose z is
+    # within ground_collision_margin metres of the bottom bound is classified as an
+    # out-of-bounds "exceed" (exceed_penalty) instead of an obstacle "collision"
+    # (collision_penalty). This makes the crash metric mean "hit a real obstacle": at
+    # curriculum level 0 (no obstacles) the only failures are exceed (incl. floor) and
+    # the only success is arrival — a clean navigate-to-target setting.
+    ground_as_exceed = True
+    ground_collision_margin = 0.2  # metres above env_bounds_min[z] counted as ground
+
     # Target waypoint placement (as ratio of environment bounds)
     # Target is placed in the far end of the environment
     target_min_ratio = [0.95, 0.10, 0.10]
