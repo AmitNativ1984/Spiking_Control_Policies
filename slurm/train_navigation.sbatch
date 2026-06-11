@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=nav-vae
+#SBATCH --job-name=nav-popsan-vae
 #SBATCH --partition=dlc
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
@@ -14,7 +14,10 @@
 #   sbatch slurm/train_navigation.sbatch
 #
 # Override defaults:
-#   CONTAINER_IMAGE=aerial-gym:latest NUM_ENVS=4096 sbatch slurm/train_navigation.sbatch
+#   CONTAINER_IMAGE=aerial-gym:latest sbatch slurm/train_navigation.sbatch
+#
+# NOTE: num_envs and max_epochs are set in the YAML config (CONFIG_FILE), not here,
+#       so a config file fully reproduces an experiment.
 #
 # Prerequisites:
 #   1. Docker image built and available (see slurm/README_cluster.md)
@@ -25,9 +28,7 @@ set -euo pipefail
 
 # --- Configuration (override via environment variables) ---
 CONTAINER_IMAGE="${CONTAINER_IMAGE:-${HOME}/DOCKER_IMAGES/aerial-gym.sqsh}"
-NUM_ENVS="${NUM_ENVS:-4096}"
-MAX_EPOCHS="${MAX_EPOCHS:-1000}"
-EXPERIMENT="${EXPERIMENT:-nav_vae_cluster}"
+EXPERIMENT="${EXPERIMENT:-nav_vae_popsan_cluster}"
 CONFIG_FILE="${CONFIG_FILE:-navigation_with_obstacles/training/ppo_navigation_cluster.yaml}"
 CHECKPOINT="${CHECKPOINT:-}"  # Path to checkpoint file to resume training (empty = start fresh)
 
@@ -53,8 +54,6 @@ echo "Job ID:          ${SLURM_JOB_ID}"
 echo "Node:            ${SLURMD_NODENAME}"
 echo "GPU:             ${CUDA_VISIBLE_DEVICES:-not set}"
 echo "Container:       ${CONTAINER_IMAGE}"
-echo "Num envs:        ${NUM_ENVS}"
-echo "Max epochs:      ${MAX_EPOCHS}"
 echo "Config:          ${CONFIG_FILE}"
 echo "Experiment:      ${EXPERIMENT}"
 echo "Checkpoint:      ${CHECKPOINT:-none (fresh start)}"
@@ -79,7 +78,6 @@ srun \
         echo 'Starting training...'
         python -m navigation_with_obstacles.training.runner \
             --file=${CONFIG_FILE} \
-            --num_envs=${NUM_ENVS} \
             --headless=True \
             --train \
             --track \

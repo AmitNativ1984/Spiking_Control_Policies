@@ -42,7 +42,7 @@ class task_config:
         (The depth camera stays attached to the robot; to also stop rendering it,
         disable enable_camera in robot_config.)
         """
-        use_vae = False
+        use_vae = True
         latent_dims = 32
 
         # Path to trained DepthVAE checkpoint
