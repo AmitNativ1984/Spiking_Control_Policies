@@ -154,19 +154,19 @@ class task_config:
     # Reward parameters
     reward_parameters = {
         # Terminal rewards
-        "arrive_bonus_min": 50.0,        # arrival reward at curriculum level 0 (easy)
-        "arrive_bonus_max": 75.0,        # arrival reward at max curriculum level (hard)
-        "collision_penalty": -20.0,     # obstacle collision termination
-        "exceed_penalty": -200.0,        # out-of-bounds termination
+        "arrive_bonus_min": 10.0,        # arrival reward at curriculum level 0 (easy)
+        "arrive_bonus_max": 15.0,        # arrival reward at max curriculum level (hard)
+        "collision_penalty": -10.0,     # obstacle collision termination
+        "exceed_penalty": -10.0,        # out-of-bounds termination
         "timeout_penalty": -2.0,          # episode timeout termination
         "d_min": 0.4,                   # arrival distance threshold (meters)
         
         # Progress reward (dense shaping)
         "lambda_b": 0.1,          # Rewards velocity in target direction (encourage movement towards target)
-        "lambda_p": 0.1,           # Rewards closing distance to target (encourage progress)
+        "lambda_p": 0.5,           # Rewards closing distance to target (encourage progress)
 
-        "lambda_v": -0.01,         # Penlizes velocity above v_max (encourage speed control for safety)
-        "lambda_jerk": -0.001,      # Penalty on jerk (change in acceleration) to encourage smooth control
+        "lambda_v": -0.1,         # Penlizes velocity above v_max (encourage speed control for safety)
+        "lambda_jerk": -0.01,      # Penalty on jerk (change in acceleration) to encourage smooth control
     }
 
     class curriculum:
