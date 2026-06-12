@@ -57,6 +57,13 @@ class task_config:
         min_depth_m = 0.1
         sensor_max_range = 10.0
 
+    # Runtime VAE gate, read by the PopSAN actor each forward pass and used to scale the
+    # encoded VAE-latent spike block. Set by NavigationWithObstaclesTask's curriculum
+    # state machine: 0.0 during the gated warm-up (Phase A) so the policy learns pure
+    # navigation without the latent distractors, 1.0 once vision is enabled (Phases B/C)
+    # and always 1.0 at inference. Default 1.0 leaves non-gated / state-only runs unaffected.
+    vae_gate = 1.0
+
     # Observation space: 17 (state) [+ latent_dims (VAE latents) when use_vae].
     #   [0:3]   unit vector to target (vehicle frame)
     #   [3]     normalized distance to target, clamped [0, 1]
@@ -135,17 +142,6 @@ class task_config:
     # 1.5 = allow drone to fly 50% beyond bounds before terminating (useful for inference).
     exceed_bounds_margin = 1.0
 
-    # Ground-collision handling. The bottom_wall (floor) sits at env_bounds_min[z] and
-    # is always present (keep_in_env=True), so floor contact would otherwise register as
-    # a generic obstacle "crash". When ground_as_exceed is True, a robot whose z is
-    # within ground_collision_margin metres of the bottom bound is classified as an
-    # out-of-bounds "exceed" (exceed_penalty) instead of an obstacle "collision"
-    # (collision_penalty). This makes the crash metric mean "hit a real obstacle": at
-    # curriculum level 0 (no obstacles) the only failures are exceed (incl. floor) and
-    # the only success is arrival — a clean navigate-to-target setting.
-    ground_as_exceed = True
-    ground_collision_margin = 0.2  # metres above env_bounds_min[z] counted as ground
-
     # Target waypoint placement (as ratio of environment bounds)
     # Target is placed in the far end of the environment
     target_min_ratio = [0.95, 0.10, 0.10]
@@ -182,6 +178,15 @@ class task_config:
         decrease_step = 1
         success_rate_for_increase = 0.7
         success_rate_for_decrease = 0.6
+
+        # VAE warm-up gating (only active when vae_config.use_vae). Two-phase warm-up at
+        # level 0 before any obstacles appear: Phase A trains with the VAE gated off
+        # (latents distract while the room is empty); once level-0 success ≥
+        # vae_gate_until_success the VAE is enabled (Phase B); the curriculum stays pinned
+        # at level 0 until an ungated window also reaches vae_consolidate_success, then
+        # normal advancement resumes (Phase C). Kept as two knobs so they can diverge later.
+        vae_gate_until_success = 0.90   # Phase A→B: enable VAE once level-0 success ≥ this
+        vae_consolidate_success = 0.90  # Phase B→C: resume normal curriculum once ungated level-0 success ≥ this
 
     @staticmethod
     def action_transformation_function(action):

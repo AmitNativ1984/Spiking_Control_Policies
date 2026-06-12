@@ -350,6 +350,13 @@ if __name__ == "__main__":
         "Starting training..." if args.get("train") else "Starting playback..."
     )
 
+    # Inference/play always runs with the VAE fully enabled, regardless of any curriculum
+    # warm-up phase a checkpoint was saved in. The training-time gate (Phase A=0.0) is a
+    # warm-up device only; the task's curriculum state machine drives it during --train.
+    if not args.get("train"):
+        task_config.vae_gate = 1.0
+        logger.info("[VAE warm-up] play mode: forcing task_config.vae_gate = 1.0 (full VAE)")
+
     if plot_encoding:
         # Wrap run_play: enable recording on the encoder right after player construction,
         # plot once the play loop returns. Confined to the --plot-encoding branch.

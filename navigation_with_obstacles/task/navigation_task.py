@@ -151,6 +151,17 @@ class NavigationWithObstaclesTask(BaseTask):
         )
         self.curriculum_progress_fraction = 0.0
 
+        # VAE warm-up state machine (see check_and_update_curriculum_level):
+        #   "A" gated (vae_gate=0) -> "B" ungated consolidation -> "C" normal curriculum.
+        # Only runs when the VAE is part of the observation; otherwise jump straight to "C".
+        # task_config.vae_gate is the process-global flag the PopSAN actor reads each forward.
+        if self.task_config.vae_config.use_vae:
+            self.vae_phase = "A"
+            self.task_config.vae_gate = 0.0
+        else:
+            self.vae_phase = "C"
+            self.task_config.vae_gate = 1.0
+
         # Curriculum tracking aggregates
         self.success_aggregate = 0
         self.crashes_aggregate = 0
@@ -432,6 +443,9 @@ class NavigationWithObstaclesTask(BaseTask):
         self.infos["crash_rate"] = self.logged_crash_rate
         self.infos["exceed_rate"] = self.logged_exceed_rate
         self.infos["timeout_rate"] = self.logged_timeout_rate
+        # VAE warm-up visibility: gate (0/1) and phase as a number (A=0, B=1, C=2).
+        self.infos["vae_gate"] = float(self.task_config.vae_gate)
+        self.infos["vae_phase"] = float({"A": 0, "B": 1, "C": 2}[self.vae_phase])
 
         # Reward components (EMA across steps, horizon-independent)
         self.infos["reward/r_heading"] = self._reward_comp_ema["r_heading"]
@@ -501,14 +515,18 @@ class NavigationWithObstaclesTask(BaseTask):
         )
 
     def _direction_and_distance_to_target(self):
-        """Body-frame unit vector to target and raw distance (meters), current step.
+        """Vehicle-frame unit vector to target and raw distance (meters), current step.
+
+        Uses robot_vehicle_orientation (yaw-only, gravity-aligned heading frame), so
+        the direction is invariant to the drone's roll/pitch and shares a frame with
+        the vehicle-frame velocity used in the bearing reward.
 
         Single source of truth for both the observation vector
         (process_obs_for_task) and the heading reward (_reward_progress), so the
         two never drift out of sync on frame or staleness.
 
         Returns:
-            direction: (num_envs, 3) unit vector to target in body frame
+            direction: (num_envs, 3) unit vector to target in vehicle frame
             dist:      (num_envs, 1) distance to target in raw meters
         """
         vec_to_tgt = quat_rotate_inverse(
@@ -599,10 +617,35 @@ class NavigationWithObstaclesTask(BaseTask):
             self.logged_exceed_rate = float(exceed_rate)
             self.logged_timeout_rate = float(timeout_rate)
 
-            if success_rate > self.task_config.curriculum.success_rate_for_increase:
-                self.curriculum_level += self.task_config.curriculum.increase_step
-            elif success_rate < self.task_config.curriculum.success_rate_for_decrease:
-                self.curriculum_level -= self.task_config.curriculum.decrease_step
+            # VAE warm-up phases A/B pin the level at min_level and only handle the gate;
+            # normal increase/decrease runs in phase C. Transitions are monotonic.
+            if self.vae_phase == "A":
+                # Gated: learn pure navigation at level 0 with the VAE cancelled.
+                self.curriculum_level = self.task_config.curriculum.min_level
+                if success_rate >= self.task_config.curriculum.vae_gate_until_success:
+                    self.vae_phase = "B"
+                    self.task_config.vae_gate = 1.0
+                    logger.warning(
+                        f"[VAE warm-up] Phase A->B: level-0 success {success_rate:.3f} "
+                        f">= {self.task_config.curriculum.vae_gate_until_success}; enabling VAE "
+                        "(gate=1.0), staying at level 0 to consolidate with vision."
+                    )
+            elif self.vae_phase == "B":
+                # Ungated consolidation: stay at level 0 until it holds up with vision on.
+                self.curriculum_level = self.task_config.curriculum.min_level
+                if success_rate >= self.task_config.curriculum.vae_consolidate_success:
+                    self.vae_phase = "C"
+                    logger.warning(
+                        f"[VAE warm-up] Phase B->C: ungated level-0 success {success_rate:.3f} "
+                        f">= {self.task_config.curriculum.vae_consolidate_success}; resuming "
+                        "normal curriculum advancement."
+                    )
+            else:
+                # Phase C: normal curriculum advancement.
+                if success_rate > self.task_config.curriculum.success_rate_for_increase:
+                    self.curriculum_level += self.task_config.curriculum.increase_step
+                elif success_rate < self.task_config.curriculum.success_rate_for_decrease:
+                    self.curriculum_level -= self.task_config.curriculum.decrease_step
 
             # Clamp curriculum level
             self.curriculum_level = min(
@@ -673,18 +716,6 @@ class NavigationWithObstaclesTask(BaseTask):
             (robot_pos < bounds_min).any(dim=1)
             | (robot_pos > bounds_max).any(dim=1)
         )
-
-        # Ground handling: classify near-floor positions as exceed (out-of-bounds-bottom)
-        # rather than as an obstacle collision. The drone makes contact slightly ABOVE
-        # the bottom bound (bottom_wall sits at env_bounds_min[z]), so a pure
-        # robot_pos < bounds_min check would miss it and it would fall through to
-        # collision_mask. Fold a margin band above the bottom bound into exceed so the
-        # collision/"crash" path means a real obstacle hit. See task_config.ground_*.
-        if getattr(self.task_config, "ground_as_exceed", False):
-            ground_z = bounds_min[:, 2] + self.task_config.ground_collision_margin
-            ground_mask = robot_pos[:, 2] < ground_z
-            exceed_mask = exceed_mask | ground_mask
-
         arrive_mask = (~exceed_mask) & (
             dist < self.task_config.reward_parameters["d_min"]
         )

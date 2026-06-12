@@ -94,8 +94,18 @@ class PopulationSpikingActorNetwork(nn.Module):
                                        reset_delay=actor_config["reset_delay"],
                                        spike_grad=spike_grad)
 
-        self.action_decoder = SpikeDecoder(action_dim=self.action_dim, 
+        self.action_decoder = SpikeDecoder(action_dim=self.action_dim,
                                            pop_dim=actor_config["pop_dim"])
+
+        # First encoder column belonging to the VAE-latent block. The population encoder
+        # lays out obs dim d in columns [d*pop_dim : (d+1)*pop_dim], so the latents (obs
+        # dims [state_dims : input_dim]) start at state_dims*pop_dim. Derived from config
+        # (not a hardcoded 49) so it adapts to the latent size; for a state-only network
+        # (input_dim == state_dims) this equals the encoder width and the gate is inert.
+        state_dims = input_dim - (
+            task_config.vae_config.latent_dims if task_config.vae_config.use_vae else 0
+        )
+        self._lat_col_start = state_dims * self.pop_dim
     
     def is_rnn(self):
         """Required by rl_games - indicates this is not an RNN network."""
@@ -124,6 +134,17 @@ class PopulationSpikingActorNetwork(nn.Module):
         
         output_spike_act = torch.zeros(x.size(0), self.actor_fc3.out_features, device=x.device)  # Accumulate spikes for actor output
         spike_train_in = self.pop_encoder(x)
+
+        # VAE curriculum gate: scale the encoded VAE-latent spike block by task_config.vae_gate
+        # (set by the task's curriculum state machine; 1.0 by default and at inference). At
+        # gate=0.0 the latent spiking inputs contribute zero current to actor_fc1, removing
+        # the population-encoder dilution while the policy learns pure navigation. Applied
+        # AFTER rl_games norm_obs, so the latent RunningMeanStd stats stay warm for un-gating.
+        gate = getattr(task_config, "vae_gate", 1.0)
+        if gate != 1.0 and self._lat_col_start < spike_train_in.shape[1]:
+            spike_train_in[:, self._lat_col_start:, :] = (
+                spike_train_in[:, self._lat_col_start:, :] * gate
+            )
 
         # === Iterate over timesteps ===
         for t in range(self.num_steps):
