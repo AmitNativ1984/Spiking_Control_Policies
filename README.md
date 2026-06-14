@@ -1,4 +1,60 @@
-# Aerial Gym Simulator Docker Setup Guide
+# Aerial Gym Simulator — Drone RL Tasks
+
+GPU-accelerated reinforcement-learning experiments for aerial robotics, built on
+[NVIDIA Isaac Gym Preview 4](https://developer.nvidia.com/isaac-gym) and the
+[Aerial Gym Simulator](https://ntnu-arl.github.io/aerial_gym_simulator/), packaged in Docker.
+
+This repository trains a family of quadrotor control policies that grow in difficulty —
+from stabilizing a hover with only inertial sensing, up to vision-based navigation through
+cluttered environments — and explores both conventional artificial neural networks (ANN/MLP/GRU)
+and **spiking neural networks (SNN)** for neuromorphic, energy-efficient control.
+
+---
+
+## Training Tasks
+
+Each task is a self-contained package (`config/`, `task/`, `training/`, optional `networks/`)
+with its own README covering theory, training, and inference. They are ordered roughly by
+increasing difficulty.
+
+| Task | Folder | What it learns | Sensing | Controller | Policy |
+|------|--------|----------------|---------|------------|--------|
+| **Simple Hover** | [`simple_hover/`](simple_hover/) | Stabilize and hover in place | IMU + state (no position) | Attitude (Lee) | MLP |
+| **Simple Hover (SNN)** | [`simple_hover_snn/`](simple_hover_snn/) | Same hover task, neuromorphic policy | IMU + state | Attitude (Lee) | SNN / PopSAN / MLP baseline |
+| **Simple Obstacle Avoidance** | [`simple_obstacle_avoidance/`](simple_obstacle_avoidance/) | Fly to a waypoint past a few fixed obstacles | Depth camera (VAE) + state | Attitude (Lee) | MLP |
+| **Navigation with Obstacles** | [`navigation_with_obstacles/`](navigation_with_obstacles/) | Curriculum navigation through dense clutter | Depth camera (DepthVAE) + state | Attitude (Lee) | PopSAN (SNN) / MLP / GRU |
+
+### Supporting components
+
+| Component | Folder | Purpose |
+|-----------|--------|---------|
+| **Depth VAE (DCE)** | [`vae_depth/`](vae_depth/) | Variational autoencoder that compresses depth images into a 32-D latent with implicit collision encoding, used by the navigation task. |
+| **Dataset Generation** | [`data_generation/`](data_generation/) | Generates the depth-image dataset (Intel RealSense D435 simulation) used to train the Depth VAE. |
+
+> All tasks use [`rl_games`](https://github.com/Denys88/rl_games) PPO and the Aerial Gym
+> physics/rendering stack. Each task folder's README documents its observation/action spaces,
+> reward function, network architecture, and exact training/inference commands.
+
+---
+
+## Quick Start (training a task)
+
+Once the Docker image is built and you are inside the container (see the setup guide below):
+
+```bash
+cd /workspaces/aerial_gym_docker
+
+# Example: train the simple hover task
+python simple_hover/training/runner.py \
+    --file=simple_hover/training/ppo_hover.yaml \
+    --train --num_envs=1024 --headless=True
+```
+
+See each task's README for the full set of configs and inference commands.
+
+---
+
+# Docker Setup Guide
 
 A complete step-by-step guide to running Aerial Gym Simulator in Docker (without conda/anaconda).
 
