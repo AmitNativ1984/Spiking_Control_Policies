@@ -9,7 +9,9 @@ from aerial_gym.config.robot_config.base_quad_config import BaseQuadWithCameraCf
 class NavQuadWithCameraCfg(BaseQuadWithCameraCfg):
     """
     Quadrotor with depth camera for navigation task.
-    Spawns near the start of the environment (low X) with random yaw.
+    Spawns at a randomized position near the start of the environment (low X,
+    random Y/Z) but level and motionless: attitude, linear velocity and angular
+    velocity are all fixed at zero (min == max below).
     """
 
     class init_config(BaseQuadWithCameraCfg.init_config):
@@ -19,32 +21,32 @@ class NavQuadWithCameraCfg(BaseQuadWithCameraCfg):
         # Velocity indices 7-9: direct m/s (world frame)
         # Angular rate indices 10-12: direct rad/s (body frame)
         min_init_state = [
-            0.00,                    # X: 0-5% of env bounds
-            0.10,                    # Y: 10-90%
-            0.10,                    # Z: 10-90%
-            0.0,              # Roll:  -30 deg
-            0.0,              # Pitch: -30 deg
-            0.0,                  # Yaw:   -180 deg (full 360 coverage of drone-to-target bearing)
+            0.00,                    # X: 0% of env bounds
+            0.10,                    # Y: 10% of env bounds
+            0.40,                    # Z: 40% of env bounds (mid-height; keeps the drone clear of the floor/bottom_wall so an untrained policy has vertical room to learn altitude hold before crashing)
+            0.0,                     # Roll:  0 rad (no randomization)
+            0.0,                     # Pitch: 0 rad (no randomization)
+            0.0,                     # Yaw:   0 rad (no randomization)
             1.0,
-            0.0,                    # vx: +-0.5 m/s
-            0.0,                    # vy: +-0.5 m/s
-            0.0,                    # vz: +-0.3 m/s
-            0.0,                    # wx: +-0.3 rad/s (~17 deg/s roll rate)
-            0.0,                    # wy: +-0.3 rad/s (~17 deg/s pitch rate)
-            0.0,                    # wz: +-0.2 rad/s (~11 deg/s yaw rate)
+            0.0,                     # vx: 0 m/s (no randomization)
+            0.0,                     # vy: 0 m/s (no randomization)
+            0.0,                     # vz: 0 m/s (no randomization)
+            0.0,                     # wx: 0 rad/s (no randomization)
+            0.0,                     # wy: 0 rad/s (no randomization)
+            0.0,                     # wz: 0 rad/s (no randomization)
         ]
         max_init_state = [
-            0.05,                    # X
-            0.90,                    # Y
-            0.90,                    # Z
-            0.0,              # Roll:  +30 deg
-            0.0,              # Pitch: +30 deg
-            0.0,                   # Yaw:   +180 deg (full 360 coverage of drone-to-target bearing)
+            0.05,                    # X: 5% of env bounds  -> position is randomized in [0%, 5%]
+            0.90,                    # Y: 90% of env bounds -> position is randomized in [10%, 90%]
+            0.60,                    # Z: 60% of env bounds -> position is randomized in [40%, 60%] (mid-height band, clear of floor and ceiling)
+            0.0,                     # Roll:  0 rad (== min -> level, not randomized)
+            0.0,                     # Pitch: 0 rad (== min -> level, not randomized)
+            0.0,                     # Yaw:   0 rad (== min -> fixed heading, not randomized)
             1.0,
-            0.0,                     # vx
-            0.0,                     # vy
-            0.0,                     # vz
-            0.0,                     # wx
-            0.0,                     # wy
-            0.0,                     # wz
+            0.0,                     # vx: 0 m/s (== min -> motionless, not randomized)
+            0.0,                     # vy: 0 m/s (== min -> motionless, not randomized)
+            0.0,                     # vz: 0 m/s (== min -> motionless, not randomized)
+            0.0,                     # wx: 0 rad/s (== min -> no rotation, not randomized)
+            0.0,                     # wy: 0 rad/s (== min -> no rotation, not randomized)
+            0.0,                     # wz: 0 rad/s (== min -> no rotation, not randomized)
         ]

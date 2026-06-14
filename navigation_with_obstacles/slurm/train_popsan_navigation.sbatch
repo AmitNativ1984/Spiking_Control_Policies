@@ -81,7 +81,7 @@ srun \
             --train \
             --track \
             --experiment_name=${EXPERIMENT} \
-            --wandb-project-name=nav_popsan \
+            --wandb-project-name=nav_popsan_new_reward \
             ${CHECKPOINT_ARG}
     "
 

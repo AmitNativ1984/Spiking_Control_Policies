@@ -32,8 +32,47 @@ class task_config:
     headless = True
     device = "cuda:0"
 
-    # Observation space: 12 (state) + 32 (VAE latents) = 44
-    observation_space_dim = 12 + 32
+    class vae_config:
+        """Custom 32D DepthVAE configuration.
+
+        use_vae is the single source of truth for whether depth-VAE latents are part
+        of the observation. Set use_vae = False to train a state-only (17D) policy
+        with NO vision input: the observation layout/dim, the PopSAN encoder bounds,
+        and the VAE encode step in the task all key off this flag and stay in sync.
+        (The depth camera stays attached to the robot; to also stop rendering it,
+        disable enable_camera in robot_config.)
+        """
+        use_vae = True
+        latent_dims = 32
+
+        # Path to trained DepthVAE checkpoint
+        model_file = "/workspaces/aerial_gym_docker/vae_depth/runs/20260218_204641/checkpoints/epoch_150.pth"
+
+        # DepthVAE input resolution
+        target_height = 180
+        target_width = 320
+
+        # Depth range parameters
+        max_depth_m = 7.0
+        min_depth_m = 0.1
+        sensor_max_range = 10.0
+
+    # Runtime VAE gate, read by the PopSAN actor each forward pass and used to scale the
+    # encoded VAE-latent spike block. Set by NavigationWithObstaclesTask's curriculum
+    # state machine: 0.0 during the gated warm-up (Phase A) so the policy learns pure
+    # navigation without the latent distractors, 1.0 once vision is enabled (Phases B/C)
+    # and always 1.0 at inference. Default 1.0 leaves non-gated / state-only runs unaffected.
+    vae_gate = 1.0
+
+    # Observation space: 17 (state) [+ latent_dims (VAE latents) when use_vae].
+    #   [0:3]   unit vector to target (vehicle frame)
+    #   [3]     normalized distance to target, clamped [0, 1]
+    #   [4:7]   vehicle linear velocity
+    #   [7:10]  body angular velocity
+    #   [10:13] gravity vector in body frame (normalized)
+    #   [13:17] previous (transformed) action: thrust, roll, pitch, yaw_rate
+    #   [17:17+latent_dims] DepthVAE latents (only when vae_config.use_vae)
+    observation_space_dim = 17 + (vae_config.latent_dims if vae_config.use_vae else 0)
     privileged_observation_space_dim = 0
 
     # Per-dimension observation bounds for the PopSAN population encoder.
@@ -42,31 +81,32 @@ class task_config:
     # [-5, 5] by RunningMeanStd when normalize_input=True), NOT raw units.
     # Tune from tools/collect_obs_stats.py if empirically tighter values help.
     #
-    # observation_layout is the single source of truth for the 44D vector;
+    # observation_layout is the single source of truth for the observation
+    # vector and MUST match process_obs_for_task() in navigation_task.py;
     # observation_bounds is derived from it below. Editing the layout or the
     # per-type bounds is enough — no per-index numbers to maintain.
     observation_layout = [
-        (slice(0, 2),   "log_distance"),        # log(d_hor+1), log(|d_vert|+1) — world
-        (slice(2, 4),   "bearing_azimuth"),     # cos/sin bearing azimuth — world
-        (slice(4, 5),   "elevation_angle"),     # elevation angle to target — world
-        (slice(5, 7),   "yaw"),                 # cos/sin drone yaw — world
-        (slice(7, 8),   "v_xy"),                # horizontal speed — body
-        (slice(8, 9),   "v_z"),                 # vertical speed — body
-        (slice(9, 11),  "track_bearing"),       # cos/sin track azimuth — body (masked)
-        (slice(11, 12), "track_elevation"),     # track elevation — body (masked)
-        (slice(12, 44), "vae_latent"),          # DepthVAE latents
+        (slice(0, 3),   "direction_to_target"), # unit vector to target — vehicle frame
+        (slice(3, 4),   "distance"),            # normalized distance to target, clamped [0,1]
+        (slice(4, 7),   "linvel"),              # vehicle linear velocity
+        (slice(7, 10),  "angvel"),              # body angular velocity
+        (slice(10, 13), "gravity"),             # gravity in body frame (normalized)
+        (slice(13, 17), "prev_action"),         # transformed action: thrust, roll, pitch, yaw_rate
     ]
+    # VAE latents only when enabled; appended so the state dims keep indices [0:17].
+    if vae_config.use_vae:
+        observation_layout.append(
+            (slice(17, 17 + vae_config.latent_dims), "vae_latent")  # DepthVAE latents
+        )
 
     observation_type_bounds = {
-        "log_distance":    (-3.0, 3.0),
-        "bearing_azimuth": (-3.0, 3.0),
-        "elevation_angle": (-3.0, 3.0),
-        "yaw":             (-3.0, 3.0),
-        "v_xy":            (-3.0, 3.0),
-        "v_z":             (-3.0, 3.0),
-        "track_bearing":   (-3.0, 3.0),
-        "track_elevation": (-3.0, 3.0),
-        "vae_latent":      (-3.0, 3.0),
+        "direction_to_target": (-3.0, 3.0),
+        "distance":            (-3.0, 3.0),
+        "linvel":              (-3.0, 3.0),
+        "angvel":              (-3.0, 3.0),
+        "gravity":             (-3.0, 3.0),
+        "prev_action":         (-3.0, 3.0),
+        "vae_latent":          (-3.0, 3.0),
     }
 
     # Expand layout + per-type bounds into a flat per-index list of (min, max).
@@ -112,35 +152,18 @@ class task_config:
         # Terminal rewards
         "arrive_bonus_min": 10.0,        # arrival reward at curriculum level 0 (easy)
         "arrive_bonus_max": 15.0,        # arrival reward at max curriculum level (hard)
-        "collision_penalty": -20.0,     # obstacle collision termination
-        "exceed_penalty": -20.0,        # out-of-bounds termination
+        "collision_penalty": -10.0,     # obstacle collision termination
+        "exceed_penalty": -10.0,        # out-of-bounds termination
         "timeout_penalty": -2.0,          # episode timeout termination
         "d_min": 0.4,                   # arrival distance threshold (meters)
-        # Progress reward (dense shaping, all lambda < 0)
-        "lambda_d": -0.1,           # distance to target (horizontal + vertical)
-        "lambda_dz": -0.1,          # vertical distance to target (encourage altitude adjustments)
-        "lambda_v": -0.01,         # velocity-goal direction misalignment
-        "lambda_bearing": -0.01,           # projection of velocity onto target direction (encourage movement towards target)
-        "lambda_path_deviation": -0.005,    # velocity misalignment with target direction (encourage movement towards target)
-        "lambda_jerk": 0.0,      # jerk penalty to encourage smooth control
+        
+        # Progress reward (dense shaping)
+        "lambda_b": 0.1,          # Rewards velocity in target direction (encourage movement towards target)
+        "lambda_p": 0.5,           # Rewards closing distance to target (encourage progress)
+
+        "lambda_v": -0.1,         # Penlizes velocity above v_max (encourage speed control for safety)
+        "lambda_jerk": -0.01,      # Penalty on jerk (change in acceleration) to encourage smooth control
     }
-    
-    class vae_config:
-        """Custom 32D DepthVAE configuration."""
-        use_vae = True
-        latent_dims = 32
-
-        # Path to trained DepthVAE checkpoint
-        model_file = "/workspaces/aerial_gym_docker/vae_depth/runs/20260218_204641/checkpoints/epoch_150.pth"
-
-        # DepthVAE input resolution
-        target_height = 180
-        target_width = 320
-
-        # Depth range parameters
-        max_depth_m = 7.0
-        min_depth_m = 0.1
-        sensor_max_range = 10.0
 
     class curriculum:
         """
@@ -155,6 +178,15 @@ class task_config:
         decrease_step = 1
         success_rate_for_increase = 0.7
         success_rate_for_decrease = 0.6
+
+        # VAE warm-up gating (only active when vae_config.use_vae). Two-phase warm-up at
+        # level 0 before any obstacles appear: Phase A trains with the VAE gated off
+        # (latents distract while the room is empty); once level-0 success ≥
+        # vae_gate_until_success the VAE is enabled (Phase B); the curriculum stays pinned
+        # at level 0 until an ungated window also reaches vae_consolidate_success, then
+        # normal advancement resumes (Phase C). Kept as two knobs so they can diverge later.
+        vae_gate_until_success = 0.90   # Phase A→B: enable VAE once level-0 success ≥ this
+        vae_consolidate_success = 0.90  # Phase B→C: resume normal curriculum once ungated level-0 success ≥ this
 
     @staticmethod
     def action_transformation_function(action):

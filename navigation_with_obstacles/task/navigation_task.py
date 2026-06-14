@@ -10,15 +10,14 @@ Features:
 - 25-level curriculum: panels (levels 0-5), cumulative panels + objects (levels 6-25)
 - Custom 32D DepthVAE encoding (matching VAE training distribution)
 - Randomized environment bounds: L×W×H in [8,12]×[5,8]×[4,6]
-- Observation (44D): state(12) + VAE latent(32). See process_obs_for_task() for layout.
+- Observation (49D): state(17) + VAE latent(32). See process_obs_for_task() for layout.
 """
 from aerial_gym.task.base_task import BaseTask
 from aerial_gym.sim.sim_builder import SimBuilder
-from aerial_gym.utils.math import (
-    torch_rand_float_tensor,
-    torch_interpolate_ratio,
-)
+from aerial_gym.utils.math import *
 from aerial_gym.utils.logging import CustomLogger
+
+from vae_depth.vae_image_encoder import DepthVAEImageEncoder
 
 import os
 import torch
@@ -41,10 +40,8 @@ class NavigationWithObstaclesTask(BaseTask):
     """
     Navigation task with obstacle curriculum and attitude control.
 
-    Observation (44D): see process_obs_for_task() for full layout.
-        [0:12]  state: distances, bearing, yaw, velocities, track angles
-        [12:44] VAE latent encoding (32D)
-
+    Observation: see process_obs_for_task() for full layout.
+        
     Action (4D) for lee_attitude_control (vehicle frame):
         [0]     thrust command (in [-1, 1]; controller maps to [0, 2*m*g])
         [1]     roll command (rad)
@@ -124,7 +121,6 @@ class NavigationWithObstaclesTask(BaseTask):
 
         # VAE encoder for depth images (custom DepthVAE). Encodes all envs in one batch.
         if self.task_config.vae_config.use_vae:
-            from vae_depth.vae_image_encoder import DepthVAEImageEncoder
             self.vae_model = DepthVAEImageEncoder(
                 config=self.task_config.vae_config, device=self.device
             )
@@ -155,6 +151,17 @@ class NavigationWithObstaclesTask(BaseTask):
         )
         self.curriculum_progress_fraction = 0.0
 
+        # VAE warm-up state machine (see check_and_update_curriculum_level):
+        #   "A" gated (vae_gate=0) -> "B" ungated consolidation -> "C" normal curriculum.
+        # Only runs when the VAE is part of the observation; otherwise jump straight to "C".
+        # task_config.vae_gate is the process-global flag the PopSAN actor reads each forward.
+        if self.task_config.vae_config.use_vae:
+            self.vae_phase = "A"
+            self.task_config.vae_gate = 0.0
+        else:
+            self.vae_phase = "C"
+            self.task_config.vae_gate = 1.0
+
         # Curriculum tracking aggregates
         self.success_aggregate = 0
         self.crashes_aggregate = 0
@@ -171,8 +178,7 @@ class NavigationWithObstaclesTask(BaseTask):
         # IsaacAlgoObserver overwrites direct_info each step and only logs the
         # last step's values, so we use an EMA to smooth across steps.
         self._reward_comp_ema = {
-            "r_dist_hor": 0.0, "r_dist_vert": 0.0, "r_speed": 0.0,
-            "r_bearing": 0.0, "r_path_deviation": 0.0, "r_jerk": 0.0,
+            "r_heading": 0.0, "r_progress": 0.0, "p_speed": 0.0, "p_jerk": 0.0,
         }
         self._ema_alpha = 0.02  # smooth over ~50 steps
 
@@ -329,11 +335,16 @@ class NavigationWithObstaclesTask(BaseTask):
             dim=1,
         )
 
+        # Reset previous action to the neutral/hover command. The drone spawns
+        # level and motionless (see robot_config init_state: zero attitude and
+        # velocity), so the physically-consistent "previous action" is the
+        # neutral transformed command [thrust=0, roll=0, pitch=0, yaw_rate=0]:
+        self.prev_action[env_ids] = 0.0
+
         # Reset previous angular velocity to current value (avoids spike on first step)
         # Reset VAE latents so first observation doesn't contain stale encodings
         if self.image_latents is not None:
             self.image_latents[env_ids] = 0.0
-        self.prev_action[env_ids] = 0.0
 
         # Store start positions for debug visualization
         if not self._headless:
@@ -393,6 +404,10 @@ class NavigationWithObstaclesTask(BaseTask):
         )
         self.prev_action[:] = current_action
 
+        self.prev_dist[:] = torch.norm(
+            self.target_position - self.obs_dict["robot_position"], dim=1
+        )
+
         # Check for episode timeout (truncation), only for non-terminated envs
         timeout_mask = (self.sim_env.sim_steps > self.task_config.episode_len_steps) & (
             self.terminations == 0
@@ -417,24 +432,26 @@ class NavigationWithObstaclesTask(BaseTask):
         # Timeouts = episode ran out of steps (not arrive/exceed/collision)
         timeouts = timeout_mask.float()
 
-        self.infos["successes"] = successes
-        self.infos["timeouts"] = timeouts
-        self.infos["crashes"] = crashes
-        self.infos["exceeds"] = exceeds
+        # rl_games value-bootstrap signal: bootstrap value ONLY on timeout (artificial
+        # step-limit cutoff), NOT on arrive/exceed/collision (true terminals). Consumed by
+        # a2c_common when value_bootstrap=True: shaped_rewards += gamma * V(s') * time_outs.
+        # timeout_mask already excludes terminated envs, so those get time_outs=0.
+        self.infos["time_outs"] = timeout_mask.float()
         # Scalar metrics for tensorboard logging (IsaacAlgoObserver logs scalars from infos)
         self.infos["curriculum_level"] = float(self.curriculum_level)
         self.infos["success_rate"] = self.logged_success_rate
         self.infos["crash_rate"] = self.logged_crash_rate
         self.infos["exceed_rate"] = self.logged_exceed_rate
         self.infos["timeout_rate"] = self.logged_timeout_rate
+        # VAE warm-up visibility: gate (0/1) and phase as a number (A=0, B=1, C=2).
+        self.infos["vae_gate"] = float(self.task_config.vae_gate)
+        self.infos["vae_phase"] = float({"A": 0, "B": 1, "C": 2}[self.vae_phase])
 
         # Reward components (EMA across steps, horizon-independent)
-        self.infos["reward/r_dist_hor"] = self._reward_comp_ema["r_dist_hor"]
-        self.infos["reward/r_dist_vert"] = self._reward_comp_ema["r_dist_vert"]
-        self.infos["reward/r_speed"] = self._reward_comp_ema["r_speed"]
-        self.infos["reward/r_bearing"] = self._reward_comp_ema["r_bearing"]
-        self.infos["reward/r_path_deviation"] = self._reward_comp_ema["r_path_deviation"]
-        self.infos["reward/r_jerk"] = self._reward_comp_ema["r_jerk"]
+        self.infos["reward/r_heading"] = self._reward_comp_ema["r_heading"]
+        self.infos["reward/r_progress"] = self._reward_comp_ema["r_progress"]
+        self.infos["reward/p_speed"] = self._reward_comp_ema["p_speed"]
+        self.infos["reward/p_jerk"] = self._reward_comp_ema["p_jerk"]
 
         # Displacement to target (used by multiple metrics below)
         robot_pos = self.obs_dict["robot_position"]
@@ -452,6 +469,10 @@ class NavigationWithObstaclesTask(BaseTask):
         self.infos["metrics/dist_to_target"] = float(torch.norm(disp, dim=1).mean())
         self.infos["metrics/v_horizontal"] = float(
             torch.norm(self.obs_dict["robot_linvel"][:, :2], dim=1).mean()
+        )
+        # Vertical velocity = world-frame z component (signed mean: +up / -down)
+        self.infos["metrics/v_vertical"] = float(
+            self.obs_dict["robot_linvel"][:, 2].mean()
         )
         self.infos["metrics/episode_length"] = float(self.sim_env.sim_steps.float().mean())
 
@@ -493,79 +514,78 @@ class NavigationWithObstaclesTask(BaseTask):
             self.infos,
         )
 
+    def _direction_and_distance_to_target(self):
+        """Vehicle-frame unit vector to target and raw distance (meters), current step.
+
+        Uses robot_vehicle_orientation (yaw-only, gravity-aligned heading frame), so
+        the direction is invariant to the drone's roll/pitch and shares a frame with
+        the vehicle-frame velocity used in the bearing reward.
+
+        Single source of truth for both the observation vector
+        (process_obs_for_task) and the heading reward (_reward_progress), so the
+        two never drift out of sync on frame or staleness.
+
+        Returns:
+            direction: (num_envs, 3) unit vector to target in vehicle frame
+            dist:      (num_envs, 1) distance to target in raw meters
+        """
+        vec_to_tgt = quat_rotate_inverse(
+            self.obs_dict["robot_vehicle_orientation"],
+            self.target_position - self.obs_dict["robot_position"],
+        )
+        dist = torch.linalg.norm(vec_to_tgt + 1e-6, dim=1, keepdim=True)
+        direction = vec_to_tgt / (dist + 1e-6)
+        return direction, dist
+
     def process_obs_for_task(self):
         """
-        Build observation vector (44D total).
+        Build observation vector.
 
-        Observation structure:
-        - [0]     log(horizontal_distance_to_target + 1)       world
-        - [1]     log(vertical_distance + 1): vertical dist mag world
-        - [2:4]   cos/sin azimuth (bearing) to target          world
-        - [4]     elevation angle to target                    world
-        - [5:7]   cos/sin yaw angle of drone                   world
-        - [7]     v_xy: horizontal speed                       body
-        - [8]     v_z: vertical speed                          body
-        - [9:11]  cos/sin track bearing azimuth                body
-        - [11]    track bearing elevation                      body
-        - [12:44] vae_latent: DepthVAE encoding (32D)          N/A
+        - [0:3]     unit vector from drone to target                    vehicle
+        - [3]       distance to target (normalized & clamped)           vehicle 
+        - [4:7]     linear velocity (vx, vy, vz)                        vehicle
+        - [7:10]    angular velocity (wx, wy, wz)                       body
+        - [10:13]   gravity vector in body frame (gx, gy, gz)           body
+        - [13:17]   previous action (thrust, roll, pitch, yaw_rate)     cmd (vehicle)
+        - [17:49]   VAE latent encoding (32D)                           N/A
 
-        Total: 44D (12 state + 32 VAE latents)
-        """
-        robot_pos = self.obs_dict["robot_position"]
-        target_pos = self.target_position
-
-        # Displacement from drone to target (world frame)
-        disp = target_pos - robot_pos
-
-        # Horizontal distance (XY plane)
-        d_hor = torch.norm(disp[:, :2], dim=1)
-
-        # Vertical distance (magnitude, sign encoded in elevation angle)
-        d_vert = torch.abs(disp[:, 2])
-
-        # [0] log(horizontal distance)
-        self.task_obs["observations"][:, 0] = d_hor #torch.log(d_hor + 1)
-
-        # [1] log(vertical distance)
-        self.task_obs["observations"][:, 1] = d_vert #torch.log(d_vert + 1)
-
-        # [2:4] cos/sinazimuth (bearing) to target in world frame
-        bearing_azimuth = torch.atan2(disp[:, 1], disp[:, 0])
-        self.task_obs["observations"][:, 2] = torch.cos(bearing_azimuth)
-        self.task_obs["observations"][:, 3] = torch.sin(bearing_azimuth)
-
-        # [4] elevation angle to target in world frame
-        elevation = torch.atan2(disp[:, 2], d_hor)
-        self.task_obs["observations"][:, 4] = elevation
+        Total: 49D observation vector (can be reduced by removing components if needed)."""
         
-        # [5:7] yaw of drone in world frame (cos/sin)
-        drone_yaw = self.obs_dict["robot_euler_angles"][:, 2]
-        self.task_obs["observations"][:, 5] = torch.cos(drone_yaw)
-        self.task_obs["observations"][:, 6] = torch.sin(drone_yaw)
+        # Vehicle-frame unit vector and distance to target (used by both obs and reward, so single source of truth)
+        direction_to_target, dist_to_tgt = self._direction_and_distance_to_target()
 
-        # [7] horizontal speed (body frame)
-        linvel_body = self.obs_dict["robot_body_linvel"]
-        v_xy = torch.norm(linvel_body[:, :2], dim=1)
-        self.task_obs["observations"][:, 7] = v_xy
+        # [0:3] Unit vector to target in vehicle frame
+        self.task_obs["observations"][:, 0:3] = direction_to_target
 
-        # [8] vertical speed (body frame)
-        v_z = linvel_body[:, 2]
-        self.task_obs["observations"][:, 8] = v_z
-
-        # [9:11] track azimuth (bearing in body frame) as cos/sin of atan2(vy/vx)
-        # Masked to zero when near-stationary to avoid noisy direction signal
-        track_azimuth = torch.atan2(linvel_body[:, 1], linvel_body[:, 0])
-        speed_mask = (v_xy > 0.1).float()
-        self.task_obs["observations"][:, 9] = torch.cos(track_azimuth) * speed_mask
-        self.task_obs["observations"][:, 10] = torch.sin(track_azimuth) * speed_mask
-
-        # [11] track elevation as atan2(vz / v_xy), masked when near-stationary
-        track_elevation = torch.atan2(linvel_body[:, 2], v_xy + 1e-6)
-        self.task_obs["observations"][:, 11] = track_elevation * speed_mask
+        # [3] Distance to target, normalized by env diagonal and clamped to [0, 1].
+        # dist_to_tgt is (num_envs, 1); squeeze to (num_envs,) to match max_dist (num_envs,).
+        max_dist = torch.norm(
+            self.obs_dict["env_bounds_max"] - self.obs_dict["env_bounds_min"], dim=-1)
+        self.task_obs["observations"][:, 3] = torch.clamp(
+            dist_to_tgt.squeeze(1) / (max_dist + 1e-6), 0.0, 1.0)
         
-        # [12:44] VAE latent encoding (32D)
+        # [4:7] Linear velocity in vehicle frame
+        self.task_obs["observations"][:, 4:7] = self.obs_dict["robot_vehicle_linvel"]  # TODO: NORMALIZE?
+
+        # [7:10] Angular velocity in body frame
+        self.task_obs["observations"][:, 7:10] = self.obs_dict["robot_body_angvel"] # TODO: NORMALIZE?
+        
+        # [10:13] Gravity vector in body frame (normalized by g)
+        gravity_world = self.obs_dict["gravity"]
+        gravity_body = quat_rotate_inverse(
+            self.obs_dict["robot_orientation"], 
+            gravity_world
+        )
+        self.task_obs["observations"][:, 10:13] = gravity_body / torch.linalg.norm(gravity_body + 1e-6, dim=-1, keepdim=True)
+        # [13:17] Previous action (thrust, roll, pitch, yaw_rate). This is a controller
+        # command vector, not a spatial vector, so it has no coordinate frame; roll/pitch/
+        # yaw_rate are body-axis attitude setpoints for lee_attitude_control.
+        self.task_obs["observations"][:, 13:17] = self.prev_action
+        
+        # ADD VAE LATENTS (32D) TO OBSERVATION VECTOR
+        # [17:49] VAE latent encoding (32D)
         if self.task_config.vae_config.use_vae and self.image_latents is not None:
-            self.task_obs["observations"][:, 12:44] = self.image_latents
+            self.task_obs["observations"][:, 17:49] = self.image_latents
 
     def check_and_update_curriculum_level(self, successes, crashes, timeouts, exceeds):
         """
@@ -597,10 +617,35 @@ class NavigationWithObstaclesTask(BaseTask):
             self.logged_exceed_rate = float(exceed_rate)
             self.logged_timeout_rate = float(timeout_rate)
 
-            if success_rate > self.task_config.curriculum.success_rate_for_increase:
-                self.curriculum_level += self.task_config.curriculum.increase_step
-            elif success_rate < self.task_config.curriculum.success_rate_for_decrease:
-                self.curriculum_level -= self.task_config.curriculum.decrease_step
+            # VAE warm-up phases A/B pin the level at min_level and only handle the gate;
+            # normal increase/decrease runs in phase C. Transitions are monotonic.
+            if self.vae_phase == "A":
+                # Gated: learn pure navigation at level 0 with the VAE cancelled.
+                self.curriculum_level = self.task_config.curriculum.min_level
+                if success_rate >= self.task_config.curriculum.vae_gate_until_success:
+                    self.vae_phase = "B"
+                    self.task_config.vae_gate = 1.0
+                    logger.warning(
+                        f"[VAE warm-up] Phase A->B: level-0 success {success_rate:.3f} "
+                        f">= {self.task_config.curriculum.vae_gate_until_success}; enabling VAE "
+                        "(gate=1.0), staying at level 0 to consolidate with vision."
+                    )
+            elif self.vae_phase == "B":
+                # Ungated consolidation: stay at level 0 until it holds up with vision on.
+                self.curriculum_level = self.task_config.curriculum.min_level
+                if success_rate >= self.task_config.curriculum.vae_consolidate_success:
+                    self.vae_phase = "C"
+                    logger.warning(
+                        f"[VAE warm-up] Phase B->C: ungated level-0 success {success_rate:.3f} "
+                        f">= {self.task_config.curriculum.vae_consolidate_success}; resuming "
+                        "normal curriculum advancement."
+                    )
+            else:
+                # Phase C: normal curriculum advancement.
+                if success_rate > self.task_config.curriculum.success_rate_for_increase:
+                    self.curriculum_level += self.task_config.curriculum.increase_step
+                elif success_rate < self.task_config.curriculum.success_rate_for_decrease:
+                    self.curriculum_level -= self.task_config.curriculum.decrease_step
 
             # Clamp curriculum level
             self.curriculum_level = min(
@@ -709,15 +754,19 @@ class NavigationWithObstaclesTask(BaseTask):
     def _reward_progress(self, mask, current_action):
         """
         Dense shaping reward for non-terminal steps. Balances goal-reaching,
-        flight stability and safety. All lambda coefficients are negative.
+        flight stability and safety.
 
-        Components:
-        1. r_dist_hor:       lambda_d * log(d_hor + 1)
-        2. r_dist_vert:      lambda_dz * log(|d_z| + 1)
-        3. r_speed:          lambda_v * v_hor * max(0, v_hor - v_max)
-        4. r_bearing:        lambda_bearing * |wrap(vel_angle + yaw - target_angle)|
-        5. r_path_deviation: lambda_path_deviation * |vel_angle|
-        6. r_jerk:           lambda_jerk * ||a_curr - a_prev||
+        Components (the total reward is their sum):
+        1. r_bearing:  lambda_b * dot(unit_vec_to_target, unit_vec_velocity)
+                       - REWARDS flying toward the target (cosine of the angle
+                         between the velocity and the direction to the target)
+        2. r_progress: lambda_p * (prev_dist - current_dist)
+                       - REWARDS closing distance to the target this step
+                         (both distances in raw meters)
+        3. p_speed:    lambda_v * v_hor * max(0, v_hor - v_max)
+                       - PENALTIZE horizontal speed above v_max
+        4. p_jerk:     lambda_jerk * ||a_curr - a_prev||
+                       - PENALIZE large changes in the (transformed) action
 
         Args:
             mask: Boolean tensor indicating which envs get this reward
@@ -725,58 +774,49 @@ class NavigationWithObstaclesTask(BaseTask):
             Reward tensor for masked envs
         """
         params = self.task_config.reward_parameters
-        robot_pos = self.obs_dict["robot_position"]
-        target_pos = self.target_position
-        
-        linvel_body = self.obs_dict["robot_body_linvel"]
-        
-        disp = target_pos - robot_pos
 
-        # 1. Horizontal distance penalty: λ_d * (log(d_hor+1))
-        d_hor = torch.norm(disp[:, :2], dim=1)
-        r_dist_hor = params["lambda_d"] * torch.log(d_hor + 1)
+        # 1. Reward heading towards target: λ_b * dot(unit_vec_to_target, unit_vec_velocity)
+        # Compute n/v from the current-step state (NOT task_obs["observations"],
+        # which is only refreshed after compute_rewards in step() and would be one
+        # step stale). The helper is the same source process_obs_for_task uses for
+        # observations[:, 0:3]; robot_vehicle_linvel is the source for [:, 4:7].
+        n, _ = self._direction_and_distance_to_target()  # current-step, vehicle frame
+        v = self.obs_dict["robot_vehicle_linvel"]           # current-step, vehicle frame
+
+        r_bearing = params["lambda_b"] *  torch.linalg.vecdot(n, v / (torch.linalg.norm(v, dim=1, keepdim=True) + 1e-6), dim=1)
+
+        # 2. Reward progress towards target: λ_p * (prev_dist - current_dist).
+        # current_dist MUST be in the same units as self.prev_dist (raw meters,
+        # see step()/reset_idx). Compute it from positions here rather than using
+        # observations[:, 3], which is normalized by the env diagonal to [0, 1].
+        current_dist = torch.norm(
+            self.target_position - self.obs_dict["robot_position"], dim=1
+        )
+        r_progress = params["lambda_p"] * (self.prev_dist - current_dist)
         
-        # Vertical distance penalty: λ_dz * log(d_z+1)
-        d_z = torch.abs(disp[:, 2])
-        r_dist_vert = params["lambda_dz"] * torch.log(d_z + 1)
-
-        # 2. Excess speed penalty: λ_v * v_hor * max(0, v_hor - v_max)
-        vel_hor = torch.norm(linvel_body[:, :2], dim=1)
-        r_speed = torch.clamp(vel_hor - self.task_config.v_max, min=0.0) * params["lambda_v"] * vel_hor
-
-        # 3. Bearing misalignment penalty: λ_bearing * (1 - cos(angle between velocity and target direction))
-        vel_angle = torch.atan2(linvel_body[:, 1], linvel_body[:, 0])
-        target_angle = torch.atan2(disp[:, 1], disp[:, 0])
-        drone_yaw = self.obs_dict["robot_euler_angles"][:, 2]
-        angle_diff = vel_angle + drone_yaw - target_angle
-        r_bearing = params["lambda_bearing"] * torch.abs(
-            torch.atan2(torch.sin(angle_diff), torch.cos(angle_diff))
+        # 3. Excess speed penalty: λ_v * v * max(0, v - v_max)
+        speed = torch.linalg.norm(v, dim=1)
+        p_speed = params["lambda_v"] * speed * torch.clamp(
+            speed - self.task_config.v_max, min=0.0
         )
 
-        # 4. Penalize lateral velocity deviation
-        r_path_deviation = params["lambda_path_deviation"] * torch.abs(vel_angle)
-
-        # 5. Penalize jerk (difference between current and previous transformed actions)
-        r_jerk = params["lambda_jerk"] * torch.norm(
-            current_action - self.prev_action, dim=1
-        )
-
+        # 4. Penalize jerk (difference between current and previous transformed actions)
+        a_curr = current_action
+        a_prev = self.prev_action
+        p_jerk = params["lambda_jerk"] * torch.linalg.norm(a_curr - a_prev, dim=1)
 
         # Apply mask to zero out rewards for envs that had terminal events
-        r_dist_hor = r_dist_hor[mask]
-        r_dist_vert = r_dist_vert[mask]
-        r_speed = r_speed[mask]
         r_bearing = r_bearing[mask]
-        r_path_deviation = r_path_deviation[mask]
-        r_jerk = r_jerk[mask]
+        r_progress = r_progress[mask]
+        p_speed = p_speed[mask]
+        p_jerk = p_jerk[mask]
+        
 
         # Update EMA for tensorboard reward component logging
         a = self._ema_alpha
-        self._reward_comp_ema["r_dist_hor"] += a * (float(r_dist_hor.mean()) - self._reward_comp_ema["r_dist_hor"])
-        self._reward_comp_ema["r_dist_vert"] += a * (float(r_dist_vert.mean()) - self._reward_comp_ema["r_dist_vert"])
-        self._reward_comp_ema["r_speed"] += a * (float(r_speed.mean()) - self._reward_comp_ema["r_speed"])
-        self._reward_comp_ema["r_bearing"] += a * (float(r_bearing.mean()) - self._reward_comp_ema["r_bearing"])
-        self._reward_comp_ema["r_path_deviation"] += a * (float(r_path_deviation.mean()) - self._reward_comp_ema["r_path_deviation"])
-        self._reward_comp_ema["r_jerk"] += a * (float(r_jerk.mean()) - self._reward_comp_ema["r_jerk"])
+        self._reward_comp_ema["r_heading"] += a * (float(r_bearing.mean()) - self._reward_comp_ema["r_heading"])
+        self._reward_comp_ema["r_progress"] += a * (float(r_progress.mean()) - self._reward_comp_ema["r_progress"])
+        self._reward_comp_ema["p_speed"] += a * (float(p_speed.mean()) - self._reward_comp_ema["p_speed"])
+        self._reward_comp_ema["p_jerk"] += a * (float(p_jerk.mean()) - self._reward_comp_ema["p_jerk"])
 
-        return r_dist_hor + r_dist_vert + r_speed + r_bearing + r_path_deviation + r_jerk
+        return r_bearing + r_progress + p_speed + p_jerk

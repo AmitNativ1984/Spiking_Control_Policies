@@ -15,6 +15,7 @@ import logging
 import os
 import sys
 import yaml
+from datetime import datetime
 import numpy as np
 
 logging.getLogger("asset_manager").setLevel(logging.ERROR)
@@ -320,6 +321,13 @@ if __name__ == "__main__":
         # navigation_with_obstacles/runs/
         config["params"]["config"]["train_dir"] = runs_dir
 
+        # rl_games' default run name uses only "_%d-%H-%M-%S" (no year/month),
+        # which makes run folders ambiguous across months. Override it with a
+        # full date+time stamp: <name>_YYYY-MM-DD_HH-MM-SS
+        experiment_name = config["params"]["config"]["name"]
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        config["params"]["config"]["full_experiment_name"] = f"{experiment_name}_{timestamp}"
+
         # DEBUG: surface the runtime values rl_games will actually use
         logger.debug(f"[DEBUG] args['num_envs'] = {args.get('num_envs')!r} (type={type(args.get('num_envs')).__name__})")
         logger.debug(f"[DEBUG] config.num_actors            = {config['params']['config']['num_actors']}")
@@ -350,6 +358,13 @@ if __name__ == "__main__":
         "Starting training..." if args.get("train") else "Starting playback..."
     )
 
+    # Inference/play always runs with the VAE fully enabled, regardless of any curriculum
+    # warm-up phase a checkpoint was saved in. The training-time gate (Phase A=0.0) is a
+    # warm-up device only; the task's curriculum state machine drives it during --train.
+    if not args.get("train"):
+        task_config.vae_gate = 1.0
+        logger.info("[VAE warm-up] play mode: forcing task_config.vae_gate = 1.0 (full VAE)")
+
     if plot_encoding:
         # Wrap run_play: enable recording on the encoder right after player construction,
         # plot once the play loop returns. Confined to the --plot-encoding branch.
@@ -378,7 +393,16 @@ if __name__ == "__main__":
                 logger.info(f"[plot-encoding] play loop finished, recorded {len(encoder._trace)} forward passes")
                 try:
                     from navigation_with_obstacles.tools.plot_encoder_trace import plot_encoder_trace
-                    plot_encoder_trace(encoder, encoder._trace, task_config.observation_layout)
+                    # Save the plots in the run directory — the parent of the checkpoint's
+                    # containing folder (weights live in <run_dir>/nn/, plots go in <run_dir>).
+                    # Falls back to the package runs/ dir when no checkpoint was given.
+                    ckpt = args_.get("checkpoint")
+                    save_dir = (
+                        os.path.dirname(os.path.dirname(os.path.abspath(ckpt)))
+                        if ckpt else None
+                    )
+                    plot_encoder_trace(encoder, encoder._trace,
+                                       task_config.observation_layout, save_dir=save_dir)
                 except Exception:
                     import traceback
                     logger.error("[plot-encoding] plot helper raised — full traceback below")
