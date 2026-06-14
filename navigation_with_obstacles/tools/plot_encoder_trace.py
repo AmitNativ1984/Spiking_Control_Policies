@@ -20,13 +20,17 @@ import snntorch.spikeplot as splt
 def plot_encoder_trace(encoder, trace, observation_layout, save_dir=None):
     """Render encoder receptive fields + per-dim activations from a recorded rollout.
 
+    Produces two figures: one for the state observation dims and a separate one for
+    the VAE-latent dims (when present). Both share the same per-dim layout and are
+    saved into ``save_dir``.
+
     Args:
         encoder: PopulationSpikeEncoder instance (provides means, stds, obs_bounds, pop_dim).
         trace: list of dicts produced by encoder forward when record=True. Each dict has
             "obs" [B, obs_dim], "pop_activity" [B, obs_dim, pop_dim],
             "pop_spikes" [B, obs_dim*pop_dim, num_steps]. We assume B=1 (single env).
         observation_layout: list of (slice, type_name) from task_config.observation_layout.
-            VAE entries are skipped.
+        save_dir: directory to write the PNGs into. Defaults to the package ``runs/`` dir.
     """
     print(f"[plot_encoder_trace] called — trace length: {len(trace)}, matplotlib backend: {matplotlib.get_backend()}")
     if not trace:
@@ -45,24 +49,45 @@ def plot_encoder_trace(encoder, trace, observation_layout, save_dir=None):
     stds  = torch.exp(encoder.log_stds).detach().cpu().numpy().squeeze(0)            # [obs_dim, pop_dim]
     bounds = encoder.obs_bounds.detach().cpu().numpy()                               # [obs_dim, 2]
 
-    # Build the list of state-only dims (skip VAE).
+    # Split the layout into state dims and VAE-latent dims; each group gets its own figure.
     state_dims = []   # list of (dim_index, type_name)
+    vae_dims   = []   # list of (dim_index, type_name)
     for sl, type_name in observation_layout:
-        if type_name == "vae_latent":
-            continue
+        target = vae_dims if type_name == "vae_latent" else state_dims
         for d in range(sl.start, sl.stop):
-            state_dims.append((d, type_name))
+            target.append((d, type_name))
 
-    n = len(state_dims)
+    if save_dir is None:
+        save_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "runs")
+    os.makedirs(save_dir, exist_ok=True)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    _plot_dim_group(state_dims, "state", encoder, obs_all, spikes_all, activity_all,
+                    means, stds, bounds, T, pop_dim, save_dir, timestamp)
+
+    # VAE latents are split into separate figures of VAE_DIMS_PER_FIG dims each so no
+    # single figure becomes excessively tall (32 latents → two files of 16).
+    VAE_DIMS_PER_FIG = 16
+    for chunk_idx, start in enumerate(range(0, len(vae_dims), VAE_DIMS_PER_FIG)):
+        chunk = vae_dims[start:start + VAE_DIMS_PER_FIG]
+        _plot_dim_group(chunk, f"vae_part{chunk_idx + 1}", encoder, obs_all, spikes_all,
+                        activity_all, means, stds, bounds, T, pop_dim, save_dir, timestamp)
+
+
+def _plot_dim_group(dims, group_name, encoder, obs_all, spikes_all, activity_all,
+                    means, stds, bounds, T, pop_dim, save_dir, timestamp):
+    """Render and save a per-dim figure for one group of observation dims."""
+    n = len(dims)
     if n == 0:
-        print("[plot_encoder_trace] no state dims to plot (layout has only VAE?).")
+        print(f"[plot_encoder_trace] no '{group_name}' dims to plot — skipping.")
         return
 
     # Layout: one row per dim, two columns (receptive fields + spike raster).
     fig, axes = plt.subplots(n, 2, figsize=(18, 3.0 * n), squeeze=False)
-    fig.suptitle(f"Encoder trace — {T} rollout steps, pop_dim={pop_dim}, num_steps={encoder.num_steps}", y=1.0)
+    fig.suptitle(f"Encoder trace [{group_name}] — {T} rollout steps, "
+                 f"pop_dim={pop_dim}, num_steps={encoder.num_steps}", y=1.0)
 
-    for row, (d, type_name) in enumerate(state_dims):
+    for row, (d, type_name) in enumerate(dims):
         ax_rf = axes[row, 0]
         ax_sp = axes[row, 1]
 
@@ -107,13 +132,9 @@ def plot_encoder_trace(encoder, trace, observation_layout, save_dir=None):
     fig.tight_layout()
 
     # Always save to disk so a non-interactive (agg) matplotlib backend doesn't lose the plot.
-    if save_dir is None:
-        save_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "runs")
-    os.makedirs(save_dir, exist_ok=True)
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path = os.path.join(save_dir, f"encoder_trace_{timestamp}.png")
+    out_path = os.path.join(save_dir, f"encoder_trace_{group_name}_{timestamp}.png")
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    print(f"[plot_encoder_trace] saved figure → {out_path}")
+    print(f"[plot_encoder_trace] saved {group_name} figure → {out_path}")
 
     # If an interactive backend is available, also pop up the window. With agg this is a no-op.
     if matplotlib.get_backend().lower() != "agg":

@@ -204,7 +204,8 @@
                 "--num_envs=1",
                 "--plot-encoding",
                 "--checkpoint=${input:navCheckpoint}",
-                "--headless=False"
+                "--headless=False",
+                "--curriculum_level=${input:navCurriculum}"
             ],
             "options": {
                 "cwd": "${workspaceFolder}"
@@ -263,6 +264,11 @@
             "id": "navCheckpoint",
             "type": "promptString",
             "description": "Path to Navigation checkpoint (e.g., runs/navigation_with_obstacles_xxx/nn/navigation_with_obstacles.pth)"
+        },
+        {
+            "id": "navCurriculum",
+            "type": "promptString",
+            "description": "Curriculum level for Navigation (e.g., 0, 1, 2, ...)"
         }
     ]
 }
