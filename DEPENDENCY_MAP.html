@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Hardware Dependency Map — Aerial Gym (SNN drone)</title>
+<style>
+  body { font-family: Arial, Helvetica, sans-serif; font-size: 11pt; color: #202124; line-height: 1.4; max-width: 1040px; margin: 24px auto; padding: 0 16px; }
+  h1 { font-size: 20pt; border-bottom: 2px solid #444; padding-bottom: 6px; }
+  h2 { font-size: 15pt; margin-top: 28px; border-bottom: 1px solid #ccc; padding-bottom: 4px; }
+  h3 { font-size: 12.5pt; margin-top: 18px; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 10pt; }
+  th, td { border: 1px solid #b0b0b0; padding: 6px 8px; text-align: left; vertical-align: top; }
+  th { background: #f0f0f0; font-weight: bold; }
+  code { font-family: "Courier New", monospace; background: #f5f5f5; padding: 1px 3px; border-radius: 3px; font-size: 9.5pt; }
+  pre { background: #f5f5f5; border: 1px solid #ddd; padding: 12px; overflow-x: auto; font-family: "Courier New", monospace; font-size: 9pt; line-height: 1.3; }
+  blockquote { border-left: 4px solid #c0c0c0; margin: 12px 0; padding: 4px 14px; color: #444; background: #fafafa; }
+  ol, ul { margin: 8px 0; padding-left: 26px; }
+  li { margin: 5px 0; }
+  .warn { color: #b00; }
+</style>
+</head>
+<body>
+
+<h1>Hardware Dependency Map — Aerial Gym (SNN drone)</h1>
+
+<p><strong>Committed deployment stack:</strong> spiking policy on <strong>Intel Loihi 2</strong>, orchestrated by an
+<strong>NVIDIA Jetson Orin</strong> companion computer, with an <strong>Intel RealSense</strong> depth camera and a
+<strong>Prophesee</strong> event camera for perception / data collection.</p>
+
+<p>The project has <strong>two architecturally distinct phases</strong>:</p>
+<ul>
+<li><strong>Phase A — Train &amp; collect data</strong> → <code>x86_64</code> host + <strong>NVIDIA CUDA GPU</strong> (Isaac Gym sim, VAE + SNN training).</li>
+<li><strong>Phase B — Deploy</strong> → <strong>ARM64</strong> drone compute (Jetson Orin) + <strong>Loihi 2</strong> neuromorphic chip.</li>
+</ul>
+
+<blockquote>The two phases run on <strong>different CPU architectures and different vendors' silicon</strong>.
+Nothing from the NVIDIA <em>simulation</em> stack flies; only trained weights cross the boundary.</blockquote>
+
+<h2>1. Hardware dependency map</h2>
+
+<h3>1a. Phase A — Training &amp; data collection (ground / lab, x86_64)</h3>
+<table>
+<thead><tr><th>Hardware</th><th>Role</th><th>Key constraint</th></tr></thead>
+<tbody>
+<tr><td><strong>x86_64 workstation/server</strong></td><td>Runs Docker image, Isaac Gym sim, VAE + SNN training</td><td>Isaac Gym bindings are <code>linux-x86_64</code> only — <strong>no ARM/Apple Silicon</strong></td></tr>
+<tr><td><strong>NVIDIA CUDA GPU</strong> (render-capable, ≥8 GB, Pascal+)</td><td>GPU physics (PhysX), depth rendering, NN training</td><td>VRAM caps parallel envs: 8 GB → <code>num_envs≈256</code>; needs <code>graphics,display</code> + <code>/dev/dri</code> (Vulkan/EGL)</td></tr>
+<tr><td><strong>Intel RealSense D435/D435i</strong></td><td>Collect <em>real</em> depth images to supplement the simulated VAE dataset</td><td>USB 3.0; specs already mirrored in <code>data_generation/config/camera_config.py</code> (1280×720, 87° HFOV, 0.105–10 m)</td></tr>
+<tr><td><strong>Prophesee event camera</strong> (EVK4 / IMX636)</td><td>Collect/validate event streams for the spiking front-end</td><td>USB 3.0; output is CD events (x, y, polarity, µs timestamp), not frames</td></tr>
+<tr><td><strong>Intel Loihi 2</strong> <em>(optional in Phase A)</em></td><td>Hardware-in-the-loop SNN validation before flight</td><td>Via <strong>INRC cloud</strong> or a <strong>Kapoho Point</strong> board; access gated by Intel INRC</td></tr>
+</tbody>
+</table>
+
+<h3>1b. Phase B — Deployment (onboard the drone)</h3>
+<table>
+<thead><tr><th>Hardware</th><th>Role</th><th>Interface</th></tr></thead>
+<tbody>
+<tr><td><strong>NVIDIA Jetson Orin</strong> (Nano/NX/AGX, ARM64)</td><td>Companion computer: sensor drivers, <strong>VAE inference (TensorRT)</strong>, orchestration, FC bridge, host for Loihi</td><td>Carrier board; USB3 + UART/Ethernet/PCIe</td></tr>
+<tr><td><strong>Intel Loihi 2</strong> (Kapoho Point / Oheo Gulch)</td><td>Runs the spiking <strong>PopSAN</strong> policy at low power</td><td>Connects to host over <strong>Ethernet/USB</strong>; runtime hosted from Jetson (<span class="warn">⚠ see §5</span>)</td></tr>
+<tr><td><strong>Intel RealSense D435</strong></td><td>Onboard depth → Depth VAE encoder</td><td>USB 3.0 → Jetson</td></tr>
+<tr><td><strong>Prophesee event camera</strong></td><td>Onboard events → SNN input (native spiking modality)</td><td>USB 3.0 → Jetson</td></tr>
+<tr><td><strong>Flight controller</strong> (PX4 / ArduPilot)</td><td>Receives Lee/attitude setpoints from the policy</td><td>UART / MAVLink (or ROS 2) ← Jetson</td></tr>
+<tr><td><strong>Drone airframe + power</strong></td><td>Carries SWaP of Jetson + Loihi board + 2 cameras</td><td>Power/weight budget is a real constraint (Loihi boards are dev hardware)</td></tr>
+</tbody>
+</table>
+
+<h2>2. SDKs &amp; toolchains (per hardware)</h2>
+<table>
+<thead><tr><th>Hardware / layer</th><th>SDK / toolchain</th><th>License / access</th><th>Arch</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><strong>Intel Loihi 2</strong></td><td><strong>Lava</strong> + <strong>Lava-DL</strong> (SLAYER/Bootstrap, <code>netx</code>); legacy <strong>NxSDK</strong></td><td>Lava: open (BSD-3 / LGPL-2.1); <strong>chip + NxSDK gated via INRC</strong></td><td>host CPU</td><td>Convert <code>snntorch</code> net → Lava process, deploy/run on chip</td></tr>
+<tr><td><strong>Jetson Orin</strong></td><td><strong>NVIDIA JetPack</strong> = L4T (Ubuntu BSP) + <strong>CUDA</strong> + <strong>cuDNN</strong> + <strong>TensorRT</strong> + VPI</td><td><strong>NVIDIA proprietary</strong> (free, EULA)</td><td><strong>aarch64</strong></td><td>OS + GPU-accelerated VAE inference</td></tr>
+<tr><td><strong>Intel RealSense</strong></td><td><strong>Intel RealSense SDK 2.0</strong> = <code>librealsense2</code> + <code>pyrealsense2</code></td><td><strong>Apache-2.0</strong> (open)</td><td>x86_64 + aarch64</td><td>Capture/stream depth (dataset + onboard)</td></tr>
+<tr><td><strong>Prophesee event cam</strong></td><td><strong>Metavision SDK</strong> (core = <strong>OpenEB</strong>)</td><td>OpenEB <strong>Apache-2.0</strong>; some Pro/ML modules <strong>commercial-licensed</strong></td><td>x86_64 + aarch64</td><td>Decode/stream events; event→tensor preprocessing</td></tr>
+<tr><td><strong>Flight controller</strong></td><td><strong>MAVSDK</strong> / <code>pymavlink</code>, optionally <strong>ROS 2</strong></td><td>open-source</td><td>—</td><td>Convert policy output → flight setpoints</td></tr>
+<tr><td><strong>Training / sim</strong></td><td><strong>Isaac Gym Preview 4</strong>, PyTorch (NGC), <code>snntorch==0.9.4</code>, <code>rl_games</code></td><td>Isaac Gym <strong>proprietary</strong>; rest open</td><td>x86_64</td><td>Sim, dataset, VAE + SNN training</td></tr>
+</tbody>
+</table>
+
+<h2>3. Proprietary &amp; gated tools</h2>
+<table>
+<thead><tr><th>Tool</th><th>Vendor</th><th>Gate / restriction</th><th>Impact</th></tr></thead>
+<tbody>
+<tr><td><strong>Isaac Gym Preview 4</strong></td><td>NVIDIA</td><td>Account-gated download, proprietary EULA, <strong>not redistributable</strong>, x86_64-only, <strong>deprecated</strong></td><td>Hard lock-in for Phase A; caps project at <strong>Python &lt;3.9</strong></td></tr>
+<tr><td><strong>Loihi 2 silicon + INRC access</strong></td><td>Intel</td><td><strong>Requires Intel Neuromorphic Research Community membership</strong>; hardware not on open market</td><td>Phase B blocked without INRC; programmatic dependency on Intel's research program</td></tr>
+<tr><td><strong>NxSDK</strong> (if used over Lava)</td><td>Intel</td><td>Gated under INRC</td><td>Avoid if possible — prefer open Lava</td></tr>
+<tr><td><strong>JetPack / L4T / TensorRT / CUDA</strong></td><td>NVIDIA</td><td>Proprietary license (free), Jetson-locked</td><td>Standard NVIDIA edge lock-in; ties inference to NVIDIA edge GPU</td></tr>
+<tr><td><strong>NGC base image</strong> <code>nvcr.io/nvidia/pytorch:22.12-py3</code></td><td>NVIDIA</td><td>Registry-gated</td><td>Pins CUDA/torch for training</td></tr>
+<tr><td><strong>Metavision Pro / ML modules</strong></td><td>Prophesee</td><td>Commercial license for advanced features (core OpenEB is free)</td><td>Fine if you stay within OpenEB</td></tr>
+<tr><td><strong>Device firmware</strong> (Loihi 2, RealSense, Prophesee, Jetson)</td><td>resp. vendors</td><td>Closed firmware</td><td>SDKs are open, silicon/firmware are not</td></tr>
+</tbody>
+</table>
+
+<h2>4. Data &amp; model flow (train → export → deploy)</h2>
+<pre>
+PHASE A — TRAIN (x86_64 + NVIDIA CUDA GPU)
+  Isaac Gym sim  ─► simulated depth ─┐
+  RealSense D435 ─► real depth      ─┼─► Depth VAE (PyTorch)  ─► latent z
+  Prophesee EVK  ─► event streams   ─┘                              │
+                                                                    ▼
+        state + latent z + events ─► PopSAN SNN (snntorch, CUBA-LIF, multi-timestep)
+                                                                    │
+                                          export (lava-dl / netx, + quantization)
+                                                                    ▼
+                                                        Loihi 2 executable
+
+PHASE B — DEPLOY (drone: Jetson Orin ARM64 + Loihi 2)
+  RealSense ─► librealsense2 ─► VAE encoder (TensorRT on Jetson GPU) ─► z ┐
+  Prophesee ─► Metavision ───► event tensor ─────────────────────────────┼─► Loihi 2 (Lava) PopSAN ─► action
+  FC state estimate ─────────────────────────────────────────────────────┘                          │
+                                                                                                      ▼
+                                          action ─► Jetson ─► MAVLink ─► PX4/ArduPilot ─► motors
+</pre>
+<p><strong>What crosses the sim→real boundary:</strong> only the <strong>trained VAE weights</strong> and the
+<strong>trained SNN parameters</strong> (→ Loihi). All NVIDIA <em>simulation</em> binaries (Isaac Gym, PhysX,
+FleX, Carbonite) stay on the training host.</p>
+
+<h2>5. Integration risks &amp; open questions</h2>
+<ol>
+<li><strong>Loihi 2 is research hardware.</strong> Kapoho Point / Oheo Gulch are dev boards, <strong>not flight-qualified</strong> — SWaP, vibration, and thermal on an airframe are unproven. Plan a tethered / hardware-in-the-loop stage before free flight.</li>
+<li><strong>INRC dependency.</strong> Loihi 2 access requires Intel INRC membership; this is a programmatic/legal gate, not just a purchase.</li>
+<li><span class="warn"><strong>⚠ Host-arch question for Loihi 2.</strong></span> The Loihi runtime host tooling has historically been <strong>x86_64 Linux</strong>. Whether the Lava/Loihi runtime is supported with an <strong>aarch64 Jetson Orin host</strong> must be <strong>verified with Intel</strong> — if not, an x86 single-board host (or a different topology) is needed between Jetson and the chip.</li>
+<li><strong><code>snntorch</code> → Lava export gap.</strong> No exporter exists in-repo. CUBA-LIF parameter mapping (<code>alpha</code>/<code>beta</code>/thresholds), <strong>fixed-point weight quantization</strong>, and discrete-timestep alignment are the main accuracy risks.</li>
+<li><strong>Two perception modalities.</strong> Frame depth (RealSense→VAE, on Jetson GPU) and events (Prophesee→SNN) need <strong>time synchronization</strong> and a clear split of which signal drives the policy — two pipelines to build and calibrate.</li>
+<li><strong>Architecture split.</strong> Train = x86_64/NVIDIA; deploy = aarch64/Intel-Loihi. Every deploy SDK must have an <strong>aarch64 build</strong> (librealsense2, Metavision, Lava ✓; verify Loihi runtime per #3).</li>
+</ol>
+
+<h2>Appendix — Phase A software stack (for completeness)</h2>
+<table>
+<thead><tr><th>Package</th><th>Pin</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td><code>aerial_gym_simulator</code></td><td><code>main</code> (ntnu-arl)</td><td>Drone task/env layer over Isaac Gym</td></tr>
+<tr><td><code>torch</code>/<code>torchvision</code></td><td>from NGC image</td><td>Untouched; extras installed <code>--no-deps</code></td></tr>
+<tr><td><code>snntorch</code></td><td><code>==0.9.4</code> (<code>--ignore-requires-python --no-deps</code>)</td><td>CUBA-LIF fix; bypasses Py3.9 gate on Py3.8</td></tr>
+<tr><td><code>rl_games</code></td><td>aerial_gym dep</td><td>PPO runner</td></tr>
+<tr><td><code>opencv-python</code></td><td><code>==4.5.5.64</code></td><td>Avoids <code>cv2.dnn.DictValue</code> crash</td></tr>
+<tr><td><code>wandb</code>, <code>loguru</code></td><td>unpinned</td><td>Tracking / logging</td></tr>
+</tbody>
+</table>
+<p>Repo modules: <code>data_generation/</code> (depth dataset) → <code>vae_depth/</code> (Depth VAE) →
+<code>navigation_with_obstacles/</code> (PopSAN + VAE, active branch). Cluster training via
+<code>slurm/</code> (Pyxis/enroot <code>.sqsh</code>, 1 GPU + 8 CPU).</p>
+
+</body>
+</html>

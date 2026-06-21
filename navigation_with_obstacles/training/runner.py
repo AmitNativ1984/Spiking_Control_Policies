@@ -47,6 +47,7 @@ from navigation_with_obstacles.networks.snn.popsan import POPSANNetworkBuilder
 from navigation_with_obstacles.networks.ann.actor_critic import MLPActorCriticNetworkBuilder
 from navigation_with_obstacles.networks.ann.gru_actor_critic import GRUActorCriticNetworkBuilder
 from rl_games.algos_torch import model_builder
+from rl_games.algos_torch.a2c_continuous import A2CAgent
 
 # =============================================================================
 # Register Custom Environment, Task, and Networks
@@ -159,6 +160,48 @@ vecenv.register(
         config_name, num_actors, **kwargs
     ),
 )
+
+
+# =============================================================================
+# Weights & Biases checkpoint upload
+# =============================================================================
+
+
+def enable_wandb_checkpoint_upload():
+    """Wrap A2CAgent.save so every rl_games checkpoint is uploaded to W&B.
+
+    rl_games calls ``agent.save(fn)`` for best/last/periodic checkpoints, where
+    ``fn`` is the path WITHOUT the ``.pth`` extension (``save_checkpoint`` appends
+    it). We always log to a single artifact name and overwrite it, so W&B only
+    ever stores the latest weights (keeps storage small).
+    """
+    original_save = A2CAgent.save
+
+    def save_with_wandb_upload(self, fn):
+        result = original_save(self, fn)
+        # Only upload if a W&B run is active.
+        if wandb.run is None:
+            return result
+        ckpt_path = fn if fn.endswith(".pth") else fn + ".pth"
+        if not os.path.exists(ckpt_path):
+            logger.warning(f"[wandb] checkpoint not found, skipping upload: {ckpt_path}")
+            return result
+        try:
+            artifact = wandb.Artifact(
+                name=f"{wandb.run.id}-checkpoint", type="model"
+            )
+            # Always store under the same filename inside the artifact so the
+            # latest weights overwrite the previous version.
+            artifact.add_file(ckpt_path, name="latest.pth")
+            wandb.log_artifact(artifact, aliases=["latest"])
+            logger.info(f"[wandb] uploaded checkpoint as artifact (latest): {ckpt_path}")
+        except Exception:
+            import traceback
+            logger.error("[wandb] checkpoint upload failed — full traceback below")
+            traceback.print_exc()
+        return result
+
+    A2CAgent.save = save_with_wandb_upload
 
 
 # =============================================================================
@@ -353,6 +396,8 @@ if __name__ == "__main__":
             monitor_gym=True,
             save_code=True,
         )
+        # Upload every rl_games checkpoint to W&B (overwriting a single artifact).
+        enable_wandb_checkpoint_upload()
 
     logger.info(
         "Starting training..." if args.get("train") else "Starting playback..."
