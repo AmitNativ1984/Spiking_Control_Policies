@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Interface &amp; Tooling Requirements — Edge Deployment</title>
+<style>
+  body { font-family: Arial, Helvetica, sans-serif; font-size: 11pt; color: #202124; line-height: 1.4; max-width: 1040px; margin: 24px auto; padding: 0 16px; }
+  h1 { font-size: 20pt; border-bottom: 2px solid #444; padding-bottom: 6px; }
+  h2 { font-size: 15pt; margin-top: 28px; border-bottom: 1px solid #ccc; padding-bottom: 4px; }
+  h3 { font-size: 12.5pt; margin-top: 18px; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 10pt; }
+  th, td { border: 1px solid #b0b0b0; padding: 6px 8px; text-align: left; vertical-align: top; }
+  th { background: #f0f0f0; font-weight: bold; }
+  code { font-family: "Courier New", monospace; background: #f5f5f5; padding: 1px 3px; border-radius: 3px; font-size: 9.5pt; }
+  pre { background: #f5f5f5; border: 1px solid #ddd; padding: 12px; overflow-x: auto; font-family: "Courier New", monospace; font-size: 9pt; line-height: 1.3; }
+  blockquote { border-left: 4px solid #c0c0c0; margin: 12px 0; padding: 4px 14px; color: #444; background: #fafafa; }
+  ol, ul { margin: 8px 0; padding-left: 26px; }
+  li { margin: 5px 0; }
+  .warn { color: #b00; }
+</style>
+</head>
+<body>
+
+<h1>Interface &amp; Tooling Requirements — Edge Deployment</h1>
+
+<p>Runtime engines, API/interchange definitions, custom toolchains, compiler requirements,
+and integration frameworks for getting this project's trained models onto the edge.</p>
+
+<p><strong>Target stack (committed):</strong> NVIDIA <strong>Jetson Orin</strong> (companion, ARM64) + Intel <strong>Loihi 2</strong>
+(neuromorphic), with <strong>RealSense</strong> depth and <strong>Prophesee</strong> event cameras.</p>
+
+<h2>1. Executive summary</h2>
+<p>This project produces <strong>two model artifacts with fundamentally different execution semantics</strong>,
+so it needs <strong>two separate runtime/toolchain stacks</strong> — there is no single edge runtime that covers both.</p>
+<table>
+<thead><tr><th>Artifact</th><th>Nature</th><th>Where it runs</th><th>Runtime path</th></tr></thead>
+<tbody>
+<tr><td><strong>Depth VAE encoder</strong> (<code>vae_depth/model.py</code>)</td><td>Conventional <strong>CNN</strong>, static feed-forward graph</td><td>Jetson Orin <strong>GPU</strong></td><td>PyTorch → <strong>ONNX</strong> → <strong>TensorRT</strong> (or ONNX Runtime)</td></tr>
+<tr><td><strong>PopSAN policy</strong> (<code>navigation_with_obstacles/networks/snn/</code>)</td><td><strong>Spiking</strong>, stateful, multi-timestep CUBA-LIF</td><td><strong>Loihi 2</strong></td><td>snntorch → <strong>NIR</strong> → <strong>Lava</strong> → Loihi</td></tr>
+</tbody>
+</table>
+<blockquote><strong>The key finding for "popular edge runtimes":</strong> TensorFlow Lite Micro, ONNX Runtime Mobile,
+and TFLite handle the <strong>VAE</strong> fine, but <strong>none of them can represent the spiking PopSAN</strong> —
+they are static-tensor, feed-forward graph runtimes with no concept of membrane state, firing thresholds,
+reset dynamics, or a discrete time loop. The SNN requires a <strong>neuromorphic toolchain (NIR + Lava)</strong>,
+which is a different software universe.</blockquote>
+
+<h2>2. The two model artifacts (what we actually have to ship)</h2>
+<h3>2a. Depth VAE encoder — <code>vae_depth/model.py : DepthEncoder</code></h3>
+<ul>
+<li><strong>Input:</strong> <code>[B, 1, 180, 320]</code> single-channel depth.</li>
+<li><strong>Ops:</strong> 4× (<code>Conv2d</code> strided + <code>BatchNorm2d</code> + <code>ELU</code>), 1×1 conv channel-reduce, flatten, 2× <code>Linear</code>.</li>
+<li><strong>Output:</strong> <code>[B, 2*latent_dim]</code>; <strong>inference uses <code>mu</code> only, deterministic</strong> (<code>vae_image_encoder.py</code>), so the decoder and sampling head are dropped on-device.</li>
+<li><strong>Verdict:</strong> 100% standard ops → exports cleanly to ONNX; ideal for TensorRT/ONNX Runtime.</li>
+</ul>
+<h3>2b. PopSAN spiking policy — <code>pop_spiking_actor.py : PopulationSpikingActorNetwork</code></h3>
+<ul>
+<li><strong>Encoder:</strong> population spike encoder (per-dim Gaussian receptive fields → spike trains, <code>num_steps</code> long).</li>
+<li><strong>Body:</strong> 3× (<code>nn.Linear</code> → <code>snn.Synaptic</code>). <strong><code>snn.Synaptic</code> = 2nd-order CUBA-LIF</strong> (<code>alpha</code>=current/synaptic decay, <code>beta</code>=membrane decay, threshold, reset) — this <strong>is Loihi 2's native neuron model</strong>.</li>
+<li><strong>Temporal:</strong> explicit <code>for t in range(num_steps)</code> loop (5 steps), stateful (<code>syn</code>,<code>mem</code>) carried across steps, output spikes accumulated then averaged → <code>SpikeDecoder</code>.</li>
+<li><strong>Training-only bits to strip:</strong> surrogate gradients (<code>atan</code>/<code>sigmoid</code>), critic head, rl_games normalization.</li>
+<li><strong>Verdict:</strong> <strong>not expressible in ONNX/TFLite</strong> — needs a spiking IR (NIR) and a neuromorphic runtime (Lava/Loihi).</li>
+</ul>
+
+<h2>3. Runtime engines</h2>
+<table>
+<thead><tr><th>Engine</th><th>Vendor</th><th>Runs on</th><th>Use in this project</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td><strong>TensorRT</strong></td><td>NVIDIA</td><td>Jetson Orin GPU (aarch64)</td><td><strong>Primary VAE runtime</strong></td><td>Best Jetson perf; consumes ONNX; produces a device/version-specific <code>.engine</code>/<code>.plan</code></td></tr>
+<tr><td><strong>ONNX Runtime</strong> (+ CUDA/TensorRT EPs)</td><td>MS/community</td><td>Jetson (aarch64 build)</td><td>Alt VAE runtime / quick bring-up</td><td>More portable than raw TensorRT; can delegate to TensorRT EP</td></tr>
+<tr><td><strong>Lava runtime</strong> (<code>lava</code>, magma)</td><td>Intel</td><td>Host CPU (drives Loihi) + Loihi NeuroCores</td><td><strong>PopSAN runtime</strong></td><td>Process/channel model; compiles graph to NeuroCores; <span class="warn">runtime host historically x86_64 — verify aarch64/Jetson support</span></td></tr>
+<tr><td><strong>LibTorch / TorchScript</strong></td><td>Meta</td><td>Jetson</td><td>Fallback for VAE <em>and</em> SNN (CPU/GPU, no Loihi)</td><td>Lets the SNN run as a plain PyTorch loop if Loihi integration slips — HIL baseline</td></tr>
+<tr><td><strong>TFLite Micro</strong></td><td>Google</td><td>MCUs (Cortex-M, bare metal)</td><td><strong>Not applicable</strong></td><td>For KB-RAM microcontrollers with no OS; Jetson runs full Linux+CUDA. Wrong tier.</td></tr>
+<tr><td><strong>ONNX Runtime Mobile / TFLite</strong></td><td>—</td><td>phones / mobile CPU/NPU</td><td><strong>Not the right fit</strong></td><td>Aimed at ARM CPU/mobile-NPU; on Jetson, TensorRT beats them and neither runs the SNN</td></tr>
+</tbody>
+</table>
+
+<h2>4. API definitions / interchange formats</h2>
+<table>
+<thead><tr><th>Format</th><th>Role</th><th>This project</th></tr></thead>
+<tbody>
+<tr><td><strong>ONNX</strong> (opset ≥ 13)</td><td>NN interchange (CNN/MLP)</td><td><strong>VAE export format.</strong> <code>torch.onnx.export(DepthEncoder, dummy[1,1,180,320])</code>. Bridge to TensorRT/ONNX RT</td></tr>
+<tr><td><strong>NIR</strong> (Neuromorphic Intermediate Representation)</td><td>"ONNX for spiking nets" — defines CubaLIF, LIF, Linear, etc.</td><td><strong>The SNN interchange.</strong> <code>snntorch</code> ↔ NIR; NIR → Lava import. The principled <code>snntorch</code>→Loihi bridge</td></tr>
+<tr><td><strong>Lava <code>netx</code> / process graph</strong></td><td>Lava-native model description</td><td>Target the SNN compiles into for Loihi</td></tr>
+<tr><td><strong>TensorRT engine (<code>.plan</code>)</strong></td><td>Compiled, device-locked VAE binary</td><td>Build artifact on Jetson (not portable across GPU arch / TRT version)</td></tr>
+<tr><td><strong>TorchScript (<code>.pt</code>)</strong></td><td>Serialized PyTorch graph</td><td>Fallback packaging for VAE/SNN under LibTorch</td></tr>
+<tr><td><strong>MAVLink messages</strong></td><td>FC command/telemetry API</td><td>Policy action → setpoint contract with PX4/ArduPilot</td></tr>
+</tbody>
+</table>
+
+<h2>5. Custom toolchains (export pipelines)</h2>
+<h3>5a. VAE → Jetson (standard, low-risk)</h3>
+<pre>
+DepthEncoder (PyTorch, mu-only)
+   └─ torch.onnx.export ──► model.onnx (opset≥13)
+        └─ trtexec / TensorRT builder (ON the Jetson) ──► depth_vae.plan
+             └─ load via TensorRT C++/Python runtime on Orin GPU
+   (alt) model.onnx ──► ONNX Runtime + TensorRT EP
+</pre>
+<p>Quantization optional: FP16 is the easy Jetson win; INT8 needs a depth-image calibration set.</p>
+<h3>5b. PopSAN → Loihi 2 (custom, the hard part — not in repo)</h3>
+<pre>
+PopulationSpikingActorNetwork (snntorch, snn.Synaptic CUBA-LIF)
+   └─ strip critic + surrogate grad + rl_games norm  (inference-only module)
+        └─ export to NIR  (snntorch NIR export; map Synaptic→CubaLIF node)
+             └─ NIR → Lava import (lava-dl / nir-lava)
+                  └─ Lava compiler ──► fixed-point quantized NeuroCore mapping
+                       └─ deploy to Loihi 2 (Lava runtime, INRC)
+</pre>
+<p><strong>Risks (all on this path):</strong> Synaptic(2nd-order)↔NIR-CubaLIF parameter fidelity;
+<strong>fixed-point weight/threshold quantization</strong> vs. float training; discrete-timestep
+alignment (<code>num_steps</code>); population-encoder reproduction on/around the chip.
+<strong>No exporter exists in the repo today.</strong></p>
+<h3>5c. Fallback (de-risk Loihi): run PopSAN on Jetson GPU</h3>
+<p>Keep the snntorch loop, run via LibTorch/PyTorch on the Orin GPU. Loses the energy benefit but
+unblocks flight tests while the Lava bridge matures. Recommended as an interim milestone.</p>
+
+<h2>6. Compiler / build requirements</h2>
+<table>
+<thead><tr><th>Component</th><th>Compiler / builder</th><th>Requirement</th></tr></thead>
+<tbody>
+<tr><td><strong>TensorRT engine</strong></td><td>TensorRT builder (<code>trtexec</code>) + CUDA toolkit (<code>nvcc</code>)</td><td><strong>Build on-target</strong> (Jetson) or on a host with matching TRT + GPU arch — engines are <strong>not portable</strong> across versions/arch</td></tr>
+<tr><td><strong>Jetson software</strong></td><td><strong>JetPack</strong> = L4T (Ubuntu BSP) + CUDA + cuDNN + TensorRT + VPI</td><td>aarch64; pin a JetPack version (ties CUDA/TRT versions together)</td></tr>
+<tr><td><strong>Loihi mapping</strong></td><td><strong>Lava compiler</strong> (graph → NeuroCores) + fixed-point quantizer</td><td>Runs on the Loihi host; needs INRC SDK access</td></tr>
+<tr><td><strong>aarch64 builds</strong></td><td>cross-compile or build-on-device</td><td>Every on-drone dep (librealsense2, Metavision, ONNX RT, LibTorch) must have an <strong>aarch64</strong> build</td></tr>
+<tr><td><strong>Training image</strong></td><td>NGC CUDA toolchain (<code>nvcc</code>, build-essential, cmake, ninja)</td><td>Already in <code>Dockerfile.base</code>; <strong>x86_64 only</strong></td></tr>
+</tbody>
+</table>
+<blockquote>Architecture split to plan around: <strong>train = x86_64</strong>, <strong>deploy = aarch64</strong>. The training
+Docker image cannot produce a runnable Jetson binary directly — only portable artifacts (ONNX, NIR, weights)
+cross over; final compilation (TensorRT engine, Lava mapping) happens on the target side.</blockquote>
+
+<h2>7. Integration frameworks (on-drone glue)</h2>
+<table>
+<thead><tr><th>Framework</th><th>Role</th><th>Interface</th></tr></thead>
+<tbody>
+<tr><td><strong>ROS 2</strong> (rclpy/rclcpp)</td><td>Node graph: cameras → VAE → policy → FC bridge</td><td>Topics for depth/events/latent/action; aarch64 supported</td></tr>
+<tr><td><strong>librealsense2 / pyrealsense2</strong></td><td>RealSense capture node</td><td>Depth frames → VAE input tensor</td></tr>
+<tr><td><strong>Metavision SDK / OpenEB</strong></td><td>Prophesee capture</td><td>Event stream → tensor / direct SNN input</td></tr>
+<tr><td><strong>Lava process/channel</strong></td><td>Host↔Loihi data movement</td><td>Inject VAE latent + events as input spikes; read action spikes</td></tr>
+<tr><td><strong>MAVSDK / pymavlink</strong></td><td>Policy → flight controller</td><td>Action tensor → MAVLink setpoints (PX4/ArduPilot)</td></tr>
+<tr><td><strong>TensorRT runtime API</strong></td><td>Load/execute VAE engine</td><td>C++/Python on Orin</td></tr>
+</tbody>
+</table>
+<p><strong>Cross-engine boundary to design:</strong> VAE latent <code>z</code> is produced by <strong>TensorRT on the Jetson GPU</strong>
+but consumed by the <strong>PopSAN on Loihi</strong> — a host→Loihi transfer each control step. Latency of this hop
+(plus event preprocessing) is the critical real-time budget.</p>
+
+<h2>8. Edge-runtime suitability matrix</h2>
+<table>
+<thead><tr><th>Runtime</th><th>VAE (CNN)</th><th>PopSAN (SNN)</th><th>Verdict for this project</th></tr></thead>
+<tbody>
+<tr><td><strong>TensorRT</strong></td><td>✅ best on Jetson</td><td>❌ no spiking</td><td><strong>Use for VAE</strong></td></tr>
+<tr><td><strong>ONNX Runtime (+TRT EP)</strong></td><td>✅</td><td>❌</td><td>Fine VAE alt / bring-up</td></tr>
+<tr><td><strong>ONNX Runtime Mobile</strong></td><td>⚠️ works but TRT better on Jetson</td><td>❌</td><td>Not needed (mobile-CPU oriented)</td></tr>
+<tr><td><strong>TFLite</strong></td><td>⚠️ possible</td><td>❌</td><td>Not needed</td></tr>
+<tr><td><strong>TFLite Micro</strong></td><td>❌ wrong tier (MCU/bare-metal)</td><td>❌</td><td><strong>Not applicable</strong> — Jetson is a full Linux SoC</td></tr>
+<tr><td><strong>Apache TVM</strong></td><td>✅ (optional)</td><td>❌</td><td>Only if multi-backend codegen wanted later</td></tr>
+<tr><td><strong>Lava + Loihi</strong></td><td>❌ overkill</td><td>✅ native CUBA-LIF</td><td><strong>Use for PopSAN</strong></td></tr>
+<tr><td><strong>LibTorch/TorchScript</strong></td><td>✅</td><td>✅ (as a loop, no Loihi)</td><td>Good HIL fallback for both</td></tr>
+</tbody>
+</table>
+
+<h2>9. Gaps &amp; recommendations</h2>
+<ol>
+<li><strong>Build the SNN export bridge first</strong> (snntorch → NIR → Lava). It's the only novel, high-risk piece; everything VAE-side is well-trodden.</li>
+<li><strong>Confirm Lava/Loihi host support on aarch64 Jetson</strong> (§3, §6). If unsupported, plan an x86 co-host or revise topology — this gates the whole deployment.</li>
+<li><strong>Adopt ONNX (VAE) + NIR (SNN) as the artifact contract</strong> between training (x86_64) and deployment (aarch64). Keep final compilation on-target.</li>
+<li><strong>Stand up the LibTorch fallback</strong> (§5c) so flight testing isn't blocked on Loihi integration.</li>
+<li><strong>Budget the cross-engine hop</strong> (TensorRT latent → Loihi input) explicitly in the real-time loop.</li>
+<li><strong>Pin JetPack + TensorRT + Lava versions</strong> the way the repo already pins <code>snntorch==0.9.4</code> and <code>opencv==4.5.5.64</code> — engine/IR compatibility is version-sensitive.</li>
+</ol>
+
+</body>
+</html>
