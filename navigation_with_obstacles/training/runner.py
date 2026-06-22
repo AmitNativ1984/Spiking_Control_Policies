@@ -232,6 +232,17 @@ def get_args():
             "action": "store_true",
             "help": "Debug: when combined with --play, record PopSAN encoder activations and plot at end. Forces num_envs=1.",
         },
+        {
+            "name": "--recompute_bounds",
+            "action": "store_true",
+            "help": "Force re-collection of PopSAN encoder observation_bounds even if a cache exists (student/PopSAN --train runs only).",
+        },
+        {
+            "name": "--bounds_steps",
+            "type": int,
+            "default": 10000,
+            "help": "Steps to collect when auto-computing PopSAN encoder observation_bounds.",
+        },
     ]
     args = parse_arguments(
         description="Navigation with Obstacles",
@@ -242,6 +253,68 @@ def get_args():
     if args.sim_device == "cuda":
         args.sim_device += f":{args.sim_device_id}"
     return args
+
+
+def _auto_set_observation_bounds(teacher_ckpt, config_path, num_envs, num_steps, recompute):
+    """Set task_config.observation_bounds for the PopSAN encoder from collected
+    p01/p99 stats. Runs the collector in a SEPARATE subprocess (Isaac Gym allows
+    only one sim per process), which writes a JSON cache; this loads the cache.
+
+    `config_path` is the student YAML, forwarded to the collector so it reads the
+    teacher network architecture from config.distillation (single source of truth).
+    Reuses an existing cache (matching obs_dim) unless `recompute` is True.
+    """
+    import json
+    import subprocess
+    from navigation_with_obstacles.tools.collect_obs_stats import DEFAULT_BOUNDS_CACHE
+
+    obs_dim = task_config.observation_space_dim
+    cache = DEFAULT_BOUNDS_CACHE
+
+    def _load_valid_cache():
+        if not os.path.exists(cache):
+            return None
+        try:
+            with open(cache) as f:
+                payload = json.load(f)
+        except Exception as e:
+            logger.warning(f"[obs-bounds] cache unreadable ({e}); will recompute.")
+            return None
+        if payload.get("obs_dim") != obs_dim or \
+           len(payload.get("observation_bounds", [])) != obs_dim:
+            logger.warning(f"[obs-bounds] cache obs_dim mismatch "
+                           f"({payload.get('obs_dim')} != {obs_dim}); will recompute.")
+            return None
+        return [tuple(b) for b in payload["observation_bounds"]]
+
+    bounds = None if recompute else _load_valid_cache()
+
+    if bounds is None:
+        logger.info(f"[obs-bounds] collecting bounds in a subprocess "
+                    f"(teacher={teacher_ckpt}, steps={num_steps}, envs={num_envs})")
+        cmd = [
+            sys.executable, "-m", "navigation_with_obstacles.tools.collect_obs_stats",
+            f"--teacher_checkpoint={teacher_ckpt}",
+            f"--config={config_path}",
+            f"--num_steps={num_steps}",
+            f"--num_envs={num_envs}",
+            f"--bounds_cache={cache}",
+            "--no_wandb",
+        ]
+        result = subprocess.run(cmd, cwd="/workspaces/aerial_gym_docker")
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"[obs-bounds] collection subprocess failed (exit {result.returncode}); "
+                "fix the teacher checkpoint / collector before training the student.")
+        bounds = _load_valid_cache()
+        if bounds is None:
+            raise RuntimeError("[obs-bounds] subprocess finished but produced no valid cache.")
+
+    assert len(bounds) == obs_dim, \
+        f"[obs-bounds] got {len(bounds)} bounds, expected {obs_dim}"
+    task_config.observation_bounds = bounds
+    logger.info(f"[obs-bounds] task_config.observation_bounds set from cache "
+                f"({len(bounds)} dims).")
 
 
 def update_config(config, args):
@@ -335,6 +408,34 @@ if __name__ == "__main__":
         logger.debug(f"[DEBUG] config.horizon_length        = {config['params']['config']['horizon_length']}")
         logger.debug(f"[DEBUG] config.minibatch_size        = {config['params']['config']['minibatch_size']}")
         logger.debug(f"[DEBUG] config.seq_length            = {config['params']['config'].get('seq_length')}")
+
+        # --- Phase 2: auto-set PopSAN encoder observation_bounds ------------
+        # For a student (PopSAN) training run with a configured teacher, set
+        # task_config.observation_bounds from per-dim p01/p99 collected in the
+        # teacher's NORMALIZED obs space, BEFORE the network is built (the encoder
+        # reads observation_bounds at construction).
+        #
+        # Collection itself runs in a SEPARATE subprocess: Isaac Gym does not
+        # support creating a second sim in a process that will create another, so
+        # we never build the collector's env in the training process. The
+        # subprocess writes a JSON cache; we load it here. Cache is reused unless
+        # --recompute_bounds is passed.
+        net_name = config["params"]["network"]["name"]
+        distill_cfg = config["params"]["config"].get("distillation")
+        if args.get("train") and net_name == "PopSAN" and distill_cfg is not None:
+            teacher_ckpt = distill_cfg.get("checkpoint")
+            if teacher_ckpt and os.path.exists(teacher_ckpt):
+                _auto_set_observation_bounds(
+                    teacher_ckpt=teacher_ckpt,
+                    config_path=config_name,
+                    num_envs=min(config["params"]["config"]["env_config"]["num_envs"], 64),
+                    num_steps=args.get("bounds_steps", 10000),
+                    recompute=args.get("recompute_bounds", False),
+                )
+            else:
+                logger.warning(
+                    f"[obs-bounds] distillation.checkpoint missing/not found "
+                    f"({teacher_ckpt!r}); using task_config default bounds.")
 
         runner = Runner(algo_observer=IsaacAlgoObserver())
         try:

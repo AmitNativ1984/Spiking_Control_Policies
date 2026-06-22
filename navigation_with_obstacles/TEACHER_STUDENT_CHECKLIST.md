@@ -21,12 +21,14 @@ silent neurons). That's independently verifiable and de-risks everything after.
 - [x] Sanity test: feed a batch of real obs, confirm `mu` is finite and in a sane action range.
 
 ## Phase 2 — Observation bounds for the encoder (no silent neurons)
-- [ ] Add an optional `--teacher_checkpoint` to `collect_obs_stats.py` so the rollout is **driven by the ANN's `mu`** instead of random actions (line 94). Keep random as the default fallback.
-- [ ] Run it, collect per-dim `p01/p99` (or `p05/p95`).
-- [ ] Have it emit a ready-to-paste `observation_bounds` list from the chosen percentile.
-- [ ] Set `task_config.observation_bounds` from these. **Handle VAE latents separately** — measure them from the current VAE, not the teacher, if the VAE isn't identical.
-- [ ] Verify the encoder builds: `len(observation_bounds) == input_dim` (asserted in `networks/snn/pop_spiking_actor.py`).
-- [ ] Quick check for silent neurons: feed a batch through `pop_encoder`, confirm every column has nonzero spikes across the batch.
+- [x] Add an optional `--teacher_checkpoint` to `collect_obs_stats.py` so the rollout is **driven by the ANN's `mu`** (clamped to [-1,1], matching play time) instead of random actions. Random kept as default fallback.
+- [x] Run it, collect per-dim `p01/p99`. Bounds are computed in the teacher's **normalized** obs space (raw obs → teacher `running_mean_std` → clamp[-5,5]) so they match what the encoder sees.
+- [x] Emit a ready-to-paste `observation_bounds` list from p01/p99, and write a JSON cache (`obs_stats/observation_bounds.json`).
+- [x] Set `task_config.observation_bounds` automatically at student-run startup. VAE latents are measured from the **live env (current VAE)** in the same rollout — no separate teacher pass.
+- [x] Verify the encoder builds: `len(observation_bounds) == input_dim` (asserted in `runner._auto_set_observation_bounds` and `pop_spiking_actor.py`).
+- [x] Silent-neuron check: collector builds `PopulationSpikeEncoder` with the new bounds, feeds the normalized batch through it, and warns on any column with zero spikes. Degenerate (flat) dims are padded to avoid zero-width ranges.
+
+**Auto-wiring:** `runner.py` runs the collector in a **subprocess** (Isaac Gym allows one sim per process), caches bounds to JSON, and loads them before the network builds. Triggered for `--train` + `network.name == PopSAN` + a valid `config.distillation.checkpoint`. Reuses the cache unless `--recompute_bounds`; `--bounds_steps N` controls collection length.
 
 ## Phase 3 — BC warm-up script (`warmup_snn_from_ann.py`)
 - [ ] Build the SNN actor (`PopulationSpikingActorNetwork`) and the env (reuse the runner's registration block).
