@@ -32,7 +32,7 @@ params:
   config:
     # Teacher Student distillation configuration
     distillation:
-      checkpoint: navigation_with_obstacles/runs/nav_vae_ann_cluster_29-18-25-48/nn/nav_vae_ann_cluster.pth
+      checkpoint: navigation_with_obstacles/runs/nav_vae_ann_cluster_2026-06-22_11-47-23/nn/nav_vae_ann_cluster.pth
       normalize_input: True
       normalize_value: True
       kd_actor_coeff: 0.1

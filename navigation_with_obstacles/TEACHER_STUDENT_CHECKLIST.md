@@ -15,10 +15,10 @@ silent neurons). That's independently verifiable and de-risks everything after.
 - [x] Open the checkpoint and confirm it contains both the network weights **and** `running_mean_std` (rl-games saves these together). Note the exact keys.
 
 ## Phase 1 — Teacher loader (frozen, correct normalization)
-- [ ] Write a helper that builds the **full rl-games teacher model wrapper** (the `ModelA2CContinuousLogStd.Network`, which includes `running_mean_std`), not just the bare `ANNMLPActorCriticNetwork`.
-- [ ] Load the checkpoint into it, call `.eval()`, and `requires_grad_(False)` on all params.
-- [ ] Feed it **raw** obs; let it normalize internally. Verify by spot-checking: same obs → teacher in your loader produces the same `mu` as the teacher does at play time.
-- [ ] Sanity test: feed a batch of real obs, confirm `mu` is finite and in a sane action range.
+- [x] Write a helper that builds the **full rl-games teacher model wrapper** (the `ModelA2CContinuousLogStd.Network`, which includes `running_mean_std`), not just the bare `ANNMLPActorCriticNetwork`.
+- [x] Load the checkpoint into it, call `.eval()`, and `requires_grad_(False)` on all params.
+- [x] Feed it **raw** obs; let it normalize internally. Verify by spot-checking: same obs → teacher in your loader produces the same `mu` as the teacher does at play time.
+- [x] Sanity test: feed a batch of real obs, confirm `mu` is finite and in a sane action range.
 
 ## Phase 2 — Observation bounds for the encoder (no silent neurons)
 - [ ] Add an optional `--teacher_checkpoint` to `collect_obs_stats.py` so the rollout is **driven by the ANN's `mu`** instead of random actions (line 94). Keep random as the default fallback.

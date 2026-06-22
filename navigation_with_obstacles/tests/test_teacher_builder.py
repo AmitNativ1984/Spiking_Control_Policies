@@ -59,5 +59,68 @@ def test_teacher_frozen_and_eval(teacher):
 
 def test_forward_no_grad(teacher, dims):
     obs_dim, _ = dims
-    out = teacher({"is_train": True, "obs": torch.randn(4, obs_dim, device="cuda"), "prev_actions": None})
+    # is_train=False is the play-time / distillation path. (is_train=True would
+    # require a real prev_actions tensor for neglogp, not None.)
+    out = teacher({"is_train": False, "obs": torch.randn(4, obs_dim, device="cuda"),
+                   "prev_actions": None, "rnn_states": None})
     assert not out["mus"].requires_grad
+
+
+@pytest.fixture(scope="module")
+def raw_obs(teacher, dims):
+    """A realistic RAW (un-normalized) obs batch drawn from the teacher's own
+    learned obs statistics, so magnitudes are in-distribution."""
+    obs_dim, _ = dims
+    torch.manual_seed(0)
+    rms = teacher.running_mean_std
+    mean = rms.running_mean.detach().to("cuda").float()
+    std = rms.running_var.detach().to("cuda").float().sqrt()
+    return mean + std * torch.randn(64, obs_dim, device="cuda")
+
+
+def test_internal_normalization_matches_manual(teacher, raw_obs):
+    """Phase 1 bullet 3: feed RAW obs, let the wrapper normalize internally, and
+    verify the resulting mu matches a hand-rolled normalize-then-actor pass.
+    This proves the internal running_mean_std is actually applied and correct."""
+    with torch.no_grad():
+        mu_play = teacher({
+            "is_train": False,
+            "prev_actions": None,
+            "obs": raw_obs.clone(),
+            "rnn_states": None,
+        })["mus"]
+
+        # rl_games RunningMeanStd: (x - mean)/sqrt(var + eps), clamped to +-5.
+        rms = teacher.running_mean_std
+        mean = rms.running_mean.to("cuda").float()
+        var = rms.running_var.to("cuda").float()
+        norm = torch.clamp((raw_obs - mean) / torch.sqrt(var + 1e-5), -5.0, 5.0)
+        mu_manual, _ = teacher.a2c_network.actor(norm)
+
+    max_diff = (mu_play - mu_manual).abs().max().item()
+    assert max_diff < 1e-4, f"loader mu != manual normalize+actor (max {max_diff:.3e})"
+
+
+def test_normalization_is_not_a_noop(teacher, raw_obs):
+    """Guard against a silently-unloaded normalizer: passing RAW obs straight
+    into the bare actor must differ from the normalized (play-time) mu."""
+    with torch.no_grad():
+        mu_play = teacher({
+            "is_train": False, "prev_actions": None,
+            "obs": raw_obs.clone(), "rnn_states": None,
+        })["mus"]
+        mu_on_raw, _ = teacher.a2c_network.actor(raw_obs)
+    assert (mu_on_raw - mu_play).abs().max().item() > 1e-3, \
+        "normalized vs raw mu identical — running_mean_std likely not loaded"
+
+
+def test_mu_finite_and_sane_range(teacher, raw_obs):
+    """Phase 1 bullet 4: mu is finite and within a plausible (pre-squash) range."""
+    with torch.no_grad():
+        mu = teacher({
+            "is_train": False, "prev_actions": None,
+            "obs": raw_obs.clone(), "rnn_states": None,
+        })["mus"]
+    assert torch.isfinite(mu).all(), "teacher mu contains NaN/Inf"
+    assert mu.abs().max().item() < 50.0, \
+        f"mu magnitude {mu.abs().max().item():.1f} implausible — obs scale mismatch?"
