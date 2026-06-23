@@ -27,8 +27,8 @@ params:
         reset_delay: False                  # Whether to delay reset by one timestep
 
       critic:
-        hidden_dims: [256, 256, 64]   # MUST match the teacher critic (distillation.network.critic) for the ANN->SNN critic warm-start
-
+        hidden_dims: [256, 256, 64] 
+  
   config:
     # Teacher Student distillation configuration
     distillation:
@@ -50,7 +50,7 @@ params:
     name: navigation_with_obstacles
     env_name: navigation_with_obstacles_task
     env_config:
-      num_envs: 1024
+      num_envs: 64
       headless: True
       use_warp: True
 
@@ -81,9 +81,9 @@ params:
     clip_value: False
 
     # Batch settings
-    num_actors: 1024
+    num_actors: 64
     horizon_length: 64
-    minibatch_size: 16384
+    minibatch_size: 8192
     mini_epochs: 4
 
     # Value function

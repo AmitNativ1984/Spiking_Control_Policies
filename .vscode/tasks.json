@@ -142,7 +142,7 @@
             "problemMatcher": [],
             "group": "build"
         },
-                {
+        {
             "label": "PLOT ENCODING Hover PopSAN",
             "type": "shell",
             "command": "python",
@@ -166,7 +166,8 @@
             "type": "shell",
             "command": "python",
             "args": [
-                "-m", "navigation_with_obstacles.training.runner",
+                "-m",
+                "navigation_with_obstacles.training.runner",
                 "--file=navigation_with_obstacles/training/ppo_navigation_ann_local.yaml",
                 "--train",
                 "--headless=True"
@@ -182,7 +183,8 @@
             "type": "shell",
             "command": "python",
             "args": [
-                "-m", "navigation_with_obstacles.training.runner",
+                "-m",
+                "navigation_with_obstacles.training.runner",
                 "--file=navigation_with_obstacles/training/popsan_navigation_local.yaml",
                 "--train",
                 "--headless=True"
@@ -198,7 +200,8 @@
             "type": "shell",
             "command": "python",
             "args": [
-                "-m", "navigation_with_obstacles.training.runner",
+                "-m",
+                "navigation_with_obstacles.training.runner",
                 "--file=navigation_with_obstacles/training/popsan_navigation_local.yaml",
                 "--play",
                 "--num_envs=1",
@@ -218,7 +221,8 @@
             "type": "shell",
             "command": "python",
             "args": [
-                "-m", "navigation_with_obstacles.training.runner",
+                "-m",
+                "navigation_with_obstacles.training.runner",
                 "--file=navigation_with_obstacles/training/ppo_navigation.yaml",
                 "--train",
                 "--headless=True",
@@ -235,7 +239,8 @@
             "type": "shell",
             "command": "python",
             "args": [
-                "-m", "navigation_with_obstacles.training.runner",
+                "-m",
+                "navigation_with_obstacles.training.runner",
                 "--file=navigation_with_obstacles/training/ppo_navigation.yaml",
                 "--play",
                 "--num_envs=1",
@@ -247,6 +252,22 @@
             },
             "problemMatcher": [],
             "group": "test"
+        },
+        {
+            "label": "Train Teacher-Student Warmup",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "-m",
+                "navigation_with_obstacles.training.warmup_snn_from_ann",
+                "--file=navigation_with_obstacles/training/popsan_teacher_student_local.yaml",
+                "--headless=True",
+                "--eval_every=10000",
+                "--eval_max_steps=400",
+                "--bounds_steps=2000",
+                "--out=navigation_with_obstacles/runs/warmup_snn.pth"
+            ],
+            "problemMatcher": []
         }
     ],
     "inputs": [
