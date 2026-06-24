@@ -255,14 +255,21 @@ def get_args():
     return args
 
 
-def _auto_set_observation_bounds(teacher_ckpt, config_path, num_envs, num_steps, recompute):
+def _auto_set_observation_bounds(teacher_ckpt, config_path, num_envs, num_steps, recompute,
+                                 min_episodes=0, out_dir=None, curriculum_level=25):
     """Set task_config.observation_bounds for the PopSAN encoder from collected
     p01/p99 stats. Runs the collector in a SEPARATE subprocess (Isaac Gym allows
     only one sim per process), which writes a JSON cache; this loads the cache.
 
     `config_path` is the student YAML, forwarded to the collector so it reads the
     teacher network architecture from config.distillation (single source of truth).
-    Reuses an existing cache (matching obs_dim) unless `recompute` is True.
+
+    Reuses an existing cache only if it matches BOTH obs_dim AND the current teacher
+    checkpoint (a cache built with a different teacher is stale). `recompute` forces a
+    fresh collection. When `min_episodes`/`out_dir` are given they are forwarded to the
+    collector (episode-based stop + where the bounds-encoder PNGs are written).
+    `curriculum_level` pins the collector's env to the teacher's level (default 25) and
+    VAE-on state, so bounds reflect the world the student is actually deployed in.
     """
     import json
     import subprocess
@@ -285,13 +292,19 @@ def _auto_set_observation_bounds(teacher_ckpt, config_path, num_envs, num_steps,
             logger.warning(f"[obs-bounds] cache obs_dim mismatch "
                            f"({payload.get('obs_dim')} != {obs_dim}); will recompute.")
             return None
+        if payload.get("teacher_checkpoint") != teacher_ckpt:
+            logger.warning(f"[obs-bounds] cache was built for a different teacher "
+                           f"({payload.get('teacher_checkpoint')!r} != {teacher_ckpt!r}); "
+                           "will recompute.")
+            return None
         return [tuple(b) for b in payload["observation_bounds"]]
 
     bounds = None if recompute else _load_valid_cache()
 
     if bounds is None:
         logger.info(f"[obs-bounds] collecting bounds in a subprocess "
-                    f"(teacher={teacher_ckpt}, steps={num_steps}, envs={num_envs})")
+                    f"(teacher={teacher_ckpt}, steps={num_steps}, episodes={min_episodes}, "
+                    f"envs={num_envs})")
         cmd = [
             sys.executable, "-m", "navigation_with_obstacles.tools.collect_obs_stats",
             f"--teacher_checkpoint={teacher_ckpt}",
@@ -299,8 +312,13 @@ def _auto_set_observation_bounds(teacher_ckpt, config_path, num_envs, num_steps,
             f"--num_steps={num_steps}",
             f"--num_envs={num_envs}",
             f"--bounds_cache={cache}",
+            f"--curriculum_level={curriculum_level}",
             "--no_wandb",
         ]
+        if min_episodes and min_episodes > 0:
+            cmd.append(f"--min_episodes={min_episodes}")
+        if out_dir:
+            cmd.append(f"--out_dir={out_dir}")
         result = subprocess.run(cmd, cwd="/workspaces/aerial_gym_docker")
         if result.returncode != 0:
             raise RuntimeError(

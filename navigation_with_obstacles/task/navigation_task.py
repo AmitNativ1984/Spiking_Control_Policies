@@ -432,6 +432,13 @@ class NavigationWithObstaclesTask(BaseTask):
         # Timeouts = episode ran out of steps (not arrive/exceed/collision)
         timeouts = timeout_mask.float()
 
+        # Per-env arrival flag, exported so consumers can count successes from the step
+        # return tuple WITHOUT reading the task's *_aggregate fields (which the curriculum
+        # state machine zeroes mid-rollout, corrupting any delta). arrive and exceed both
+        # land in `truncations`, so this is the only way to separate them downstream.
+        # Mirrors the time_outs export below.
+        self.infos["arrivals"] = successes
+
         # rl_games value-bootstrap signal: bootstrap value ONLY on timeout (artificial
         # step-limit cutoff), NOT on arrive/exceed/collision (true terminals). Consumed by
         # a2c_common when value_bootstrap=True: shaped_rewards += gamma * V(s') * time_outs.

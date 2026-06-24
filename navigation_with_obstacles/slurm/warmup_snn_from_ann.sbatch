@@ -44,11 +44,21 @@ EVAL_MAX_STEPS="${EVAL_MAX_STEPS:-800}"
 SOLO_SUCCESS_THRESHOLD="${SOLO_SUCCESS_THRESHOLD:-0.2}"
 ANNEAL_STEPS="${ANNEAL_STEPS:-1000000}"
 LR="${LR:-1e-3}"
+# BC replay buffer: K grad steps/env step on i.i.d. minibatches decouples gradient throughput
+# from the slow sim (the main BC-convergence speedup). BATCH_SIZE empty => num_envs (VRAM-neutral).
+BUFFER_SIZE="${BUFFER_SIZE:-200000}"
+GRAD_STEPS_PER_ENV_STEP="${GRAD_STEPS_PER_ENV_STEP:-8}"
+BATCH_SIZE="${BATCH_SIZE:-}"
+LEARNING_STARTS="${LEARNING_STARTS:-4096}"
 BOUNDS_STEPS="${BOUNDS_STEPS:-10000}"
-RECOMPUTE_BOUNDS="${RECOMPUTE_BOUNDS:-0}"     # set to 1 to force bounds re-collection
+BOUNDS_EPISODES="${BOUNDS_EPISODES:-100}"     # also collect >= this many completed episodes
+BOUNDS_ENVS="${BOUNDS_ENVS:-64}"              # envs for the bounds subprocess (memory bound)
+REUSE_BOUNDS="${REUSE_BOUNDS:-0}"             # bounds RECOMPUTE every run by default; set 1 to reuse a matching cache
 EXPERIMENT="${EXPERIMENT:-warmup_snn_cluster}"
 WANDB_PROJECT="${WANDB_PROJECT:-ann_teacher_distill_warmup}"
-OUT="${OUT:-navigation_with_obstacles/runs/${EXPERIMENT}_${SLURM_JOB_ID}.pth}"
+# OUT empty => the script groups all artifacts (checkpoint, TensorBoard, encoder plots)
+# under a single runs/warmup_snn_<timestamp>/ dir. Set OUT=path.pth to override.
+OUT="${OUT:-}"
 
 # --- Paths ---
 # SLURM_SUBMIT_DIR is the directory where sbatch was invoked
@@ -66,10 +76,22 @@ else
     echo "WARNING: ${ENV_FILE} not found. W&B tracking will fail unless WANDB_API_KEY is set."
 fi
 
-# --- Build optional --recompute_bounds flag ---
-RECOMPUTE_ARG=""
-if [[ "${RECOMPUTE_BOUNDS}" == "1" ]]; then
-    RECOMPUTE_ARG="--recompute_bounds"
+# --- Build optional --reuse_bounds flag (default: recompute every run) ---
+REUSE_ARG=""
+if [[ "${REUSE_BOUNDS}" == "1" ]]; then
+    REUSE_ARG="--reuse_bounds"
+fi
+
+# --- Build optional --out flag (empty => script picks <run_dir>/nn/warmup_snn.pth) ---
+OUT_ARG=""
+if [[ -n "${OUT}" ]]; then
+    OUT_ARG="--out=${OUT}"
+fi
+
+# --- Build optional --batch_size flag (empty => script uses num_envs) ---
+BATCH_SIZE_ARG=""
+if [[ -n "${BATCH_SIZE}" ]]; then
+    BATCH_SIZE_ARG="--batch_size=${BATCH_SIZE}"
 fi
 
 # --- Print job info ---
@@ -86,9 +108,10 @@ echo "Eval every / steps:  ${EVAL_EVERY} / ${EVAL_MAX_STEPS}"
 echo "Solo threshold:      ${SOLO_SUCCESS_THRESHOLD}"
 echo "Anneal steps:        ${ANNEAL_STEPS}"
 echo "LR:                  ${LR}"
-echo "Bounds steps:        ${BOUNDS_STEPS} (recompute=${RECOMPUTE_BOUNDS})"
+echo "BC buffer/K/batch:   ${BUFFER_SIZE} / ${GRAD_STEPS_PER_ENV_STEP} / ${BATCH_SIZE:-num_envs} (learning_starts=${LEARNING_STARTS})"
+echo "Bounds steps/eps:    ${BOUNDS_STEPS} / ${BOUNDS_EPISODES} (envs=${BOUNDS_ENVS}, reuse=${REUSE_BOUNDS})"
 echo "W&B project:         ${WANDB_PROJECT}"
-echo "Output checkpoint:   ${OUT}"
+echo "Output checkpoint:   ${OUT:-<run_dir>/nn/warmup_snn.pth (auto)}"
 echo "Repo dir:            ${REPO_DIR}"
 echo "============================================="
 
@@ -107,18 +130,29 @@ srun \
             --headless=True \
             --max_steps=${MAX_STEPS} \
             --curriculum_level=${CURRICULUM_LEVEL} \
+            --eval \
             --eval_every=${EVAL_EVERY} \
             --eval_max_steps=${EVAL_MAX_STEPS} \
             --solo_success_threshold=${SOLO_SUCCESS_THRESHOLD} \
             --anneal_steps=${ANNEAL_STEPS} \
             --lr=${LR} \
+            --buffer_size=${BUFFER_SIZE} \
+            --grad_steps_per_env_step=${GRAD_STEPS_PER_ENV_STEP} \
+            --learning_starts=${LEARNING_STARTS} \
+            ${BATCH_SIZE_ARG} \
             --bounds_steps=${BOUNDS_STEPS} \
-            ${RECOMPUTE_ARG} \
+            --bounds_episodes=${BOUNDS_EPISODES} \
+            --bounds_envs=${BOUNDS_ENVS} \
+            ${REUSE_ARG} \
             --track \
             --experiment_name=${EXPERIMENT} \
             --wandb-project-name=${WANDB_PROJECT} \
-            --out=${OUT}
+            ${OUT_ARG}
     "
 
 echo "Warm-up complete. Job ${SLURM_JOB_ID} finished at $(date)"
-echo "Checkpoint saved to ${REPO_DIR}/${OUT}"
+if [[ -n "${OUT}" ]]; then
+    echo "Checkpoint saved to ${REPO_DIR}/${OUT}"
+else
+    echo "Artifacts (checkpoint/nn, TensorBoard/summaries, encoder plots) under ${REPO_DIR}/navigation_with_obstacles/runs/warmup_snn_<timestamp>/"
+fi

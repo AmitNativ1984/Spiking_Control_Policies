@@ -28,7 +28,7 @@ params:
         reset_delay: False                  # Whether to delay reset by one timestep
 
       critic:
-        hidden_dims: [256, 256]   
+        hidden_dims: [256, 256, 64]   
   config:
     name: navigation_with_obstacles
     env_name: navigation_with_obstacles_task
@@ -66,7 +66,7 @@ params:
     # Batch settings
     num_actors: 1024
     horizon_length: 64
-    minibatch_size: 16384
+    minibatch_size: 4096
     mini_epochs: 4
 
     # Value function

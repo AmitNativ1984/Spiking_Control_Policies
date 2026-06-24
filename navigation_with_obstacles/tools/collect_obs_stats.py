@@ -175,8 +175,53 @@ def _check_silent_neurons(observation_bounds, sample_arr, device,
               "Consider widening those bounds or lowering the encoder threshold.")
 
 
+def _plot_teacher_bounds_encoder(observation_bounds, sample_arr, device, save_dir,
+                                 pop_dim=10, threshold=0.95, num_steps=5, max_batch=4096):
+    """Render the population-encoder receptive fields + activations using the TEACHER-collected
+    per-dim bounds, and save the PNGs into save_dir.
+
+    This is the artifact the user wants: a visual of the clamping/encoding the bounds define,
+    produced right after teacher collection and BEFORE these bounds are applied to the student
+    SNN encoder. Builds the SAME PopulationSpikeEncoder the silent-neuron check uses (same
+    bounds), records one forward over a batch of the collected (normalized) obs, and plots.
+    Best-effort: any failure is logged, not raised.
+    """
+    try:
+        from navigation_with_obstacles.networks.snn.encoder import PopulationSpikeEncoder
+        from navigation_with_obstacles.tools.plot_encoder_trace import plot_encoder_trace
+    except Exception as e:
+        print(f"[bounds-plot] import failed ({e}); skipping encoder plots.")
+        return
+
+    obs_dim = len(observation_bounds)
+    encoder = PopulationSpikeEncoder(
+        obs_dim=obs_dim,
+        obs_bounds=observation_bounds,
+        num_steps=num_steps,
+        encoder_config={"pop_dim": pop_dim, "threshold": threshold},
+    ).to(device)
+    encoder.eval()
+    encoder.record = True
+    encoder._trace = []
+
+    batch = torch.as_tensor(sample_arr[:max_batch], dtype=torch.float, device=device)
+    with torch.no_grad():
+        encoder(batch)  # records one entry with B = batch rows (the full collected distribution)
+
+    try:
+        os.makedirs(save_dir, exist_ok=True)
+        plot_encoder_trace(encoder, encoder._trace,
+                           task_config.observation_layout, save_dir=save_dir)
+        print(f"[bounds-plot] encoder receptive-field/activation PNGs saved to: {save_dir}")
+    except Exception:
+        import traceback
+        print("[bounds-plot] plotting failed (non-fatal):")
+        traceback.print_exc()
+
+
 def collect(num_steps, num_envs, out_dir, use_wandb, teacher_checkpoint=None,
-            config_path=None, bounds_cache=DEFAULT_BOUNDS_CACHE):
+            config_path=None, bounds_cache=DEFAULT_BOUNDS_CACHE, min_episodes=0,
+            lower_pct=LOWER_PCT, upper_pct=UPPER_PCT, curriculum_level=25):
     os.makedirs(out_dir, exist_ok=True)
 
     wandb_run = None
@@ -194,12 +239,33 @@ def collect(num_steps, num_envs, out_dir, use_wandb, teacher_checkpoint=None,
             wandb_run = None
 
     task_config.num_envs = num_envs
+
+    # Pin the obstacle-density curriculum to the teacher's level BEFORE make_task. The task
+    # constructor inits curriculum_level = curriculum.min_level (navigation_task.py:147) and
+    # spawns the obstacle field from it, so setting min==max==level here makes the env born at
+    # the right difficulty — the navigation_task.py:255 init log then prints this level (no
+    # misleading "level 0" line), and the task's own clamp holds it fixed (no drift with success).
+    if curriculum_level is not None and curriculum_level >= 0:
+        task_config.curriculum.min_level = curriculum_level
+        task_config.curriculum.max_level = curriculum_level
+        print(f"[obs-stats] curriculum pinned at level {curriculum_level} before make_task")
+
     task = task_registry.make_task(
         "navigation_with_obstacles_task",
         num_envs=num_envs,
         headless=True,
         use_warp=True,
     )
+
+    # VAE fully ON (phase "C", gate 1.0) so bounds reflect the world the student is deployed in.
+    # This MUST come after make_task: NavigationTask.__init__ unconditionally forces phase "A" /
+    # gate 0.0 when use_vae=True (navigation_task.py:158-160), which we override here. The teacher
+    # saw real VAE latents, so the collected obs distribution must include them ungated.
+    if task_config.vae_config.use_vae:
+        task.vae_phase = "C"
+    task_config.vae_gate = 1.0
+    print(f"[obs-stats] VAE ON (phase C, gate 1.0); env born at curriculum level "
+          f"{task.curriculum_level}")
 
     obs_dim = task_config.observation_space_dim
     action_dim = task_config.action_space_dim
@@ -226,12 +292,17 @@ def collect(num_steps, num_envs, out_dir, use_wandb, teacher_checkpoint=None,
     # task.reset() may return a dict or a tuple depending on the wrapper path.
     cur_obs = obs_dict["observations"] if isinstance(obs_dict, dict) else obs_dict[0]["observations"]
     steps_collected = 0
+    episodes_done = 0  # cumulative completed episodes (termination OR truncation)
 
     driver = "teacher" if teacher is not None else "random"
-    print(f"Collecting {num_steps} steps with {num_envs} envs ({driver}-driven, "
-          f"~{num_steps // num_envs + 1} rollouts)...")
+    # Stopping rule: run until BOTH the step floor (num_steps) AND the episode floor
+    # (min_episodes) are met. min_episodes=0 disables the episode floor (step-count behavior).
+    # Collecting whole episodes gives the bounds the TRUE state distribution (start-to-end of
+    # each trajectory), not just the post-reset slice you'd get from a short step budget.
+    print(f"Collecting >= {num_steps} steps AND >= {min_episodes} episodes with {num_envs} "
+          f"envs ({driver}-driven)...")
 
-    while steps_collected < num_steps:
+    while steps_collected < num_steps or episodes_done < min_episodes:
         if teacher is not None:
             actions = _teacher_action(teacher, cur_obs)
         else:
@@ -242,11 +313,16 @@ def collect(num_steps, num_envs, out_dir, use_wandb, teacher_checkpoint=None,
 
         all_obs.append(cur_obs.clone().cpu())
         steps_collected += num_envs
+        # An env's episode ended this step if it terminated (arrive/crash/exceed) or truncated.
+        done = (terminations.bool() | truncations.bool())
+        episodes_done += int(done.sum().item())
 
         if steps_collected % max(num_envs * 10, 1000) == 0:
-            print(f"  {steps_collected}/{num_steps} steps collected")
+            print(f"  {steps_collected} steps / {episodes_done} episodes collected "
+                  f"(targets: {num_steps} steps, {min_episodes} episodes)")
 
     task.close()
+    print(f"Stopped at {steps_collected} steps / {episodes_done} episodes.")
 
     all_obs = torch.cat(all_obs, dim=0)  # [total_steps, obs_dim] (cpu, raw)
     print(f"Total observations collected: {tuple(all_obs.shape)}")
@@ -286,8 +362,8 @@ def collect(num_steps, num_envs, out_dir, use_wandb, teacher_checkpoint=None,
     }
 
     # --- Encoder bounds from the chosen percentile band (bounds space) ------
-    lo = np.percentile(bounds_arr, LOWER_PCT, axis=0)
-    hi = np.percentile(bounds_arr, UPPER_PCT, axis=0)
+    lo = np.percentile(bounds_arr, lower_pct, axis=0)
+    hi = np.percentile(bounds_arr, upper_pct, axis=0)
     # Guard against degenerate (lo == hi) dims — a flat dim would give a zero-width
     # encoder range and silent neurons. Pad to a small symmetric band.
     flat = (hi - lo) < 1e-4
@@ -303,6 +379,26 @@ def collect(num_steps, num_envs, out_dir, use_wandb, teacher_checkpoint=None,
     # spike somewhere in the batch, or those neurons are dead inputs to the actor.
     _check_silent_neurons(observation_bounds, bounds_arr, device)
 
+    # --- Encoder plots with the TEACHER bounds (before they reach the student) ----
+    # Save receptive-field / activation PNGs so the per-dim clamping the bounds define can
+    # be inspected before being applied to the student SNN encoder. Encoder hyperparameters
+    # come from the student YAML's actor.encoder block when available (else PopSAN defaults).
+    enc_pop_dim, enc_threshold, enc_num_steps = 10, 0.95, 5
+    if config_path is not None:
+        try:
+            import yaml as _yaml
+            with open(config_path) as _f:
+                _actor = _yaml.safe_load(_f)["params"]["network"]["actor"]
+            enc_pop_dim = _actor["encoder"]["pop_dim"]
+            enc_threshold = _actor["encoder"]["threshold"]
+            enc_num_steps = _actor["num_steps"]
+        except Exception as _e:
+            print(f"[bounds-plot] couldn't read encoder cfg from {config_path} ({_e}); "
+                  "using PopSAN defaults.")
+    _plot_teacher_bounds_encoder(observation_bounds, bounds_arr, device, out_dir,
+                                 pop_dim=enc_pop_dim, threshold=enc_threshold,
+                                 num_steps=enc_num_steps)
+
     # --- Save CSV ------------------------------------------------------------
     csv_path = os.path.join(out_dir, "obs_stats.csv")
     with open(csv_path, "w", newline="") as f:
@@ -317,7 +413,7 @@ def collect(num_steps, num_envs, out_dir, use_wandb, teacher_checkpoint=None,
     cache_payload = {
         "created": datetime.now().isoformat(timespec="seconds"),
         "obs_dim": obs_dim,
-        "percentiles": [LOWER_PCT, UPPER_PCT],
+        "percentiles": [lower_pct, upper_pct],
         "space": bounds_space,
         "teacher_checkpoint": teacher_checkpoint,
         "use_vae": task_config.vae_config.use_vae,
@@ -358,7 +454,7 @@ def collect(num_steps, num_envs, out_dir, use_wandb, teacher_checkpoint=None,
               f"{stats['mean'][i]:>8.3f} {stats['p99'][i]:>8.3f} "
               f"{stats['max'][i]:>8.3f} {stats['std'][i]:>8.3f}")
 
-    print(f"\n# observation_bounds from p{LOWER_PCT:g}/p{UPPER_PCT:g} in {bounds_space}:")
+    print(f"\n# observation_bounds from p{lower_pct:g}/p{upper_pct:g} in {bounds_space}:")
     print("observation_bounds = [")
     for i, (l, h) in enumerate(observation_bounds):
         print(f"    ({l}, {h}),   # {i:>2} {obs_names[i]}")
@@ -419,7 +515,12 @@ def ensure_observation_bounds(teacher_checkpoint, config_path, num_steps=10000,
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Collect observation statistics")
     parser.add_argument("--num_steps", type=int, default=10000,
-                        help="Minimum total steps (rounded up to a full rollout)")
+                        help="Minimum total env-steps to collect (summed over envs).")
+    parser.add_argument("--min_episodes", type=int, default=0,
+                        help="Also keep collecting until at least this many episodes have "
+                             "COMPLETED (termination or truncation), for true start-to-end "
+                             "state statistics. Stops when both --num_steps and this are met. "
+                             "0 = step-count only.")
     parser.add_argument("--num_envs", type=int, default=64,
                         help="Number of parallel environments")
     parser.add_argument("--out_dir", type=str,
@@ -435,6 +536,16 @@ if __name__ == "__main__":
                              "from its config.distillation block (single source of truth).")
     parser.add_argument("--bounds_cache", type=str, default=DEFAULT_BOUNDS_CACHE,
                         help="Where to write the JSON bounds cache the runner reads")
+    parser.add_argument("--lower_pct", type=float, default=LOWER_PCT,
+                        help=f"Lower percentile for encoder bounds (default {LOWER_PCT}). "
+                             "Lower => wider clamp, captures more of the left tail.")
+    parser.add_argument("--upper_pct", type=float, default=UPPER_PCT,
+                        help=f"Upper percentile for encoder bounds (default {UPPER_PCT}). "
+                             "Higher => wider clamp, captures more of the right tail.")
+    parser.add_argument("--curriculum_level", type=int, default=25,
+                        help="Pin the obstacle-density curriculum at this level (teacher's "
+                             "final level = 25) so bounds reflect the world the student is "
+                             "deployed in. <0 leaves the curriculum at the task default.")
     parser.add_argument("--no_wandb", action="store_false", dest="wandb",
                         help="Disable W&B logging (default: enabled)")
     parser.set_defaults(wandb=True)
@@ -448,4 +559,8 @@ if __name__ == "__main__":
         teacher_checkpoint=args.teacher_checkpoint,
         config_path=args.config,
         bounds_cache=args.bounds_cache,
+        min_episodes=args.min_episodes,
+        lower_pct=args.lower_pct,
+        upper_pct=args.upper_pct,
+        curriculum_level=args.curriculum_level,
     )

@@ -262,10 +262,11 @@
                 "navigation_with_obstacles.training.warmup_snn_from_ann",
                 "--file=navigation_with_obstacles/training/popsan_teacher_student_local.yaml",
                 "--headless=True",
-                "--eval_every=10000",
-                "--eval_max_steps=400",
-                "--bounds_steps=2000",
-                "--out=navigation_with_obstacles/runs/warmup_snn.pth"
+                "--bounds_episodes=500",
+                "--bounds_envs=16",
+                "--eval",
+                "--eval_max_step=400",
+                "--max_steps=100000",
             ],
             "problemMatcher": []
         }
