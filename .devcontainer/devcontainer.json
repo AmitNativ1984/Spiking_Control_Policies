@@ -18,7 +18,10 @@
 		"--ulimit", "memlock=-1",
 		"--ulimit", "stack=67108864",
 		"--device=/dev/dri",
-		"--network=host"
+		"--network=host",
+		"--memory=9g",
+		"--memory-swap=9g",
+		"--cpus=14"
 	],
 
 	"containerEnv": {
