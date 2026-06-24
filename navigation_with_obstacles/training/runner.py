@@ -256,7 +256,8 @@ def get_args():
 
 
 def _auto_set_observation_bounds(teacher_ckpt, config_path, num_envs, num_steps, recompute,
-                                 min_episodes=0, out_dir=None, curriculum_level=25):
+                                 min_episodes=0, out_dir=None, curriculum_level=25,
+                                 bound_method="gaussian"):
     """Set task_config.observation_bounds for the PopSAN encoder from collected
     p01/p99 stats. Runs the collector in a SEPARATE subprocess (Isaac Gym allows
     only one sim per process), which writes a JSON cache; this loads the cache.
@@ -313,6 +314,7 @@ def _auto_set_observation_bounds(teacher_ckpt, config_path, num_envs, num_steps,
             f"--num_envs={num_envs}",
             f"--bounds_cache={cache}",
             f"--curriculum_level={curriculum_level}",
+            f"--bound_method={bound_method}",
             "--no_wandb",
         ]
         if min_episodes and min_episodes > 0:

@@ -31,14 +31,14 @@ silent neurons). That's independently verifiable and de-risks everything after.
 **Auto-wiring:** `runner.py` runs the collector in a **subprocess** (Isaac Gym allows one sim per process), caches bounds to JSON, and loads them before the network builds. Triggered for `--train` + `network.name == PopSAN` + a valid `config.distillation.checkpoint`. Reuses the cache unless `--recompute_bounds`; `--bounds_steps N` controls collection length.
 
 ## Phase 3 — BC warm-up script (`warmup_snn_from_ann.py`)
-- [ ] Build the SNN actor (`PopulationSpikingActorNetwork`) and the env (reuse the runner's registration block).
-- [ ] Decide **normalization ownership** and keep it identical in warm-up *and* later PPO (encoder-only, or rl-games normalizer copied — pick one).
-- [ ] Force `task_config.vae_gate` to match the PPO hand-off phase (likely `1.0`).
-- [ ] Loop: each step compute `teacher_mu = teacher(raw_obs).detach()`, `student_mu = snn_actor(raw_obs)`, `loss = MSE(student_mu, teacher_mu)`, backprop, Adam (lr≈1e-3).
-- [ ] Use **DAgger-style** env stepping: action = teacher with prob β, else student; anneal β 1→0.
-- [ ] Match the **action squashing** (tanh/clamp) used by PPO when stepping the env.
-- [ ] Keep `num_steps` identical to the PPO config (5).
-- [ ] Log: MSE, and periodically an **SNN-solo rollout return** (β=0) as the real stopping metric.
+- [x] Build the SNN actor (`PopulationSpikingActorNetwork`) and the env (reuse the runner's registration block).
+- [x] Decide **normalization ownership** and keep it identical in warm-up *and* later PPO (encoder-only, or rl-games normalizer copied — pick one).
+- [x] Force `task_config.vae_gate` to match the PPO hand-off phase (likely `1.0`).
+- [x] Loop: each step compute `teacher_mu = teacher(raw_obs).detach()`, `student_mu = snn_actor(raw_obs)`, `loss = MSE(student_mu, teacher_mu)`, backprop, Adam (lr≈1e-3).
+- [x] Use **DAgger-style** env stepping: action = teacher with prob β, else student; anneal β 1→0.
+- [x] Match the **action squashing** (tanh/clamp) used by PPO when stepping the env.
+- [x] Keep `num_steps` identical to the PPO config (5).
+- [x] Log: MSE, and periodically an **SNN-solo rollout return** (β=0) as the real stopping metric.
 
 ## Phase 4 — Save a checkpoint PPO can load
 - [ ] Save the warmed-up SNN in the **rl-games checkpoint format** (same dict structure PPO's `--checkpoint` expects: `model` state dict, optionally `running_mean_std`).
