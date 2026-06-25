@@ -31,14 +31,14 @@ silent neurons). That's independently verifiable and de-risks everything after.
 **Auto-wiring:** `runner.py` runs the collector in a **subprocess** (Isaac Gym allows one sim per process), caches bounds to JSON, and loads them before the network builds. Triggered for `--train` + `network.name == PopSAN` + a valid `config.distillation.checkpoint`. Reuses the cache unless `--recompute_bounds`; `--bounds_steps N` controls collection length.
 
 ## Phase 3 — BC warm-up script (`warmup_snn_from_ann.py`)
-- [ ] Build the SNN actor (`PopulationSpikingActorNetwork`) and the env (reuse the runner's registration block).
-- [ ] Decide **normalization ownership** and keep it identical in warm-up *and* later PPO (encoder-only, or rl-games normalizer copied — pick one).
-- [ ] Force `task_config.vae_gate` to match the PPO hand-off phase (likely `1.0`).
-- [ ] Loop: each step compute `teacher_mu = teacher(raw_obs).detach()`, `student_mu = snn_actor(raw_obs)`, `loss = MSE(student_mu, teacher_mu)`, backprop, Adam (lr≈1e-3).
-- [ ] Use **DAgger-style** env stepping: action = teacher with prob β, else student; anneal β 1→0.
-- [ ] Match the **action squashing** (tanh/clamp) used by PPO when stepping the env.
-- [ ] Keep `num_steps` identical to the PPO config (5).
-- [ ] Log: MSE, and periodically an **SNN-solo rollout return** (β=0) as the real stopping metric.
+- [x] Build the SNN actor (`PopulationSpikingActorNetwork`) and the env (reuse the runner's registration block).
+- [x] Decide **normalization ownership** and keep it identical in warm-up *and* later PPO (encoder-only, or rl-games normalizer copied — pick one).
+- [x] Force `task_config.vae_gate` to match the PPO hand-off phase (likely `1.0`).
+- [x] Loop: each step compute `teacher_mu = teacher(raw_obs).detach()`, `student_mu = snn_actor(raw_obs)`, `loss = MSE(student_mu, teacher_mu)`, backprop, Adam (lr≈1e-3).
+- [x] Use **DAgger-style** env stepping: action = teacher with prob β, else student; anneal β 1→0.
+- [x] Match the **action squashing** (tanh/clamp) used by PPO when stepping the env.
+- [x] Keep `num_steps` identical to the PPO config (5).
+- [x] Log: MSE, and periodically an **SNN-solo rollout return** (β=0) as the real stopping metric.
 
 ## Phase 4 — Save a checkpoint PPO can load
 - [ ] Save the warmed-up SNN in the **rl-games checkpoint format** (same dict structure PPO's `--checkpoint` expects: `model` state dict, optionally `running_mean_std`).
@@ -50,15 +50,15 @@ silent neurons). That's independently verifiable and de-risks everything after.
 > The teacher's critic describes the *ANN's* policy, so it cannot stay frozen for the
 > whole SNN PPO run — as the SNN drifts from the ANN, a frozen critic becomes wrong
 > and biases PPO's advantages.
-- [ ] **Initialize** the SNN's critic from the ANN critic's weights (both use the same `ANNMLPCritic` class — `networks/ann/critic.py` — so weights copy 1:1, no shape issues).
-- [ ] **Keep training the critic** during SNN PPO so it tracks the SNN's evolving policy. (Do *not* freeze it for the RL phase.)
-- [ ] During the **BC warm-up** phase the critic is unused (no advantages computed) — you can ignore it there; only wire it in at PPO start.
-- [ ] Carry over the matching **obs-normalization stats** with the critic weights, and mind `normalize_value: True` — a warm-started critic must see the same input/value scaling it was trained on, or the warm-start is wasted.
+- [x] **Initialize** the SNN's critic from the ANN critic's weights (both use the same `ANNMLPCritic` class — `networks/ann/critic.py` — so weights copy 1:1, no shape issues). Done in TWO places: the warm-up script (carried in the saved checkpoint) AND `A2CTeacherAgent._init_critic_from_teacher()` in `__init__`, so a **cold** PPO start (no warm-up checkpoint) also gets the teacher critic. The agent's copy runs before any `--checkpoint` restore, so a resume still wins.
+- [x] **Keep training the critic** during SNN PPO so it tracks the SNN's evolving policy. The agent never freezes the critic for the RL phase — PPO's standard critic loss owns it.
+- [x] During the **BC warm-up** phase the critic is unused (no advantages computed); the warm-up freezes it and only trains the spiking actor.
+- [x] Carry over the matching **obs-normalization stats** with the critic weights (`running_mean_std`) and the value scaling (`value_mean_std`, under `normalize_value: True`). `_init_critic_from_teacher()` seeds both from the teacher; PPO keeps updating them.
 
 ## Phase 5 — PPO fine-tune (warm-started)
-- [ ] Start PPO from the warm-up checkpoint via `--checkpoint` on `popsan_navigation_*.yaml`.
-- [ ] (Optional but recommended) Add a **short annealed distillation tail**: a custom A2C agent that adds `distill_coef · MSE(student_mu, teacher_mu)` for the first ~50–100 epochs so PPO doesn't wash out the warm-start before the critic catches up. Register it in `training/runner.py`.
-- [ ] Confirm consistency: same obs normalization, same `vae_gate` schedule, same `num_steps` as warm-up.
+- [ ] Start PPO from the warm-up checkpoint via `--checkpoint` on `popsan_teacher_student_*.yaml`.  *(runtime step — run on the cluster)*
+- [x] Added a **short annealed distillation tail** as a custom agent `A2CTeacherAgent` (`agents/a2c_teacher_agent.py`), registered in `training/runner.py` and selected via `algo.name: a2c_teacher`. It adds `kd_scale(epoch) · (kd_actor_coeff · D_actor + kd_critic_coeff · D_critic)` to the PPO loss. `D_actor` is the **full diagonal-Gaussian KL** `KL(teacher‖student)` over mu AND sigma by default (`kd_actor_loss: kl`; `mse` falls back to the warm-up's mean-only target). `kd_scale` linearly anneals 1→0 over `kd_anneal_epochs` (default 100), then stays 0. KD scalars are logged to TensorBoard/W&B (`distill/kd_scale`, `distill/actor_kd`, `distill/critic_kd`).
+- [ ] Confirm consistency: same obs normalization, same `vae_gate` schedule, same `num_steps` as warm-up.  *(verify at run start)*
 
 ---
 

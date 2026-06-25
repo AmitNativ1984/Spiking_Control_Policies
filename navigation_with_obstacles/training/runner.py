@@ -31,6 +31,7 @@ from rl_games.common.algo_observer import IsaacAlgoObserver
 from rl_games.torch_runner import Runner
 
 
+import subprocess
 from aerial_gym.registry.task_registry import task_registry
 from aerial_gym.registry.env_registry import env_config_registry
 from aerial_gym.registry.robot_registry import robot_registry
@@ -46,8 +47,33 @@ from navigation_with_obstacles.config.robot_config import NavQuadWithCameraCfg
 from navigation_with_obstacles.networks.snn.popsan import POPSANNetworkBuilder
 from navigation_with_obstacles.networks.ann.actor_critic import MLPActorCriticNetworkBuilder
 from navigation_with_obstacles.networks.ann.gru_actor_critic import GRUActorCriticNetworkBuilder
+from navigation_with_obstacles.agents.a2c_teacher_agent import A2CTeacherAgent
 from rl_games.algos_torch import model_builder
 from rl_games.algos_torch.a2c_continuous import A2CAgent
+from rl_games.algos_torch import players as _rlg_players
+
+
+def _git_info():
+    repo = os.path.dirname(os.path.abspath(__file__))
+
+    def _run(cmd):
+        try:
+            return subprocess.check_output(
+                cmd, cwd=repo, stderr=subprocess.DEVNULL
+            ).decode().strip()
+        except Exception:
+            return None
+
+    commit = _run(["git", "rev-parse", "HEAD"])
+    count = _run(["git", "rev-list", "--count", "HEAD"])
+    status = _run(["git", "status", "--porcelain"])
+    return {
+        "git_commit": commit,
+        "git_commit_short": commit[:8] if commit else None,
+        "git_commit_number": int(count) if count and count.isdigit() else None,
+        "git_branch": _run(["git", "rev-parse", "--abbrev-ref", "HEAD"]),
+        "git_dirty": bool(status) if status is not None else None,
+    }
 
 # =============================================================================
 # Register Custom Environment, Task, and Networks
@@ -299,7 +325,8 @@ def get_args():
 
 
 def _auto_set_observation_bounds(teacher_ckpt, config_path, num_envs, num_steps, recompute,
-                                 min_episodes=0, out_dir=None, curriculum_level=25):
+                                 min_episodes=0, out_dir=None, curriculum_level=25,
+                                 bound_method="gaussian"):
     """Set task_config.observation_bounds for the PopSAN encoder from collected
     p01/p99 stats. Runs the collector in a SEPARATE subprocess (Isaac Gym allows
     only one sim per process), which writes a JSON cache; this loads the cache.
@@ -356,6 +383,7 @@ def _auto_set_observation_bounds(teacher_ckpt, config_path, num_envs, num_steps,
             f"--num_envs={num_envs}",
             f"--bounds_cache={cache}",
             f"--curriculum_level={curriculum_level}",
+            f"--bound_method={bound_method}",
             "--no_wandb",
         ]
         if min_episodes and min_episodes > 0:
@@ -460,7 +488,8 @@ if __name__ == "__main__":
         # full date+time stamp: <name>_YYYY-MM-DD_HH-MM-SS
         experiment_name = config["params"]["config"]["name"]
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        config["params"]["config"]["full_experiment_name"] = f"{experiment_name}_{timestamp}"
+        full_experiment_name = f"{experiment_name}_{timestamp}"
+        config["params"]["config"]["full_experiment_name"] = full_experiment_name
 
         # DEBUG: surface the runtime values rl_games will actually use
         logger.debug(f"[DEBUG] args['num_envs'] = {args.get('num_envs')!r} (type={type(args.get('num_envs')).__name__})")
@@ -499,6 +528,13 @@ if __name__ == "__main__":
                     f"({teacher_ckpt!r}); using task_config default bounds.")
 
         runner = Runner(algo_observer=IsaacAlgoObserver())
+        # Register the teacher-student PPO agent (adds the annealed ANN->SNN distillation
+        # tail on top of standard PPO). Selected via the YAML's `algo.name: a2c_teacher`.
+        # The player is the stock continuous PPO player — distillation only affects training.
+        runner.algo_factory.register_builder(
+            "a2c_teacher", lambda **kwargs: A2CTeacherAgent(**kwargs))
+        runner.player_factory.register_builder(
+            "a2c_teacher", lambda **kwargs: _rlg_players.PpoPlayerContinuous(**kwargs))
         try:
             runner.load(config)
         except yaml.YAMLError as exc:
@@ -507,11 +543,23 @@ if __name__ == "__main__":
 
     rank = int(os.getenv("LOCAL_RANK", "0"))
     if args["track"] and rank == 0:
+        git_info = _git_info()
+        # Record git provenance in the run config so the run can always be
+        # restored to its exact code state (commit hash + commit number).
+        wandb_config = dict(config)
+        wandb_config["git"] = git_info
+        logger.info(
+            f"[wandb] git commit {git_info['git_commit_short']} "
+            f"(#{git_info['git_commit_number']}, branch {git_info['git_branch']}, "
+            f"dirty={git_info['git_dirty']})"
+        )
+
         wandb.init(
             project=args["wandb_project_name"],
             entity=args["wandb_entity"],
+            name=full_experiment_name,
             sync_tensorboard=True,
-            config=config,
+            config=wandb_config,
             monitor_gym=True,
             save_code=True,
         )
@@ -577,6 +625,30 @@ if __name__ == "__main__":
     runner.run(args)
 
     if args["track"] and rank == 0:
+        # Link the trained weights to this W&B run as a versioned artifact so the
+        # graphs and the model that produced them stay together. rl_games saves the
+        # best/last weights at <runs_dir>/<full_experiment_name>/nn/<name>.pth.
+        if args.get("train"):
+            best_ckpt = os.path.join(
+                runs_dir, full_experiment_name, "nn", f"{experiment_name}.pth"
+            )
+            if os.path.exists(best_ckpt):
+                artifact = wandb.Artifact(
+                    name=f"{experiment_name}-weights",
+                    type="model",
+                    metadata={
+                        "git_commit": git_info["git_commit_short"],
+                        "git_commit_number": git_info["git_commit_number"],
+                        "git_branch": git_info["git_branch"],
+                        "git_dirty": git_info["git_dirty"],
+                    },
+                )
+                artifact.add_file(best_ckpt)
+                wandb.log_artifact(artifact)
+                logger.info(f"[wandb] logged model artifact from {best_ckpt}")
+            else:
+                logger.warning(
+                    f"[wandb] no checkpoint found at {best_ckpt}; skipping artifact upload")
         wandb.finish()
 
     logger.info("Done!")
