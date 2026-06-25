@@ -12,7 +12,7 @@
 #
 # Behavior-clones a trained ANN teacher's action mean into the spiking PopSAN
 # student, then saves an rl-games-format checkpoint that PPO can resume via
-# --checkpoint. See navigation_with_obstacles/training/warmup_snn_from_ann.py.
+# --checkpoint. See navigation_with_obstacles/agents/warmup_snn_from_ann.py.
 #
 # The script internally spawns the observation-bounds collector in a subprocess
 # (Isaac Gym allows one sim per process); both run inside this container.
@@ -125,7 +125,7 @@ srun \
         echo 'Isaac Gym check...'
         python -c 'from isaacgym import gymapi; print(\"Isaac Gym OK\")'
         echo 'Starting BC warm-up...'
-        python -m navigation_with_obstacles.training.warmup_snn_from_ann \
+        python -m navigation_with_obstacles.agents.warmup_snn_from_ann \
             --file=${CONFIG_FILE} \
             --headless=True \
             --max_steps=${MAX_STEPS} \

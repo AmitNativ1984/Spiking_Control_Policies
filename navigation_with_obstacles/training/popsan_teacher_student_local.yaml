@@ -2,7 +2,7 @@ params:
   seed: 42
   
   algo:
-    name: a2c_continuous
+    name: a2c_teacher                 # custom PPO + annealed ANN->SNN distillation tail (agents/a2c_teacher_agent.py)
   
   model:
     name: continuous_a2c_logstd
@@ -35,8 +35,10 @@ params:
       checkpoint: navigation_with_obstacles/runs/nav_vae_ann_cluster_2026-06-22_11-47-23/nn/last_nav_vae_ann_cluster_ep_450_rew_15.500851.pth
       normalize_input: True
       normalize_value: True
-      kd_actor_coeff: 0.1
-      kd_critic_coeff: 0.0
+      kd_actor_coeff: 0.1           # weight on the actor distillation term (full Gaussian KL by default)
+      kd_critic_coeff: 0.0          # weight on critic-value distillation (0 = critic trains purely on PPO returns)
+      kd_actor_loss: kl             # 'kl' (full diagonal-Gaussian KL, mu+sigma) or 'mse' (means only, == warm-up)
+      kd_anneal_epochs: 100         # linearly anneal the KD scale 1->0 over this many epochs (short tail); 0 = constant
       network:
         name: mlp_actor_critic
         separate: True

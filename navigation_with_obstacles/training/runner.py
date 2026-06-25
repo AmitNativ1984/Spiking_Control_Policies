@@ -46,7 +46,9 @@ from navigation_with_obstacles.config.robot_config import NavQuadWithCameraCfg
 from navigation_with_obstacles.networks.snn.popsan import POPSANNetworkBuilder
 from navigation_with_obstacles.networks.ann.actor_critic import MLPActorCriticNetworkBuilder
 from navigation_with_obstacles.networks.ann.gru_actor_critic import GRUActorCriticNetworkBuilder
+from navigation_with_obstacles.agents.a2c_teacher_agent import A2CTeacherAgent
 from rl_games.algos_torch import model_builder
+from rl_games.algos_torch import players as _rlg_players
 
 # =============================================================================
 # Register Custom Environment, Task, and Networks
@@ -458,6 +460,13 @@ if __name__ == "__main__":
                     f"({teacher_ckpt!r}); using task_config default bounds.")
 
         runner = Runner(algo_observer=IsaacAlgoObserver())
+        # Register the teacher-student PPO agent (adds the annealed ANN->SNN distillation
+        # tail on top of standard PPO). Selected via the YAML's `algo.name: a2c_teacher`.
+        # The player is the stock continuous PPO player — distillation only affects training.
+        runner.algo_factory.register_builder(
+            "a2c_teacher", lambda **kwargs: A2CTeacherAgent(**kwargs))
+        runner.player_factory.register_builder(
+            "a2c_teacher", lambda **kwargs: _rlg_players.PpoPlayerContinuous(**kwargs))
         try:
             runner.load(config)
         except yaml.YAMLError as exc:

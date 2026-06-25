@@ -18,7 +18,7 @@ normalized obs — the exact space the PopSAN encoder bounds were measured in (P
 
 Usage:
     cd /workspaces/aerial_gym_docker
-    python -m navigation_with_obstacles.training.warmup_snn_from_ann \
+    python -m navigation_with_obstacles.agents.warmup_snn_from_ann \
         --file=navigation_with_obstacles/training/popsan_teacher_student_cluster.yaml \
         --num_envs=256 --headless=True --max_steps=200000 --out=/tmp/warmup_snn.pth
 
