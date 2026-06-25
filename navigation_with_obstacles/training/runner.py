@@ -452,7 +452,8 @@ if __name__ == "__main__":
         # full date+time stamp: <name>_YYYY-MM-DD_HH-MM-SS
         experiment_name = config["params"]["config"]["name"]
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        config["params"]["config"]["full_experiment_name"] = f"{experiment_name}_{timestamp}"
+        full_experiment_name = f"{experiment_name}_{timestamp}"
+        config["params"]["config"]["full_experiment_name"] = full_experiment_name
 
         # DEBUG: surface the runtime values rl_games will actually use
         logger.debug(f"[DEBUG] args['num_envs'] = {args.get('num_envs')!r} (type={type(args.get('num_envs')).__name__})")
@@ -520,6 +521,7 @@ if __name__ == "__main__":
         wandb.init(
             project=args["wandb_project_name"],
             entity=args["wandb_entity"],
+            name=full_experiment_name,
             sync_tensorboard=True,
             config=wandb_config,
             monitor_gym=True,
@@ -585,6 +587,30 @@ if __name__ == "__main__":
     runner.run(args)
 
     if args["track"] and rank == 0:
+        # Link the trained weights to this W&B run as a versioned artifact so the
+        # graphs and the model that produced them stay together. rl_games saves the
+        # best/last weights at <runs_dir>/<full_experiment_name>/nn/<name>.pth.
+        if args.get("train"):
+            best_ckpt = os.path.join(
+                runs_dir, full_experiment_name, "nn", f"{experiment_name}.pth"
+            )
+            if os.path.exists(best_ckpt):
+                artifact = wandb.Artifact(
+                    name=f"{experiment_name}-weights",
+                    type="model",
+                    metadata={
+                        "git_commit": git_info["git_commit_short"],
+                        "git_commit_number": git_info["git_commit_number"],
+                        "git_branch": git_info["git_branch"],
+                        "git_dirty": git_info["git_dirty"],
+                    },
+                )
+                artifact.add_file(best_ckpt)
+                wandb.log_artifact(artifact)
+                logger.info(f"[wandb] logged model artifact from {best_ckpt}")
+            else:
+                logger.warning(
+                    f"[wandb] no checkpoint found at {best_ckpt}; skipping artifact upload")
         wandb.finish()
 
     logger.info("Done!")
