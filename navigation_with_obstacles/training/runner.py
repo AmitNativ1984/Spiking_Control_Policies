@@ -31,6 +31,7 @@ from rl_games.common.algo_observer import IsaacAlgoObserver
 from rl_games.torch_runner import Runner
 
 
+import subprocess
 from aerial_gym.registry.task_registry import task_registry
 from aerial_gym.registry.env_registry import env_config_registry
 from aerial_gym.registry.robot_registry import robot_registry
@@ -49,6 +50,36 @@ from navigation_with_obstacles.networks.ann.gru_actor_critic import GRUActorCrit
 from navigation_with_obstacles.agents.a2c_teacher_agent import A2CTeacherAgent
 from rl_games.algos_torch import model_builder
 from rl_games.algos_torch import players as _rlg_players
+
+
+def _git_info():
+    """Collect git provenance so any W&B run can be restored to its exact code state.
+
+    Returns a dict with the commit hash, short hash, a monotonically increasing
+    commit "number" (count of commits reachable from HEAD), the branch, and a
+    dirty flag. Missing git / not a repo degrades gracefully to None values.
+    """
+    repo = os.path.dirname(os.path.abspath(__file__))
+
+    def _run(cmd):
+        try:
+            return subprocess.check_output(
+                cmd, cwd=repo, stderr=subprocess.DEVNULL
+            ).decode().strip()
+        except Exception:
+            return None
+
+    commit = _run(["git", "rev-parse", "HEAD"])
+    count = _run(["git", "rev-list", "--count", "HEAD"])
+    status = _run(["git", "status", "--porcelain"])
+    return {
+        "git_commit": commit,
+        "git_commit_short": commit[:8] if commit else None,
+        "git_commit_number": int(count) if count and count.isdigit() else None,
+        "git_branch": _run(["git", "rev-parse", "--abbrev-ref", "HEAD"]),
+        "git_dirty": bool(status) if status is not None else None,
+    }
+
 
 # =============================================================================
 # Register Custom Environment, Task, and Networks
@@ -475,14 +506,41 @@ if __name__ == "__main__":
 
     rank = int(os.getenv("LOCAL_RANK", "0"))
     if args["track"] and rank == 0:
-        wandb.init(
+        git_info = _git_info()
+        # Record git provenance in the run config so the run can always be
+        # restored to its exact code state (commit hash + commit number).
+        wandb_config = dict(config)
+        wandb_config["git"] = git_info
+        logger.info(
+            f"[wandb] git commit {git_info['git_commit_short']} "
+            f"(#{git_info['git_commit_number']}, branch {git_info['git_branch']}, "
+            f"dirty={git_info['git_dirty']})"
+        )
+
+        run = wandb.init(
             project=args["wandb_project_name"],
             entity=args["wandb_entity"],
             sync_tensorboard=True,
-            config=config,
+            config=wandb_config,
             monitor_gym=True,
             save_code=True,
         )
+
+        # Upload the exact YAML used for this run as a versioned artifact so it
+        # can be downloaded and reproduced later, independent of the parsed config.
+        try:
+            cfg_artifact = wandb.Artifact(
+                name=f"run-config-{run.id}",
+                type="run-config",
+                metadata=git_info,
+            )
+            cfg_artifact.add_file(config_name, name=os.path.basename(config_name))
+            run.log_artifact(cfg_artifact)
+            # Also keep a copy in the run's files tab for quick inspection.
+            wandb.save(config_name, policy="now")
+            logger.info(f"[wandb] uploaded run config YAML: {config_name}")
+        except Exception as exc:
+            logger.warning(f"[wandb] failed to upload config YAML: {exc}")
 
     logger.info(
         "Starting training..." if args.get("train") else "Starting playback..."
