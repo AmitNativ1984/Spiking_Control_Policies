@@ -517,7 +517,7 @@ if __name__ == "__main__":
             f"dirty={git_info['git_dirty']})"
         )
 
-        run = wandb.init(
+        wandb.init(
             project=args["wandb_project_name"],
             entity=args["wandb_entity"],
             sync_tensorboard=True,
@@ -525,22 +525,6 @@ if __name__ == "__main__":
             monitor_gym=True,
             save_code=True,
         )
-
-        # Upload the exact YAML used for this run as a versioned artifact so it
-        # can be downloaded and reproduced later, independent of the parsed config.
-        try:
-            cfg_artifact = wandb.Artifact(
-                name=f"run-config-{run.id}",
-                type="run-config",
-                metadata=git_info,
-            )
-            cfg_artifact.add_file(config_name, name=os.path.basename(config_name))
-            run.log_artifact(cfg_artifact)
-            # Also keep a copy in the run's files tab for quick inspection.
-            wandb.save(config_name, policy="now")
-            logger.info(f"[wandb] uploaded run config YAML: {config_name}")
-        except Exception as exc:
-            logger.warning(f"[wandb] failed to upload config YAML: {exc}")
 
     logger.info(
         "Starting training..." if args.get("train") else "Starting playback..."
