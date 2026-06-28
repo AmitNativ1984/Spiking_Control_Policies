@@ -323,14 +323,10 @@ def collect(num_steps, num_envs, out_dir, use_wandb, teacher_checkpoint=None,
         use_warp=True,
     )
 
-    # VAE fully ON (phase "C", gate 1.0) so bounds reflect the world the student is deployed in.
-    # This MUST come after make_task: NavigationTask.__init__ unconditionally forces phase "A" /
-    # gate 0.0 when use_vae=True (navigation_task.py:158-160), which we override here. The teacher
-    # saw real VAE latents, so the collected obs distribution must include them ungated.
-    if task_config.vae_config.use_vae:
-        task.vae_phase = "C"
+    # VAE fully ON (gate 1.0) so bounds reflect the world the student is deployed in.
+    # NavigationTask.__init__ already sets vae_gate=1.0; this is a defensive re-assert.
     task_config.vae_gate = 1.0
-    print(f"[obs-stats] VAE ON (phase C, gate 1.0); env born at curriculum level "
+    print(f"[obs-stats] VAE ON (gate 1.0); env born at curriculum level "
           f"{task.curriculum_level}")
 
     obs_dim = task_config.observation_space_dim

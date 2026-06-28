@@ -1,5 +1,15 @@
 {
     "servers": {
+        "obsidian": {
+            "type": "stdio",
+            "command": "uvx",
+            "args": ["mcp-obsidian"],
+            "env": {
+                "OBSIDIAN_API_KEY": "${env:OBSIDIAN_API_KEY}",
+                "OBSIDIAN_HOST": "127.0.0.1",
+                "OBSIDIAN_PORT": "27124"
+            }
+        },
         "wandb":{
             "type": "http",
             "url": "https://mcp.withwandb.com/mcp",

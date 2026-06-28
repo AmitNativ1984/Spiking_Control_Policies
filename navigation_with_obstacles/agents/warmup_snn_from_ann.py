@@ -326,13 +326,13 @@ def _student_solo_action(model, raw_obs):
     return mu
 
 
-# Task fields that the curriculum/VAE state machine mutates as a side effect of stepping.
+# Task fields that the curriculum state machine mutates as a side effect of stepping.
 # We snapshot these before a solo-eval and restore them after, so the eval never advances
-# the curriculum, never flips the VAE gate, and never discards the trigger it feeds.
+# the curriculum and never discards the trigger it feeds.
 _CURRICULUM_STATE_FIELDS = (
     "success_aggregate", "crashes_aggregate", "timeouts_aggregate", "exceeds_aggregate",
     "logged_success_rate", "logged_crash_rate", "logged_exceed_rate", "logged_timeout_rate",
-    "curriculum_level", "curriculum_progress_fraction", "vae_phase",
+    "curriculum_level", "curriculum_progress_fraction",
 )
 
 
@@ -517,14 +517,8 @@ def main():
     action_dim = task_config.action_space_dim
 
     # Warm-up runs with the VAE fully ON, matching the PPO hand-off (the teacher saw the
-    # full obs incl. VAE latents, so the student must too). This MUST come AFTER make_task:
-    # NavigationTask.__init__ unconditionally sets vae_phase="A" / vae_gate=0.0 when use_vae
-    # is True (navigation_task.py:158-160), which would otherwise zero the student's VAE-latent
-    # spike block every forward (pop_spiking_actor.py:144-146). Forcing phase "C" also lands the
-    # task's curriculum state machine in its normal-curriculum branch, so it never flips the
-    # gate back during warm-up.
-    if task_config.vae_config.use_vae:
-        task.vae_phase = "C"
+    # full obs incl. VAE latents, so the student must too). NavigationTask.__init__ already
+    # sets vae_gate=1.0; this is a defensive re-assert.
     task_config.vae_gate = 1.0
 
     # Pin the obstacle-density curriculum to a fixed level for the whole warm-up. We clone the
@@ -570,6 +564,21 @@ def main():
     for p in student_net.critic.parameters():
         p.requires_grad_(False)
     logger.info("[warmup] initialized student critic from ANN critic (frozen for warm-up)")
+
+    # --- Init the student sigma from the teacher's converged log_std ------------
+    # BC trains mu only (sigma gets no gradient — see distillation_loss). Without this,
+    # the decoder's log_std stays at its zero init (sigma=1.0), so PPO would sample the
+    # distilled mu with ~2-4x the teacher's exploration noise and crash/exceed at high
+    # curriculum on the very first rollouts. Copy the teacher's log_std so PPO starts with
+    # the same noise the teacher converged to. Shapes match (action_dim,).
+    with torch.no_grad():
+        student_net.spiking_actor.action_decoder.log_std.copy_(
+            teacher.a2c_network.actor.action_log_std
+        )
+    logger.info(
+        "[warmup] initialized student log_std from teacher "
+        f"({teacher.a2c_network.actor.action_log_std.detach().cpu().tolist()})"
+    )
 
     # --- Optimizer over the SNN actor only -------------------------------------
     actor_params = list(student_net.spiking_actor.parameters())

@@ -34,8 +34,20 @@ class A2CTeacherAgent(A2CAgent):
         # there while PPO's critic catches up, then get out of the way.
         self.kd_actor_coeff = float(self.teacher_cfg.get('kd_actor_coeff', 0.1))
         self.kd_critic_coeff = float(self.teacher_cfg.get('kd_critic_coeff', 0.0))
-        # Epochs to linearly anneal the KD scale 1 -> 0. 0 disables annealing (constant KD).
-        self.kd_anneal_epochs = int(self.teacher_cfg.get('kd_anneal_epochs', 100))
+
+        # Success-gated, monotonic KD anneal. The KD multiplier starts at 1.0 (full prior)
+        # and only ever DECREASES: each curriculum check whose success >= kd_release_success
+        # subtracts kd_anneal_step, clamped at 0 (full release). A check below the threshold
+        # does nothing -> the scale holds, never climbs back. So the prior fades as fast as
+        # the student sustains success above the bar, and is gone after ~(1/kd_anneal_step)
+        # such checks. Two knobs, one state variable.
+        self.kd_release_success = float(self.teacher_cfg.get('kd_release_success', 0.50))
+        self.kd_anneal_step = float(self.teacher_cfg.get('kd_anneal_step', 0.05))
+
+        # State. _last_success is refreshed once per epoch in train_epoch().
+        self._last_success = 0.0
+        self._kd_scale = 1.0              # monotonic; only ever decreases toward 0
+        self._prev_success_for_step = None  # last success VALUE we already stepped on
         # Actor distillation divergence: 'kl' (full Gaussian, default) or 'mse' (means only,
         # matching the BC warm-up). 'kl' also pulls the student's sigma toward the teacher's.
         self.kd_actor_loss = str(self.teacher_cfg.get('kd_actor_loss', 'kl')).lower()
@@ -86,13 +98,45 @@ class A2CTeacherAgent(A2CAgent):
             print(f"[a2c_teacher] WARNING: could not init critic from teacher ({e}); "
                   "critic starts from its built (random/checkpoint) weights.")
 
+    def _read_task_success(self):
+        """Best-effort read of the task's logged_success_rate through the vec_env wrapper
+        chain (AERIALRLGPUEnv -> ExtractObsWrapper(gym.Wrapper) -> task). Walks `.env` and
+        returns the first logged_success_rate found, else keeps the previous value."""
+        env = getattr(self, "vec_env", None)
+        for _ in range(5):  # bounded walk down the wrapper chain
+            if env is None:
+                break
+            if hasattr(env, "logged_success_rate"):
+                return float(env.logged_success_rate)
+            env = getattr(env, "env", None)
+        return self._last_success  # unchanged if we couldn't find it
+
+    def _step_kd_scale(self):
+        """Advance the monotonic KD anneal once per CURRICULUM CHECK (not per epoch).
+        logged_success_rate only refreshes every check_after_num_rollouts rollouts, so we
+        act on a success value once: when it differs from the value we last stepped on. A
+        check above the release bar subtracts one step (clamped at 0); below the bar holds."""
+        s = self._last_success
+        if s == self._prev_success_for_step:
+            return  # same check value as last epoch -> no new check landed, don't recount
+        self._prev_success_for_step = s
+        if s >= self.kd_release_success and self._kd_scale > 0.0:
+            self._kd_scale = max(0.0, self._kd_scale - self.kd_anneal_step)
+            if self._kd_scale == 0.0:
+                print(f"[a2c_teacher] KD RELEASE: scale -> 0 (success {s:.3f} "
+                      f">= {self.kd_release_success}); prior gone.")
+
+    def train_epoch(self):
+        """Refresh the success signal and advance the monotonic KD anneal once per epoch,
+        then run the normal rl_games epoch."""
+        self._last_success = self._read_task_success()
+        self._step_kd_scale()
+        return super().train_epoch()
+
     def _current_distill_coef(self):
-        """KD anneal multiplier in [0, 1]: 1 early, linearly -> 0 over `kd_anneal_epochs`,
-        then 0 (the tail ends). `kd_anneal_epochs <= 0` => constant 1.0 (no anneal)."""
-        if self.kd_anneal_epochs <= 0:
-            return 1.0
-        frac = self.epoch_num / float(self.kd_anneal_epochs)
-        return max(0.0, 1.0 - frac)
+        """Monotonic, success-gated KD multiplier in [0, 1]. Starts at 1.0; only ever
+        decreased by _step_kd_scale() (per check, while success >= release bar)."""
+        return self._kd_scale
 
     @torch.no_grad()
     def _compute_teacher_outputs(self, obs):
@@ -241,8 +285,14 @@ class A2CTeacherAgent(A2CAgent):
         # Surface KD scalars to TensorBoard/W&B (frame as x-axis, matching rl_games' logs).
         if self.writer is not None:
             self.writer.add_scalar('distill/kd_scale', kd_scale, self.frame)
+            # Effective KD coefficients PPO actually applies this minibatch
+            # (anneal multiplier already folded in): kd_scale * kd_*_coeff.
+            self.writer.add_scalar('distill/kd_actor_coeff_eff', kd_a_coeff, self.frame)
+            self.writer.add_scalar('distill/kd_critic_coeff_eff', kd_c_coeff, self.frame)
             self.writer.add_scalar('distill/actor_kd', float(actor_kd), self.frame)
             self.writer.add_scalar('distill/critic_kd', float(critic_kd), self.frame)
+            # The success the gate sees (kd_scale itself is already logged above).
+            self.writer.add_scalar('distill/gate_success', self._last_success, self.frame)
 
         self.train_result = (a_loss, c_loss, entropy, \
             kl_dist, self.last_lr, lr_mul, \

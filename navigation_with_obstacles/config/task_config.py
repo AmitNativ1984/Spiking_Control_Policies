@@ -58,10 +58,8 @@ class task_config:
         sensor_max_range = 10.0
 
     # Runtime VAE gate, read by the PopSAN actor each forward pass and used to scale the
-    # encoded VAE-latent spike block. Set by NavigationWithObstaclesTask's curriculum
-    # state machine: 0.0 during the gated warm-up (Phase A) so the policy learns pure
-    # navigation without the latent distractors, 1.0 once vision is enabled (Phases B/C)
-    # and always 1.0 at inference. Default 1.0 leaves non-gated / state-only runs unaffected.
+    # encoded VAE-latent spike block. Always 1.0 (VAE on) — set in NavigationWithObstaclesTask
+    # __init__. Kept as a knob so non-gated / state-only runs stay unaffected.
     vae_gate = 1.0
 
     # Observation space: 17 (state) [+ latent_dims (VAE latents) when use_vae].
@@ -179,12 +177,14 @@ class task_config:
         success_rate_for_increase = 0.7
         success_rate_for_decrease = 0.6
 
-        # VAE warm-up gating (only active when vae_config.use_vae). Two-phase warm-up at
-        # level 0 before any obstacles appear: Phase A trains with the VAE gated off
-        # (latents distract while the room is empty); once level-0 success ≥
-        # vae_gate_until_success the VAE is enabled (Phase B); the curriculum stays pinned
-        # at level 0 until an ungated window also reaches vae_consolidate_success, then
-        # normal advancement resumes (Phase C). Kept as two knobs so they can diverge later.
+        # VAE warm-up gating (only active when vae_config.use_vae AND the run starts at
+        # curriculum level 0). Two-phase warm-up at level 0 before any obstacles appear:
+        # Phase A trains with the VAE gated off (latents distract while the room is empty);
+        # once level-0 success ≥ vae_gate_until_success the VAE is enabled (Phase B); the
+        # curriculum stays pinned at level 0 until an ungated window also reaches
+        # vae_consolidate_success, then normal advancement resumes (Phase C). If the run
+        # starts at min_level ≥ 1, the gating is skipped entirely and the VAE is always on.
+        # Kept as two knobs so they can diverge later.
         vae_gate_until_success = 0.90   # Phase A→B: enable VAE once level-0 success ≥ this
         vae_consolidate_success = 0.90  # Phase B→C: resume normal curriculum once ungated level-0 success ≥ this
 

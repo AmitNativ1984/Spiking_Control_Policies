@@ -38,7 +38,9 @@ params:
       kd_actor_coeff: 0.1           # weight on the actor distillation term (full Gaussian KL by default)
       kd_critic_coeff: 0.0          # weight on critic-value distillation (0 = critic trains purely on PPO returns)
       kd_actor_loss: kl             # 'kl' (full diagonal-Gaussian KL, mu+sigma) or 'mse' (means only, == warm-up)
-      kd_anneal_epochs: 100         # linearly anneal the KD scale 1->0 over this many epochs (short tail); 0 = constant
+      # Monotonic, success-gated KD anneal: scale starts at 1.0 and only ever decreases.
+      kd_release_success: 0.50      # each curriculum check with success >= this subtracts one step
+      kd_anneal_step: 0.05          # per-check decrement of the KD scale (~20 sustained checks -> 0)
       network:
         name: mlp_actor_critic
         separate: True
