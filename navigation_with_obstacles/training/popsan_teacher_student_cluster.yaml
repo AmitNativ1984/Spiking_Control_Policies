@@ -18,6 +18,7 @@ params:
           pop_dim: 10
           threshold: 0.95                   # Activation threshold for the population encoding layer (matches PopSAN reference vth=0.5)
         num_steps: 5                        # Number of SNN simulation timesteps per forward pass
+        sigma_init: 0.5                     # Initial action std (log_std = log(sigma_init)); learnable thereafter
         hidden_dims: [256, 256]         # Hidden layer dimensions (matches MLP architecture)
         beta: 0.75                          # Voltage decay factor for LIF neurons (0 = no memory, 1 = perfect memory)
         alpha: 0.5                          # Current decay factor (matches PopSAN reference alpha=0.5)

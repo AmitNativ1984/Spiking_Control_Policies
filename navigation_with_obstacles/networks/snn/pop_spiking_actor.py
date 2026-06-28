@@ -1,4 +1,5 @@
 from rl_games.algos_torch.network_builder import NetworkBuilder
+import math
 import torch.nn as nn
 import snntorch as snn
 from snntorch import surrogate
@@ -97,6 +98,12 @@ class PopulationSpikingActorNetwork(nn.Module):
         self.action_decoder = SpikeDecoder(action_dim=self.action_dim,
                                            pop_dim=actor_config["pop_dim"])
 
+        # State-independent log std of the action distribution. A learnable network
+        # parameter, unrelated to the spiking decoder. Initialized so exp(log_std) ==
+        # sigma_init (default 1.0).
+        sigma_init = actor_config.get("sigma_init", 1.0)
+        self.log_std = nn.Parameter(torch.full((action_dim,), math.log(sigma_init)))
+
         # First encoder column belonging to the VAE-latent block. The population encoder
         # lays out obs dim d in columns [d*pop_dim : (d+1)*pop_dim], so the latents (obs
         # dims [state_dims : input_dim]) start at state_dims*pop_dim. Derived from config
@@ -166,5 +173,6 @@ class PopulationSpikingActorNetwork(nn.Module):
             
         output_spike_act /= self.num_steps  # Average over timesteps to get mean spike activity for decoding
         output_spike_act = output_spike_act.view(-1, self.action_dim, self.pop_dim)
-        action_mu, action_log_std = self.action_decoder(output_spike_act)
+        action_mu = self.action_decoder(output_spike_act)
+        action_log_std = self.log_std.expand_as(action_mu)
         return action_mu, action_log_std
