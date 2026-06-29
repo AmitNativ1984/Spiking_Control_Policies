@@ -113,7 +113,18 @@ class PopulationSpikingActorNetwork(nn.Module):
             task_config.vae_config.latent_dims if task_config.vae_config.use_vae else 0
         )
         self._lat_col_start = state_dims * self.pop_dim
-    
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # Back-compat: log_std used to live on the decoder (action_decoder.log_std)
+        # and warmup left it at its stale init (std=1.0). Legacy checkpoints have no
+        # top-level log_std, so seed it from the freshly built sigma_init value to
+        # satisfy strict loading; checkpoints that already trained log_std keep theirs.
+        state_dict.pop(prefix + "action_decoder.log_std", None)
+        log_std_key = prefix + "log_std"
+        if log_std_key not in state_dict:
+            state_dict[log_std_key] = self.log_std.data.clone()
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
     def is_rnn(self):
         """Required by rl_games - indicates this is not an RNN network."""
         return False

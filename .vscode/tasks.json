@@ -281,7 +281,7 @@
                 "--train",
                 "--headless=True",
                 "--curriculum_level=25",
-                "--checkpoint=${input:warmupCheckpoint}",
+                "--checkpoint=navigation_with_obstacles/runs/warmup_snn_2026-06-25_21-54-13/nn/warmup_snn.pth",
                 "--track",
                 "--wandb-project-name=popsan_ann_teacher_distill"
             ],
