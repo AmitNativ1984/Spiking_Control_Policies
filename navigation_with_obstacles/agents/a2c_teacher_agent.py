@@ -71,10 +71,16 @@ class A2CTeacherAgent(A2CAgent):
 
         # --- Phase 4.5: initialize the SNN critic from the ANN critic --------------------
         # Both are ANNMLPCritic with matching hidden_dims (enforced by the YAML), so weights
-        # copy 1:1. 
+        # copy 1:1.
         # The critic stays TRAINABLE:
         # a frozen teacher critic would describe the ANN's policy, not the drifting SNN's.
         self._init_critic_from_teacher()
+
+        # Cap the adaptive-LR ceiling (rl_games hard-codes max_lr=1e-2, ~30x our base).
+        self.max_lr = float(self.config.get('max_lr', 1e-3))
+        if hasattr(self.scheduler, 'max_lr'):
+            self.scheduler.max_lr = self.max_lr
+            print(f"[a2c_teacher] scheduler.max_lr -> {self.max_lr:g}")
 
     def _init_critic_from_teacher(self):
         """Copy the teacher's critic weights (and matching obs/value normalization stats)
