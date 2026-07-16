@@ -1,0 +1,142 @@
+<?xml version="1.0"?>
+<!--
+  GENERATED FILE - do not hand-edit ../model.urdf.
+  Edit params.yaml or templates/*.jinja in this directory, then run
+  render.py to regenerate. See params.yaml for the full derivation of every
+  mass/inertia/position number (ported from the Gazebo SITL source of truth,
+  sail-uav-core/gazebo-sitl/models/f450/model.sdf + NOTES.md).
+
+  Structured like resources/robots/x500/model.urdf: base_link (single rigid
+  body lumping frame+motors+RealSense+Orin+battery) plus 4 fixed-jointed prop
+  links with real mass/inertia, primitive geometry only (no mesh files).
+-->
+<robot name="f450">
+  <link name="base_link">
+    <visual>
+      <origin xyz="0.0 0.0 -0.03"/>
+      <geometry>
+        <box size="0.18 0.18 0.08"/>
+      </geometry>
+      <material name="Gray">
+        <color rgba="0.175 0.175 0.175 1.0"/>
+      </material>
+    </visual>
+
+    <!-- Single tight box bounding the entire robot - see params.yaml
+         base_link_geometry.collision_box for the derivation. -->
+    <collision>
+      <origin xyz="0.0 0.0 -0.081712"/>
+      <geometry>
+        <box size="0.56097 0.56097 0.211577"/>
+      </geometry>
+    </collision>
+
+    <inertial>
+      <!-- CoM offset from the frame geometric center (base_link origin):
+           +3.7mm forward (RealSense on the nose), -8.0mm down (belly battery). -->
+      <origin xyz="0.003698 0.0 -0.007999"/>
+      <mass value="1.947"/>
+      <inertia ixx="0.020177" ixy="0.0" ixz="0.000158" iyy="0.020979" iyz="0.0" izz="0.039046"/>
+    </inertial>
+  </link>
+  <!-- front_right_prop: real DJI F450 spec, ccw rotation (see params.yaml
+       "props" for the spin-direction rationale). -->
+  <link name="front_right_prop">
+    <visual>
+      <origin xyz="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.11785" length="0.01"/>
+      </geometry>
+      <material name="White">
+        <color rgba="1 1 1 1.0"/>
+      </material>
+    </visual>
+    <!-- No collision here - base_link's single collision_box already bounds
+         the whole robot, including this prop's disc (see params.yaml). -->
+    <inertial>
+      <mass value="0.013"/>
+      <inertia ixx="3.0092e-05" ixy="0.0" ixz="0.0" iyy="3.0092e-05" iyz="0.0" izz="6.0184e-05"/>
+    </inertial>
+  </link>
+
+  <joint name="base_link_to_front_right_prop" type="fixed" dont_collapse="true">
+    <parent link="base_link"/>
+    <child link="front_right_prop"/>
+    <origin xyz="0.162635 -0.162635 0.0115"/>
+  </joint>
+  <!-- back_right_prop: real DJI F450 spec, cw rotation (see params.yaml
+       "props" for the spin-direction rationale). -->
+  <link name="back_right_prop">
+    <visual>
+      <origin xyz="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.11785" length="0.01"/>
+      </geometry>
+      <material name="White">
+        <color rgba="1 1 1 1.0"/>
+      </material>
+    </visual>
+    <!-- No collision here - base_link's single collision_box already bounds
+         the whole robot, including this prop's disc (see params.yaml). -->
+    <inertial>
+      <mass value="0.013"/>
+      <inertia ixx="3.0092e-05" ixy="0.0" ixz="0.0" iyy="3.0092e-05" iyz="0.0" izz="6.0184e-05"/>
+    </inertial>
+  </link>
+
+  <joint name="base_link_to_back_right_prop" type="fixed" dont_collapse="true">
+    <parent link="base_link"/>
+    <child link="back_right_prop"/>
+    <origin xyz="-0.162635 -0.162635 0.0115"/>
+  </joint>
+  <!-- back_left_prop: real DJI F450 spec, ccw rotation (see params.yaml
+       "props" for the spin-direction rationale). -->
+  <link name="back_left_prop">
+    <visual>
+      <origin xyz="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.11785" length="0.01"/>
+      </geometry>
+      <material name="White">
+        <color rgba="1 1 1 1.0"/>
+      </material>
+    </visual>
+    <!-- No collision here - base_link's single collision_box already bounds
+         the whole robot, including this prop's disc (see params.yaml). -->
+    <inertial>
+      <mass value="0.013"/>
+      <inertia ixx="3.0092e-05" ixy="0.0" ixz="0.0" iyy="3.0092e-05" iyz="0.0" izz="6.0184e-05"/>
+    </inertial>
+  </link>
+
+  <joint name="base_link_to_back_left_prop" type="fixed" dont_collapse="true">
+    <parent link="base_link"/>
+    <child link="back_left_prop"/>
+    <origin xyz="-0.162635 0.162635 0.0115"/>
+  </joint>
+  <!-- front_left_prop: real DJI F450 spec, cw rotation (see params.yaml
+       "props" for the spin-direction rationale). -->
+  <link name="front_left_prop">
+    <visual>
+      <origin xyz="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.11785" length="0.01"/>
+      </geometry>
+      <material name="White">
+        <color rgba="1 1 1 1.0"/>
+      </material>
+    </visual>
+    <!-- No collision here - base_link's single collision_box already bounds
+         the whole robot, including this prop's disc (see params.yaml). -->
+    <inertial>
+      <mass value="0.013"/>
+      <inertia ixx="3.0092e-05" ixy="0.0" ixz="0.0" iyy="3.0092e-05" iyz="0.0" izz="6.0184e-05"/>
+    </inertial>
+  </link>
+
+  <joint name="base_link_to_front_left_prop" type="fixed" dont_collapse="true">
+    <parent link="base_link"/>
+    <child link="front_left_prop"/>
+    <origin xyz="0.162635 0.162635 0.0115"/>
+  </joint>
+</robot>

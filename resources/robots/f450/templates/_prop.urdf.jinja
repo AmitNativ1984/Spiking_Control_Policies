@@ -1,0 +1,25 @@
+  <!-- {{ p.name }}_prop: real DJI F450 spec, {{ p.spin }} rotation (see params.yaml
+       "props" for the spin-direction rationale). -->
+  <link name="{{ p.name }}_prop">
+    <visual>
+      <origin xyz="0 0 0"/>
+      <geometry>
+        <cylinder radius="{{ prop.radius }}" length="{{ prop.visual_length }}"/>
+      </geometry>
+      <material name="White">
+        <color rgba="1 1 1 1.0"/>
+      </material>
+    </visual>
+    <!-- No collision here - base_link's single collision_box already bounds
+         the whole robot, including this prop's disc (see params.yaml). -->
+    <inertial>
+      <mass value="{{ prop.mass }}"/>
+      <inertia ixx="{{ prop.inertia.ixx }}" ixy="0.0" ixz="0.0" iyy="{{ prop.inertia.iyy }}" iyz="0.0" izz="{{ prop.inertia.izz }}"/>
+    </inertial>
+  </link>
+
+  <joint name="base_link_to_{{ p.name }}_prop" type="fixed" dont_collapse="true">
+    <parent link="base_link"/>
+    <child link="{{ p.name }}_prop"/>
+    <origin xyz="{{ p.x_sign * prop.arm_xy_offset }} {{ p.y_sign * prop.arm_xy_offset }} {{ prop.z }}"/>
+  </joint>

@@ -1,7 +1,7 @@
 # Devcontainer Dockerfile
 # Builds on top of the pre-built aerial-gym image and adds dev dependencies
 
-FROM localhost:5000/aerial-gym:latest
+FROM amitnativ/aerial-gym:latest
 
 # Install dev dependencies.
 # NOTE: loguru and snntorch are already installed in the base image

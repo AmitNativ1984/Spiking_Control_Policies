@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<!--
+  GENERATED FILE - do not hand-edit ../model.urdf.
+  Edit params.yaml or templates/*.jinja in this directory, then run
+  render.py to regenerate. See params.yaml for the full derivation of every
+  mass/inertia/position number (ported from the Gazebo SITL source of truth,
+  sail-uav-core/gazebo-sitl/models/f450/model.sdf + NOTES.md).
+
+  Structured like resources/robots/x500/model.urdf: base_link (single rigid
+  body lumping frame+motors+RealSense+Orin+battery) plus 4 fixed-jointed prop
+  links with real mass/inertia, primitive geometry only (no mesh files).
+-->
+<robot name="f450">
+{% include "_base_link.urdf.jinja" %}
+
+{% for p in props %}
+{% include "_prop.urdf.jinja" %}
+
+{% endfor %}
+</robot>
+
