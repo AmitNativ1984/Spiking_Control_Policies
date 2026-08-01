@@ -14,7 +14,7 @@ class task_config:
 
     seed = 42
     sim_name = "base_sim"
-    env_name = "navigation_obstacle_env"
+    env_name = "forest_with_obstacles_env"
     robot_name = "f450"
     controller_name = "lee_attitude_control"
     args = {}
