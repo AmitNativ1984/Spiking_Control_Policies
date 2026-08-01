@@ -1,13 +1,11 @@
-from operator import index
-
 import numpy as np
 from pathlib import Path
 from aerial_gym.config.sensor_config.camera_config.base_depth_camera_config import BaseDepthCameraConfig
 from aerial_gym.config.sensor_config.imu_config.vn100_config import VN100Config
 from aerial_gym.config.sensor_config.imu_config.bosch_bmi088_config import BoschBMI088Config
 from aerial_gym.config.sensor_config.imu_config.base_imu_config import BaseImuConfig
-from sensor_config.realsense_d435_cam_config import RealSenseD435CamConfig
-from sensor_config.gazebo_imu_config import GazeboImuConfig
+from config.sensor_config.realsense_d435_cam_config import RealSenseD435CamConfig
+from config.sensor_config.gazebo_imu_config import GazeboImuConfig
 class F450Config:
     """
     F450 quadrotor configuration.
