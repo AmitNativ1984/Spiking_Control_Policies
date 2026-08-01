@@ -21,12 +21,11 @@ import numpy as np
 
 class ForestEnvCfg:
     class env:
-        num_envs = 64
-        num_env_actions = 4  # this is the number of actions handled by the environment
-        # potentially some of these can be input from the RL agent for the robot and
-        # some of them can be used to control various entities in the environment
-        # e.g. motion of obstacles, etc.
-        env_spacing = 5.0  # not used with heightfields/trimeshes
+        # num_envs intentionally not set here — must be passed explicitly via CLI
+        # (task_registry.make_task(num_envs=...)); this env config has no sensible default
+        # and env_manager.py will raise AttributeError immediately if it's ever missing.
+        num_env_actions = 0  # no dynamically-actuated entities: panels/objects/thin/trees/
+        # spheres/cylinders are all fix_base_link=True, positioned once per reset and static.
 
         num_physics_steps_per_env_step_mean = 3  # number of steps between camera renders mean
         num_physics_steps_per_env_step_std = 1  # number of steps between camera renders std
