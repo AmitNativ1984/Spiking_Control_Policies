@@ -2,7 +2,6 @@ from aerial_gym.config.asset_config.env_object_config import (
     panel_asset_params,
     thin_asset_params,
     tree_asset_params,
-    object_asset_params,
     tile_asset_params,
     left_wall,
     right_wall,
@@ -15,6 +14,8 @@ from config.asset_config.sphere_cylinder_config import (
     sphere_asset_params,
     cylinder_asset_params,
 )
+# Pool-size override (35 -> 40) so the Poisson sampler rarely hits the actor ceiling.
+from config.asset_config.enlarged_object_config import object_asset_params
 
 import numpy as np
 
@@ -42,10 +43,16 @@ class ForestEnvCfg:
         write_to_sim_at_every_timestep = False  # write to sim at every timestep
 
         use_warp = True
-        lower_bound_min = [-2.0, -4.0, -3.0]  # lower bound for the environment space
-        lower_bound_max = [-1.0, -2.5, -2.0]  # lower bound for the environment space
-        upper_bound_min = [9.0, 2.5, 2.0]  # upper bound for the environment space
-        upper_bound_max = [10.0, 4.0, 3.0]  # upper bound for the environment space
+        # Bounds scaled 1.2x in x and y (about the env centre: x=4.0, y=0), z left alone.
+        # The drone now spawns at the env centre and the target lands on a vertical wall,
+        # which halves the traverse compared with the old low-x spawn / high-x goal layout.
+        # Scaling x/y restores the mean path to ~5.3 m (was ~5.2 m). z is deliberately NOT
+        # scaled: targets sit on vertical walls, so z adds volume -- and therefore obstacle
+        # count and actor cost -- without buying any path length.
+        lower_bound_min = [-3.2, -4.8, -3.0]  # lower bound for the environment space
+        lower_bound_max = [-2.0, -3.0, -2.0]  # lower bound for the environment space
+        upper_bound_min = [10.0, 3.0, 2.0]  # upper bound for the environment space
+        upper_bound_max = [11.2, 4.8, 3.0]  # upper bound for the environment space
 
     class env_config:
         include_asset_type = {
@@ -61,6 +68,12 @@ class ForestEnvCfg:
             "front_wall": False,
             "top_wall": False,
             "bottom_wall": True,
+            # Must be listed explicitly: asset_loader.select_and_order_assets() only skips
+            # a type when include_asset_type[type] is False, so anything present in
+            # asset_type_to_dict_map but absent here is loaded by default. tile_asset_params
+            # points at a "tile_meshes" folder that does not ship with aerial_gym, so
+            # omitting this key raises FileNotFoundError before the sim is even built.
+            "tiles": False,
         }
 
         # maps the above names to the classes defining the assets. They can be enabled and disabled above in include_asset_type

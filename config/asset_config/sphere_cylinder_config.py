@@ -10,9 +10,14 @@ _ENVIRONMENT_ASSETS_DIR = Path(__file__).resolve().parent.parent.parent / "resou
 class sphere_asset_params(asset_state_params):
     """3 fixed-radius spheres (0.2/0.4/0.6 m), randomly selected with replacement.
     Same randomization style as object_asset_params: full rotation, culled by curriculum
-    (keep_in_env=False)."""
+    (keep_in_env=False).
 
-    num_assets = 15
+    NOTE: min/max_state_ratio positions [0:3] are IGNORED by PoissonAssetManager, which
+    samples positions from a Poisson point process over the whole env. Only the rotation
+    entries [3:6] are still read.
+    """
+
+    num_assets = 18
 
     asset_folder = str(_ENVIRONMENT_ASSETS_DIR / "spheres")
 
@@ -54,9 +59,13 @@ class sphere_asset_params(asset_state_params):
 
 class cylinder_asset_params(asset_state_params):
     """3 fixed (radius, length) cylinders (post/stub/barrel), randomly selected with
-    replacement. Same randomization style as object_asset_params."""
+    replacement. Same randomization style as object_asset_params.
 
-    num_assets = 15
+    NOTE: min/max_state_ratio positions [0:3] are IGNORED by PoissonAssetManager (see
+    sphere_asset_params).
+    """
+
+    num_assets = 18
 
     asset_folder = str(_ENVIRONMENT_ASSETS_DIR / "cylinders")
 

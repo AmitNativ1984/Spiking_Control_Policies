@@ -24,13 +24,16 @@ class RealSenseD435CamConfig(BaseSensorConfig):
     )
 
     return_pointcloud = False  # Return point cloud instead of an image. Above depth option will be ignored if True.
-    point_cloud_in_world_frame = False  
+    # NOTE: spelled "pointcloud", not "point_cloud". aerial_gym reads this exact name in
+    # warp_sensor.normalize_observation(); the underscored variant silently never matches
+    # and raises AttributeError during prepare_for_sim.
+    pointcloud_in_world_frame = False
     segmentation_camera = False  # If True, the camera will return a segmentation image instead of a depth image. The segmentation image will have the same size as the depth image and will contain the object IDs of the objects in the scene.
 
     # Tranform sensor element coordinates to camera_link frame.
     euler_frame_rot_deg = [-90.0, 0.0, -90.0]  
     
-    if (return_pointcloud and point_cloud_in_world_frame):
+    if (return_pointcloud and pointcloud_in_world_frame):
         normalize_range = False
     else:
         normalize_range = True

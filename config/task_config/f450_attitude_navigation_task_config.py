@@ -23,8 +23,37 @@ class task_config:
     headless = True
     device = "cuda:0"
 
-    target_min_ratio = [0.90, 0.1, 0.1]
-    target_max_ratio = [0.95, 0.9, 0.9]
+    # --- TARGET SAMPLING ---
+    # The target lands on one of the FOUR VERTICAL env walls (+x, -x, +y, -y), each with
+    # probability 1/4, so the world-frame traversal direction is balanced across the batch.
+    # Combined with the centre spawn (robot_config.init_config), this removes the old
+    # "always fly +x" structure.
+    #
+    # Walls are pulled in by target_wall_inset so the FULL arrival ball of radius d_min
+    # sits inside the bounds. exceed_mask has priority over arrive_mask in
+    # compute_rewards(), so a target flush with the wall would be reachable only from a
+    # half-ball and any overshoot would score as `exceed` instead of `arrive`.
+    target_wall_inset = [0.8, 0.8, 0.0]  # m in from each wall; >= 2*d_min (d_min = 0.4)
+    # Window for the two un-pinned axes (the pinned one is overwritten with the wall).
+    # The z window is wide on purpose so the vertical bearing component actually varies.
+    target_free_ratio_min = [0.05, 0.05, 0.12]
+    target_free_ratio_max = [0.95, 0.95, 0.90]
+    # Best-of-K rejection so the goal does not end up buried inside an obstacle (an
+    # episode that could then only ever time out). Evaluated against the final obstacle
+    # positions, which are already written by the time task.reset_idx runs.
+    target_clearance_candidates = 8
+
+    # --- OBSTACLE FIELD (Poisson point process) ---
+    # Obstacles are placed by a homogeneous Poisson point process over the env volume,
+    # thinned by a keep-out ellipsoid around the spawn box. See task/poisson_asset_manager.py.
+    #
+    # density_max reproduces today's level-25 clutter (24 obstacles in the old 357 m^3
+    # env). Path length is restored by enlarging the env in x/y (see the env config)
+    # rather than by raising density, so both local clutter and route length match the
+    # old distribution.
+    obstacle_density_max = 0.067  # obstacles / m^3 at curriculum max_level
+    obstacle_spawn_clearance = 0.95  # m added to the spawn-box half-extents to form the
+                                     # keep-out ellipsoid: max sphere radius 0.6 + F450 ~0.35
 
     # ---- EPISODE LENGTH ---
     episode_len_steps = 800

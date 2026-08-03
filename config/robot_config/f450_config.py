@@ -15,15 +15,31 @@ class F450Config:
     class init_config:
         # init_state tensor is of the format [ratio_x, ratio_y, ratio_z, roll_radians, pitch_radians, yaw_radians, 1.0 (for maintaining shape), vx, vy, vz, wx, wy, wz]
         # [ratio_x, ratio_y, ratio_z, roll_rad, pitch_rad, yaw_rad, 1.0, vx, vy, vz, wx, wy, wz]
+        #
+        # Spawn in a SMALL BOX AT THE ENV CENTRE. Targets are sampled on the four vertical
+        # env walls (see task_config.target_*), so starting at the centre makes every
+        # bearing equally likely instead of the old "always fly +x" layout.
+        #
+        # The z range is deliberately wider than x/y: it is the only source of elevation
+        # randomization at spawn, and the vertical bearing component (observations[2]) is
+        # otherwise never exercised.
+        #
+        # Yaw stays uniform on +/-pi. This is what makes the OBSERVED bearing uniform:
+        # observations[0:3] is expressed in the vehicle (yaw-only) frame, so a random
+        # heading spreads the target direction over all azimuths. Do not narrow it.
+        #
+        # SINGLE SOURCE OF TRUTH for the spawn box: PoissonAssetManager reads
+        # min/max_init_state[0:3] to size its keep-out ellipsoid, so obstacles can never
+        # be placed where the drone is about to appear.
         min_init_state = [
-            0.1, 0.15, 0.15,
+            0.45, 0.45, 0.35,
             -np.pi / 6.0, -np.pi / 6.0, -np.pi,
             1.0,
             -0.1, -0.1, -0.1,
             -0.1, -0.1, -0.1
         ]
         max_init_state = [
-            0.9, 0.85, 0.85,
+            0.55, 0.55, 0.65,
             np.pi / 6.0, np.pi / 6.0, np.pi,
             1.0,
             0.1, 0.1, 0.1,
