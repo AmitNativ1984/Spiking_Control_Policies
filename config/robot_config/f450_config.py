@@ -1,4 +1,5 @@
 import numpy as np
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from aerial_gym.config.sensor_config.camera_config.base_depth_camera_config import BaseDepthCameraConfig
 from aerial_gym.config.sensor_config.imu_config.vn100_config import VN100Config
@@ -6,6 +7,58 @@ from aerial_gym.config.sensor_config.imu_config.bosch_bmi088_config import Bosch
 from aerial_gym.config.sensor_config.imu_config.base_imu_config import BaseImuConfig
 from config.sensor_config.realsense_d435_cam_config import RealSenseD435CamConfig
 from config.sensor_config.gazebo_imu_config import GazeboImuConfig
+
+_ASSET_FOLDER = Path(__file__).resolve().parent.parent.parent / "resources" / "robots" / "f450"
+_URDF_FILE = "model.urdf"
+
+
+def _urdf_center_of_mass(urdf_path):
+    """Mass-weighted center of mass of every link, in the base_link frame.
+
+    DERIVED, not hardcoded, and that is the point. control_allocator_config below takes
+    moments about this point while PhysX takes them about the CoM it computes from the same
+    URDF. If the two ever disagree, "commanded zero torque" stops meaning zero torque: four
+    equal thrusts about a CoM 3.6 mm off-axis are m*g*0.0036 = 0.071 N.m of pitch torque,
+    and the Lee attitude controller is pure PD (no integral term), so it can only balance
+    that with a permanent attitude error -- measured at 4.06 deg of pitch, which flew the
+    drone sideways at 2.6 m/s under a zero action. A constant here would silently
+    reintroduce that bias the first time the URDF's inertial block changed.
+
+    Assumes the F450's flat tree of fixed joints with no rotation between link frames,
+    which is what model.urdf has; raises if the joints are not ordered root-first.
+    """
+    root = ET.parse(urdf_path).getroot()
+
+    # Link frame origins relative to base_link.
+    frames = {}
+    for joint in root.findall("joint"):
+        parent, child = joint.find("parent").get("link"), joint.find("child").get("link")
+        origin = joint.find("origin")
+        xyz = np.fromstring(origin.get("xyz", "0 0 0"), sep=" ") if origin is not None else np.zeros(3)
+        if parent not in frames:
+            if frames:
+                raise ValueError(f"{urdf_path}: joints are not ordered root-first ('{parent}' unseen)")
+            frames[parent] = np.zeros(3)  # first parent encountered is the root
+        frames[child] = frames[parent] + xyz
+
+    total_mass, weighted = 0.0, np.zeros(3)
+    for link in root.findall("link"):
+        inertial = link.find("inertial")
+        if inertial is None:
+            continue
+        mass = float(inertial.find("mass").get("value"))
+        origin = inertial.find("origin")
+        com = np.fromstring(origin.get("xyz", "0 0 0"), sep=" ") if origin is not None else np.zeros(3)
+        total_mass += mass
+        weighted += mass * (frames.get(link.get("name"), np.zeros(3)) + com)
+
+    return weighted / total_mass
+
+
+# (0.003602, 0.0, -0.007492) for the current URDF, matching the CoM Isaac Gym logs at build.
+_COM = _urdf_center_of_mass(_ASSET_FOLDER / _URDF_FILE)
+
+
 class F450Config:
     """
     F450 quadrotor configuration.
@@ -60,17 +113,44 @@ class F450Config:
         prob_apply_disturbance = 0.05
         max_force_and_torque_disturbance = [1.5, 1.5, 1.5, 0.1, 0.1, 0.1]
 
+    class domain_randomization:
+        # Per-env INERTIA spread, resampled per episode via gym.set_actor_rigid_body_properties.
+        #
+        # Inertia is the only one of mass/CoM/inertia worth randomizing here, because it is
+        # the only one the controller is not told about. robot_manager copies ONE build-time
+        # inertia to every env (robot_manager.py:471), so a per-env draw is a genuine
+        # plant/model mismatch the policy has to absorb.
+        #
+        # Dropped, both verified empirically rather than assumed:
+        #   mass  - the task wrote every draw into obs_dict["robot_mass"], which is exactly
+        #           the tensor the Lee controller uses for (a+1)*m*g. Handing the controller
+        #           the answer makes hover stay at command 0 for ANY mass: forcing a 2x draw
+        #           left the drone still hovering instead of climbing. It bought no
+        #           robustness. Thrust-to-weight uncertainty is already covered from the
+        #           other side by motor_thrust_constant_min/max, which the controller does
+        #           NOT see. To randomize T/W directly, decouple the controller's ASSUMED
+        #           mass from the physics mass -- randomizing both together cancels out.
+        #   CoM   - gym.set_actor_rigid_body_properties silently drops CoM writes after
+        #           prepare_sim. Readback returns the URDF value under both `p.com.x = v`
+        #           and `p.com = gymapi.Vec3(...)`, and a forced +-5 cm offset left every env
+        #           at an identical attitude. The knob did nothing. It would also fight
+        #           control_allocator_config, whose moment arms are referenced to the URDF
+        #           CoM; moving the real CoM without updating those arms is precisely the
+        #           bias that was just removed.
+        randomize_mass_properties = True
+        inertia_scale_range = [0.85, 1.15]
+
     class damping:
-        linvel_linear_damping_coefficient = [0.0029, 0.0029, 0.0]  # along the body [x, y, z] axes
+        linvel_linear_damping_coefficient = [0.28, 0.28, 0.0]  # along the body [x, y, z] axes
         linvel_quadratic_damping_coefficient = [0.0, 0.0, 0.0]  # along the body [x, y, z] axes
-        angular_linear_damping_coefficient = [0.0, 0.0, 0.0]  # along the body [x, y, z] axes
+        angular_linear_damping_coefficient = [0.077, 0.077, 0.01]  # along the body [x, y, z] axes
         angular_quadratic_damping_coefficient = [0.0, 0.0, 0.0]  # along the body [x, y, z] axes
 
     class robot_asset:
-        asset_folder = str(
-            Path(__file__).resolve().parent.parent.parent / "resources" / "robots" / "f450"
-        )
-        file = "model.urdf"
+        # Same constants the CoM above is parsed from, so the allocation matrix can never
+        # be derived from a different URDF than the one Isaac Gym loads.
+        asset_folder = str(_ASSET_FOLDER)
+        file = _URDF_FILE
         name =  "base_quadrotor"
         base_link_name = "base_link"
         disable_gravity = False
@@ -177,20 +257,30 @@ class F450Config:
         K_T = 1.004544e-05
         K_M = 0.016
 
-        arm_length = 0.23 # [m] distance from the center of mass to each motor (in the x-y plane)
+        arm_length = 0.23 # [m] distance from the base_link origin to each motor (in the x-y plane)
         # Columns are ordered [front_right, back_left, front_left, back_right], matching
-        # application_mask/motor_directions above. Positions (body frame, x-forward, y-left):
+        # application_mask/motor_directions above. Positions (body frame, x-forward, y-left),
+        # relative to the base_link ORIGIN:
         #   front_right = (+arm*cos(theta), -arm*sin(theta))
         #   back_left   = (-arm*cos(theta), +arm*sin(theta))
         #   front_left  = (+arm*cos(theta), +arm*sin(theta))
         #   back_right  = (-arm*cos(theta), -arm*sin(theta))
-        # Tx = y_i, Ty = -x_i, Tz = -motor_directions[i] * K_M
+        motor_x = arm_length * np.cos(theta) * np.array([+1.0, -1.0, +1.0, -1.0])
+        motor_y = arm_length * np.sin(theta) * np.array([-1.0, +1.0, +1.0, -1.0])
+
+        # Moment arms are referenced to the CENTER OF MASS, not the base_link origin, because
+        # that is the point PhysX takes moments about. The two differ by 3.6 mm on this
+        # airframe (the battery sits forward), and referencing the origin instead made a
+        # commanded zero torque produce 0.071 N.m of real pitch torque -- see
+        # _urdf_center_of_mass above for what that did to the vehicle.
+        #
+        # Tx = (y_i - com_y), Ty = -(x_i - com_x), Tz = -motor_directions[i] * K_M
         allocation_matrix = [
             [0.0, 0.0, 0.0, 0.0],
             [0.0, 0.0, 0.0, 0.0],
             [1.0, 1.0, 1.0, 1.0],
-            [-arm_length * np.sin(theta), arm_length * np.sin(theta), arm_length * np.sin(theta), -arm_length * np.sin(theta)],
-            [-arm_length * np.cos(theta), arm_length * np.cos(theta), -arm_length * np.cos(theta), arm_length * np.cos(theta)],
+            list(motor_y - _COM[1]),
+            list(-(motor_x - _COM[0])),
             [-K_M, -K_M, K_M, K_M],
         ]
 

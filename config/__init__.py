@@ -8,9 +8,10 @@ A runner only needs::
 
 The sub-imports below are ordered by dependency and MUST stay in this order:
 
-    env_config   registers "forest_with_obstacles_env"  (uses asset_config classes)
-    robot_config registers "f450"                       (uses sensor_config classes)
-    task_config  registers "f450_navigation_task"       (names the env and robot above)
+    env_config        registers "forest_with_obstacles_env"  (uses asset_config classes)
+    robot_config      registers "f450"                       (uses sensor_config classes)
+    controller_config registers "f450_lee_attitude_control"
+    task_config       registers "f450_navigation_task"       (names all three above)
 
 asset_config and sensor_config are plain data modules with no registration side effects;
 they are imported directly by the modules that use them.
@@ -18,4 +19,5 @@ they are imported directly by the modules that use them.
 
 from . import env_config  # noqa: F401
 from . import robot_config  # noqa: F401
+from . import controller_config  # noqa: F401
 from . import task_config  # noqa: F401

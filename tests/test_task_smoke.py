@@ -63,3 +63,184 @@ def test_obs_dict_is_a_live_view(task, zero_actions):
         "obs_dict entry was replaced, not updated in place"
     assert not torch.allclose(before, snapshot), \
         "robot_position did not advance over a step"
+
+
+def test_gyro_channel_comes_from_the_imu_not_ground_truth(task, zero_actions):
+    """obs[7:10] must carry the simulated IMU gyro, not robot_body_angvel.
+
+    The point of routing the IMU in is to DEGRADE the observation to what the real F450
+    can supply. If someone reverts the swap in process_obs_for_task, the two tensors go
+    bit-identical and the degradation silently disappears — nothing else would fail.
+    """
+    obs, *_ = task.step(zero_actions)
+
+    if task._imu_gyro_accum is None:
+        import pytest
+        pytest.skip("enable_imu is False in the robot config")
+
+    gyro_obs = obs["observations"][:, 7:10]
+    ground_truth = task.obs_dict["robot_body_angvel"]
+
+    assert not torch.allclose(gyro_obs, ground_truth), \
+        "obs[7:10] is bit-identical to ground truth — the IMU swap is not active"
+
+
+def test_gyro_channel_is_the_gyro_and_not_the_accelerometer(task, zero_actions):
+    """imu_meas is (num_envs, 6) = [0:3] accel, [3:6] gyro. Slicing [0:3] by mistake is a
+    plausible edit, and it would not crash: the shapes match. It would however feed the
+    policy a specific-force reading (~9.8 m/s^2 at hover) where an angular rate belongs.
+
+    So bound the deviation from ground truth. Sensor noise is small; a wrong slice is not.
+    """
+    obs, *_ = task.step(zero_actions)
+
+    if task._imu_gyro_accum is None:
+        import pytest
+        pytest.skip("enable_imu is False in the robot config")
+
+    deviation = (obs["observations"][:, 7:10] - task.obs_dict["robot_body_angvel"]).abs().max()
+
+    assert torch.isfinite(deviation), "gyro channel went non-finite"
+    assert deviation < 1.0, (
+        f"obs[7:10] deviates from true angular velocity by {deviation:.3f} rad/s — far "
+        "beyond IMU noise. Most likely the accel slice [0:3] is being read instead of "
+        "the gyro slice [3:6]."
+    )
+
+
+def test_inertia_is_randomized_per_env_and_hidden_from_the_controller(task, num_envs):
+    """Inertia DR must reach PhysX while staying INVISIBLE to the controller.
+
+    That asymmetry is the whole reason inertia is the one rigid-body property still
+    randomized here. robot_manager copies a single build-time inertia to every env, so a
+    per-env PhysX draw is a real plant/model mismatch the policy has to absorb. If someone
+    "fixes" the discrepancy by publishing the per-env draw into global_tensor_dict, the
+    controller starts compensating for it exactly and the randomization stops buying
+    anything — the same trap the mass draw fell into.
+    """
+    if task._mass_dr is None:
+        import pytest
+        pytest.skip("randomize_mass_properties is off")
+
+    gym = task.sim_env.robot_manager.gym
+    physx_iyy = torch.tensor(
+        [gym.get_actor_rigid_body_properties(e, a)[0].inertia.y.y
+         for e, a in zip(task.sim_env.IGE_env.env_handles,
+                         task.sim_env.robot_manager.robot_handles)],
+        device=task.device,
+    )
+    assert physx_iyy.std() > 0, "PhysX inertias identical across envs — DR did not apply"
+
+    published = task.obs_dict["robot_inertia"]
+    assert published.std(dim=0).max() == 0, (
+        "robot_inertia varies per env — the controller is being told about the inertia "
+        "draw, which cancels the mismatch it was supposed to create"
+    )
+
+
+def test_mass_is_not_randomized_and_the_controller_knows_the_true_mass(task, num_envs):
+    """Mass DR was removed on purpose; this guards both halves of that decision.
+
+    The controller maps thrust as (a+1)*mass*g through a VIEW onto
+    global_tensor_dict["robot_mass"]. Randomizing the physics mass and publishing it there
+    hands the controller the answer, so hover stays at command 0 for any mass and the draw
+    buys no robustness (a forced 2x draw left the drone still hovering). Randomizing it
+    WITHOUT publishing would instead leave every env hovering at the wrong throttle.
+    Neither is wanted: mass stays nominal, and robot_mass must keep matching PhysX.
+    """
+    gym = task.sim_env.robot_manager.gym
+    physx = torch.tensor(
+        [sum(b.mass for b in gym.get_actor_rigid_body_properties(e, a))
+         for e, a in zip(task.sim_env.IGE_env.env_handles,
+                         task.sim_env.robot_manager.robot_handles)],
+        device=task.device,
+    )
+    published = task.obs_dict["robot_mass"]
+
+    assert physx.std() == 0, "PhysX masses vary across envs — mass randomization is back"
+    assert torch.allclose(physx, published, atol=1e-4), \
+        "global_tensor_dict['robot_mass'] disagrees with PhysX — controller would use the wrong mass"
+
+    ctrl = task.sim_env.robot_manager.robot.controller
+    assert torch.allclose(ctrl.mass.squeeze(1), published), \
+        "controller.mass is no longer a view onto robot_mass"
+
+
+def test_observation_uses_estimated_state_but_reward_uses_truth(task, zero_actions):
+    """The whole point of the estimator noise: the policy SEES drift, the reward does not.
+
+    If someone routes the noisy state into _direction_and_distance_to_target(), the agent
+    starts being paid for reaching a hallucinated target and this test fails.
+    """
+    if not task.task_config.state_estimation_noise.enable:
+        import pytest
+        pytest.skip("state_estimation_noise disabled")
+
+    task.step(zero_actions)
+
+    true_dir, true_dist = task._direction_and_distance_to_target()
+    obs_dir = task.task_obs["observations"][:, 0:3]
+
+    assert not torch.allclose(obs_dir, true_dir), \
+        "obs[0:3] equals the true bearing — estimator noise is not reaching the observation"
+
+    # The reward helper must stay deterministic: two calls, no bias advance, same answer.
+    again_dir, again_dist = task._direction_and_distance_to_target()
+    assert torch.allclose(true_dir, again_dir) and torch.allclose(true_dist, again_dist), \
+        "_direction_and_distance_to_target() is not pure — reward path has been contaminated"
+
+
+def test_estimator_error_is_bounded(task, zero_actions):
+    """Drift must stay in a plausible EKF range. A runaway random walk (missing per-episode
+    resample, or sqrt(dt) dropped) would show up here long before it showed up in a reward
+    curve."""
+    if not task.task_config.state_estimation_noise.enable:
+        import pytest
+        pytest.skip("state_estimation_noise disabled")
+
+    for _ in range(20):
+        task.step(zero_actions)
+
+    bias = task._est_pos_bias.abs().max()
+    assert torch.isfinite(bias), "position bias went non-finite"
+    assert bias < 2.0, f"position bias reached {bias:.2f} m — random walk is not bounded"
+
+
+def test_inertia_is_resampled_each_episode_without_drifting(task, num_envs):
+    """Per-episode inertia DR must resample from STORED NOMINALS, not scale the live values.
+
+    Scaling the current properties each reset compounds: a run of high draws walks the
+    airframe away permanently and nothing flags it. So assert two things over many forced
+    resets -- that the inertia actually changes (resampling is live) and that it never
+    escapes the configured band (no compounding).
+    """
+    if task._mass_dr is None:
+        import pytest
+        pytest.skip("randomize_mass_properties is off")
+
+    gym = task.sim_env.robot_manager.gym
+    envs = task.sim_env.IGE_env.env_handles
+    actors = task.sim_env.robot_manager.robot_handles
+    all_ids = torch.arange(num_envs, device=task.device)
+
+    nom_iyy = task._nominal_inertia[1]
+    lo, hi = task._mass_dr.inertia_scale_range
+    band = (nom_iyy * lo - 1e-9, nom_iyy * hi + 1e-9)
+
+    seen = []
+    for _ in range(15):
+        task._randomize_mass_properties(all_ids)
+        iyy = torch.tensor(
+            [gym.get_actor_rigid_body_properties(e, a)[0].inertia.y.y
+             for e, a in zip(envs, actors)],
+            device=task.device,
+        )
+        assert iyy.min() >= band[0] and iyy.max() <= band[1], (
+            f"inertia {iyy.min():.6f}-{iyy.max():.6f} escaped band "
+            f"{band[0]:.6f}-{band[1]:.6f} — scaling is compounding instead of "
+            "resampling from nominal"
+        )
+        seen.append(iyy)
+
+    stacked = torch.stack(seen)
+    assert stacked.std(dim=0).min() > 0, "inertia never changed across resets — not resampling"

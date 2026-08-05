@@ -27,6 +27,7 @@ from env_manager.poisson_asset_manager import PoissonAssetManager
 from vae_depth.vae_image_encoder import DepthVAEImageEncoder
 
 import os
+import math
 import torch
 import numpy as np
 import cv2
@@ -198,6 +199,9 @@ class NavigationWithObstaclesTask(BaseTask):
 
         # Get observation dictionary reference from environment
         self.obs_dict = self.sim_env.get_obs()
+
+        self._install_imu_substep_accumulator()
+        self._setup_domain_randomization()
 
         # Curriculum setup
         if "curriculum_level" not in self.obs_dict.keys():
@@ -419,6 +423,174 @@ class NavigationWithObstaclesTask(BaseTask):
         position = candidates[torch.arange(num_resets, device=self.device), best]
         return position, face
 
+    # ---- domain randomization ------------------------------------------------
+    # Two independent pieces, deliberately configured in different places:
+    #   inertia         -> robot_config.domain_randomization  (what the vehicle IS)
+    #   estimator error -> task_config.state_estimation_noise (what the agent is TOLD)
+    # Both resample per episode from reset_idx().
+    #
+    # The guiding rule for anything added here: randomize the MISMATCH, not the parameter.
+    # A quantity that is randomized and then handed to the controller is invisible to the
+    # policy -- that is exactly why the mass draw was removed.
+
+    def _setup_domain_randomization(self):
+        """Cache the nominal rigid-body properties and allocate the estimator bias buffers."""
+        dr = self.sim_env.robot_manager.cfg.domain_randomization
+        self._mass_dr = dr if dr.randomize_mass_properties else None
+        if self._mass_dr is not None:
+            p = self.sim_env.robot_manager.gym.get_actor_rigid_body_properties(
+                self.sim_env.IGE_env.env_handles[0],
+                self.sim_env.robot_manager.robot_handles[0],
+            )[0]
+            # Every resample scales THIS, never the live value: scaling in place would
+            # compound across episodes and walk the airframe out of its configured band.
+            self._nominal_inertia = (p.inertia.x.x, p.inertia.y.y, p.inertia.z.z, p.inertia.x.z)
+
+        # One env step in seconds, from the live sim rather than the config: the position
+        # random walk scales as sqrt(dt), so a hardcoded value would silently misscale the
+        # drift the moment sim.dt or the substep count changed.
+        self._env_step_dt = (
+            self.obs_dict["dt"] * self.sim_env.cfg.env.num_physics_steps_per_env_step_mean
+        )
+
+        n = self.sim_env.num_envs
+        self._est_pos_bias = torch.zeros((n, 3), device=self.device, requires_grad=False)
+        self._est_yaw_bias = torch.zeros(n, device=self.device, requires_grad=False)
+        self._randomize_domain(torch.arange(n, device=self.device))
+
+    def _randomize_domain(self, env_ids):
+        """Draw a fresh airframe and a fresh estimator turn-on bias for env_ids."""
+        self._randomize_mass_properties(env_ids)
+        self._resample_estimator_bias(env_ids)
+
+    def _randomize_mass_properties(self, env_ids):
+        """Resample base_link inertia. Prop links are 13 g and left alone.
+
+        INERTIA ONLY. Mass and CoM were dropped deliberately -- see
+        robot_config.domain_randomization for the measurements behind that. In short: the
+        controller reads obs_dict["robot_mass"] for its (a+1)*m*g map, so telling it about a
+        mass draw cancels the draw; and CoM writes never reach PhysX after prepare_sim.
+
+        Because mass is no longer touched, obs_dict["robot_mass"] keeps its build-time value
+        and stays correct -- do not reintroduce a write here without re-reading that note.
+        """
+        if self._mass_dr is None or len(env_ids) == 0:
+            return
+        cfg = self._mass_dr
+        gym = self.sim_env.robot_manager.gym
+        envs = self.sim_env.IGE_env.env_handles
+        actors = self.sim_env.robot_manager.robot_handles
+
+        for i in env_ids.tolist():
+            props = gym.get_actor_rigid_body_properties(envs[i], actors[i])
+            base = props[0]
+            inertia_scale = np.random.uniform(*cfg.inertia_scale_range)
+            ixx, iyy, izz, ixz = (v * inertia_scale for v in self._nominal_inertia)
+            base.inertia.x.x, base.inertia.y.y, base.inertia.z.z = ixx, iyy, izz
+            base.inertia.x.z = base.inertia.z.x = ixz
+            # recomputeInertia=False, else PhysX overwrites the tensor we just set.
+            gym.set_actor_rigid_body_properties(envs[i], actors[i], props, False)
+
+    def _resample_estimator_bias(self, env_ids):
+        """Fresh turn-on bias per episode, so the position walk restarts each flight."""
+        cfg = self.task_config.state_estimation_noise
+        if not cfg.enable or len(env_ids) == 0:
+            return
+        n = len(env_ids)
+        self._est_pos_bias[env_ids] = torch.randn((n, 3), device=self.device) * cfg.pos_bias_init_std
+        self._est_yaw_bias[env_ids] = torch.randn(n, device=self.device) * cfg.yaw_bias_std
+
+    def _estimated_state(self):
+        """Odometry as the estimator sees it: (direction, distance, vehicle_linvel).
+
+        Observation only. The reward path calls _direction_and_distance_to_target() on true
+        state, so the agent is paid for reaching the real target while seeing a drifting
+        estimate of where it is.
+
+        Advances the position random walk, so call exactly once per env step.
+        """
+        cfg = self.task_config.state_estimation_noise
+        vel = self.obs_dict["robot_vehicle_linvel"]
+        if not cfg.enable:
+            return (*self._direction_and_distance_to_target(), vel)
+
+        # Position error DRIFTS rather than being white: an estimator's error is correlated
+        # in time, which is exactly what a policy cannot average away over an episode.
+        self._est_pos_bias += torch.randn_like(self._est_pos_bias) * (
+            cfg.pos_random_walk_std * math.sqrt(self._env_step_dt)
+        )
+        vec = quat_rotate_inverse(
+            self.obs_dict["robot_vehicle_orientation"],
+            self.target_position - (self.obs_dict["robot_position"] + self._est_pos_bias),
+        )
+        vel = vel + torch.randn_like(vel) * cfg.vel_noise_std
+
+        # A yaw-estimate error rotates the whole horizontal picture. The vehicle frame is
+        # yaw-only, so it is one planar rotation of both bearing and velocity by -yaw_bias.
+        cy, sy = torch.cos(self._est_yaw_bias), torch.sin(self._est_yaw_bias)
+        vec = torch.stack((cy * vec[:, 0] + sy * vec[:, 1], cy * vec[:, 1] - sy * vec[:, 0], vec[:, 2]), 1)
+        vel = torch.stack((cy * vel[:, 0] + sy * vel[:, 1], cy * vel[:, 1] - sy * vel[:, 0], vel[:, 2]), 1)
+
+        dist = torch.linalg.norm(vec + 1e-6, dim=1, keepdim=True)
+        return vec / (dist + 1e-6), dist, vel
+
+    def _install_imu_substep_accumulator(self):
+        """Accumulate the IMU across physics substeps so the policy sees a mean, not a sample.
+
+        imu_sensor.update() runs once per PHYSICS substep but the policy reads once per ENV
+        step, so 2 of every 3 samples would be discarded and the policy would see a single
+        noisy instant. The real pipeline low-passes the gyro before any 30 Hz consumer sees
+        it, so sampling one instant would give the policy MORE noise than the hardware has.
+        Averaging N substeps cuts the noise by sqrt(N) and approximates that filtering.
+
+        Upstream exposes no per-substep hook, so we wrap the bound method. Remove this once
+        it does. imu_sensor.imu_meas is (num_envs, 6): [0:3] accel, [3:6] gyro, body frame.
+        """
+        imu = getattr(self.sim_env.robot_manager, "imu_sensor", None)
+        if imu is None:
+            # enable_imu = False in the robot config: observation falls back to
+            # ground-truth angular velocity everywhere (count stays 0).
+            self._imu_gyro_accum = None
+            return
+
+        self._imu_gyro_accum = torch.zeros(
+            (self.sim_env.num_envs, 3), device=self.device, requires_grad=False
+        )
+        # Per-env, not a scalar: reset_idx() has to zero individual envs (see below).
+        self._imu_substep_count = torch.zeros(
+            (self.sim_env.num_envs,), device=self.device, requires_grad=False
+        )
+
+        _wrapped_update = imu.update
+
+        def _accumulating_update():
+            _wrapped_update()
+            self._imu_gyro_accum += imu.imu_meas[:, 3:6]
+            self._imu_substep_count += 1.0
+
+        imu.update = _accumulating_update
+
+    def _consume_imu_gyro(self):
+        """Mean gyro over this env step's substeps, falling back to ground truth.
+
+        Two cases hit the fallback, both real rather than defensive:
+          1. num_physics_step_per_env_step is max(floor(gauss(mean, std)), 0) and can
+             legitimately be ZERO, leaving no samples.
+          2. Envs that reset this step. post_reward_calculation_step() re-renders only
+             camera/warp sensors, never the IMU, so the accumulator still holds the
+             PREVIOUS episode; reset_idx() zeroes those envs so they land here.
+
+        Safe either way: init_state draws angular velocity in +/-0.1 rad/s.
+        """
+        ground_truth = self.obs_dict["robot_body_angvel"]
+        if self._imu_gyro_accum is None:
+            return ground_truth
+        n = self._imu_substep_count.unsqueeze(1)
+        gyro = torch.where(n > 0, self._imu_gyro_accum / n.clamp_min(1.0), ground_truth)
+        self._imu_gyro_accum.zero_()
+        self._imu_substep_count.zero_()
+        return gyro
+
     def reset_idx(self, env_ids):
         """
         Reset specific environments.
@@ -426,7 +598,17 @@ class NavigationWithObstaclesTask(BaseTask):
         Args:
             env_ids: Tensor of environment indices to reset
         """
-       
+        # Drop IMU samples belonging to the episode that just ended -- see
+        # _consume_imu_gyro() for why they would otherwise leak into the new episode's
+        # first observation.
+        if self._imu_gyro_accum is not None:
+            self._imu_gyro_accum[env_ids] = 0.0
+            self._imu_substep_count[env_ids] = 0.0
+
+        # Fresh airframe and fresh estimator bias, so an agent cannot memorise one vehicle
+        # and the position walk restarts each flight.
+        self._randomize_domain(env_ids)
+
         # Sample new target positions on the vertical env walls
         self.target_position[env_ids], self.target_face[env_ids] = (
             self._sample_target_on_vertical_walls(env_ids)
@@ -727,8 +909,11 @@ class NavigationWithObstaclesTask(BaseTask):
 
         Total: 49D observation vector (can be reduced by removing components if needed)."""
         
-        # Vehicle-frame unit vector and distance to target (used by both obs and reward, so single source of truth)
-        direction_to_target, dist_to_tgt = self._direction_and_distance_to_target()
+        # Estimator's view of the target geometry and velocity, NOT ground truth. The
+        # reward path still calls _direction_and_distance_to_target() directly, so the
+        # policy is paid for reaching the real target while only ever seeing a drifting
+        # estimate of where it is -- which is the situation on the real vehicle.
+        direction_to_target, dist_to_tgt, est_vehicle_linvel = self._estimated_state()
 
         # [0:3] Unit vector to target in vehicle frame
         self.task_obs["observations"][:, 0:3] = direction_to_target
@@ -740,11 +925,25 @@ class NavigationWithObstaclesTask(BaseTask):
         self.task_obs["observations"][:, 3] = torch.clamp(
             dist_to_tgt.squeeze(1) / (max_dist + 1e-6), 0.0, 1.0)
         
-        # [4:7] Linear velocity in vehicle frame
-        self.task_obs["observations"][:, 4:7] = self.obs_dict["robot_vehicle_linvel"]  # TODO: NORMALIZE?
+        # [4:7] Linear velocity in vehicle frame, as estimated (see _estimated_state)
+        self.task_obs["observations"][:, 4:7] = est_vehicle_linvel  # TODO: NORMALIZE?
 
-        # [7:10] Angular velocity in body frame
-        self.task_obs["observations"][:, 7:10] = self.obs_dict["robot_body_angvel"] # TODO: NORMALIZE?
+        # [7:10] Angular velocity in body frame -- from the SIMULATED IMU GYRO, not ground
+        # truth, averaged over this env step's physics substeps (_consume_imu_gyro).
+        #
+        # This is a replacement, not an addition, and that distinction is the whole point.
+        # Appending the IMU as extra channels would achieve nothing: the policy would still
+        # have this clean ground-truth copy of the same quantity and would simply learn to
+        # read that one. The IMU's job here is to DEGRADE the observation down to what the
+        # real F450 can actually supply, so it has to replace the clean source.
+        #
+        # Scope: the gyro is the only channel the IMU honestly covers. direction_to_target,
+        # distance and linvel all come from EKF2/VIO on the real vehicle, whose error model
+        # is drift and latency rather than white noise -- integrating IMU accel for velocity
+        # drifts unboundedly. [10:13] stays on true orientation until the accelerometer's
+        # sign/offset convention is verified at hover (gravity_compensation=False and
+        # world_frame=False mean imu_meas[:, 0:3] is a specific-force reading).
+        self.task_obs["observations"][:, 7:10] = self._consume_imu_gyro() # TODO: NORMALIZE?
         
         # [10:13] Gravity vector in body frame (normalized by g)
         gravity_world = self.obs_dict["gravity"]

@@ -16,7 +16,9 @@ class task_config:
     sim_name = "base_sim"
     env_name = "forest_with_obstacles_env"
     robot_name = "f450"
-    controller_name = "lee_attitude_control"
+    # Project-local registration of the stock LeeAttitudeController, differing only in
+    # randomize_params = True (see config/controller_config/f450_lee_attitude_config.py).
+    controller_name = "f450_lee_attitude_control"
     args = {}
 
     use_warp = True
@@ -77,6 +79,29 @@ class task_config:
     # observation instead — on that path the VAE latents are one step stale, because the
     # sensors are not re-rendered until after the reward calculation.
     return_state_before_reset = False
+
+    class state_estimation_noise:
+        """Corrupts the odometry-derived observation channels to match EKF2/VIO reality.
+
+        Aerial Gym hands the task exact simulator state; the real F450 gets position and
+        velocity from EKF2 fusing IMU + navsat + mag (or VIO indoors), whose error is
+        DRIFT and BIAS, not white noise. Applied to the observation only -- rewards and
+        terminations keep using true state, otherwise the policy would be paid for
+        reaching a hallucinated target.
+
+        TODO(latency): this models estimator error but NOT transport delay. The real
+        D435 -> Orin -> PX4 path is ~50-80 ms, i.e. 1.5-3 policy steps of dead time, and
+        num_physics_steps_per_env_step only sets the loop RATE, not a delay. Needs an
+        explicit N-step obs/action FIFO. Deferred deliberately.
+        """
+        enable = True
+        # NOTE: the random-walk timestep is NOT set here. It is derived at runtime from
+        # sim dt x num_physics_steps_per_env_step_mean (see _setup_domain_randomization),
+        # so changing the sim rate or the substep count cannot silently desync the drift.
+        pos_bias_init_std = 0.05    # m, turn-on offset, resampled per episode
+        pos_random_walk_std = 0.02  # m/sqrt(s), slow drift within an episode
+        vel_noise_std = 0.05        # m/s, white
+        yaw_bias_std = 0.05         # rad (~3 deg), constant per episode
 
     class vae_config:
         """Custom 32D DepthVAE configuration.
