@@ -114,7 +114,12 @@ class F450Config:
         max_force_and_torque_disturbance = [1.5, 1.5, 1.5, 0.1, 0.1, 0.1]
 
     class domain_randomization:
-        # Per-env INERTIA spread, resampled per episode via gym.set_actor_rigid_body_properties.
+        # Per-env INERTIA spread, drawn ONCE AT BUILD via gym.set_actor_rigid_body_properties.
+        #
+        # Once, not per episode, and that is not a preference: under the GPU pipeline that
+        # call discards the root states the episode reset just staged, so resampling it from
+        # reset_idx() made every episode start at the world origin instead of the sampled
+        # spawn. See task/attitude_navigation_task.py:_randomize_mass_properties.
         #
         # Inertia is the only one of mass/CoM/inertia worth randomizing here, because it is
         # the only one the controller is not told about. robot_manager copies ONE build-time

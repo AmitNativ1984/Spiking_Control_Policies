@@ -206,13 +206,13 @@ def test_estimator_error_is_bounded(task, zero_actions):
     assert bias < 2.0, f"position bias reached {bias:.2f} m — random walk is not bounded"
 
 
-def test_inertia_is_resampled_each_episode_without_drifting(task, num_envs):
-    """Per-episode inertia DR must resample from STORED NOMINALS, not scale the live values.
+def test_inertia_draw_is_within_band_and_resamples_from_nominal(task, num_envs):
+    """The build-time inertia draw must sit in the configured band and come from NOMINALS.
 
-    Scaling the current properties each reset compounds: a run of high draws walks the
-    airframe away permanently and nothing flags it. So assert two things over many forced
-    resets -- that the inertia actually changes (resampling is live) and that it never
-    escapes the configured band (no compounding).
+    Scaling the live values instead of the stored nominals compounds: repeated draws walk
+    the airframe away permanently and nothing flags it. Calling the draw repeatedly here is
+    safe only because it stages no reset -- see the spawn test below for why
+    _randomize_mass_properties must never run mid-episode.
     """
     if task._mass_dr is None:
         import pytest
@@ -243,4 +243,53 @@ def test_inertia_is_resampled_each_episode_without_drifting(task, num_envs):
         seen.append(iyy)
 
     stacked = torch.stack(seen)
-    assert stacked.std(dim=0).min() > 0, "inertia never changed across resets — not resampling"
+    assert stacked.std(dim=0).min() > 0, "inertia never changed across draws — not resampling"
+
+
+def test_reset_idx_does_not_touch_rigid_body_properties(task, num_envs):
+    """reset_idx() must NOT resample rigid-body properties.
+
+    gym.set_actor_rigid_body_properties is a CPU actor API; under the GPU pipeline calling
+    it mid-episode discards the root states the reset just staged, so the robot silently
+    reverts to its creation pose at the world origin instead of the sampled spawn. Guards
+    the schedule rather than the symptom, so it fails fast and for the right reason.
+    """
+    if task._mass_dr is None:
+        import pytest
+        pytest.skip("randomize_mass_properties is off")
+
+    gym = task.sim_env.robot_manager.gym
+    envs = task.sim_env.IGE_env.env_handles
+    actors = task.sim_env.robot_manager.robot_handles
+
+    before = [gym.get_actor_rigid_body_properties(e, a)[0].inertia.y.y
+              for e, a in zip(envs, actors)]
+    task.reset_idx(torch.arange(num_envs, device=task.device))
+    after = [gym.get_actor_rigid_body_properties(e, a)[0].inertia.y.y
+             for e, a in zip(envs, actors)]
+
+    assert before == after, (
+        "reset_idx changed rigid-body properties — that discards the staged spawn and the "
+        "robot will start every episode at the world origin"
+    )
+
+
+def test_spawn_survives_the_step_after_reset(task, num_envs):
+    """The sampled spawn must still be there one step later.
+
+    The end-to-end regression for the bug above: the reset writes the spawn into the root
+    state tensor, but if anything invalidates the staged states before the next simulate(),
+    the robot snaps back to the origin and every episode starts from the same place.
+    """
+    task.sim_env.sim_steps[:] = task.task_config.episode_len_steps + 1  # force a reset
+    task.step(torch.zeros((num_envs, 4), device=task.device))
+    spawn = task.obs_dict["robot_position"].clone()
+
+    task.step(torch.zeros((num_envs, 4), device=task.device))
+    moved = (task.obs_dict["robot_position"] - spawn).norm(dim=1)
+
+    # One env step of near-hover flight moves centimetres, not metres.
+    assert float(moved.max()) < 0.5, (
+        f"robot moved {float(moved.max()):.2f} m in one step after reset — the spawn was "
+        "discarded and the robot reverted to its creation pose"
+    )

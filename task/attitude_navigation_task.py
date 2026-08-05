@@ -427,7 +427,10 @@ class NavigationWithObstaclesTask(BaseTask):
     # Two independent pieces, deliberately configured in different places:
     #   inertia         -> robot_config.domain_randomization  (what the vehicle IS)
     #   estimator error -> task_config.state_estimation_noise (what the agent is TOLD)
-    # Both resample per episode from reset_idx().
+    #
+    # They resample on DIFFERENT schedules, and that asymmetry is load-bearing:
+    #   inertia         -> ONCE, at build. See _randomize_mass_properties.
+    #   estimator error -> per episode, from reset_idx().
     #
     # The guiding rule for anything added here: randomize the MISMATCH, not the parameter.
     # A quantity that is randomized and then handed to the controller is invisible to the
@@ -456,15 +459,44 @@ class NavigationWithObstaclesTask(BaseTask):
         n = self.sim_env.num_envs
         self._est_pos_bias = torch.zeros((n, 3), device=self.device, requires_grad=False)
         self._est_yaw_bias = torch.zeros(n, device=self.device, requires_grad=False)
-        self._randomize_domain(torch.arange(n, device=self.device))
+
+        # Draw the airframe ONCE, here, before any stepping -- never again. See
+        # _randomize_mass_properties for why calling it later destroys the episode reset.
+        all_envs = torch.arange(n, device=self.device)
+        self._randomize_mass_properties(all_envs)
+        self._randomize_domain(all_envs)
 
     def _randomize_domain(self, env_ids):
-        """Draw a fresh airframe and a fresh estimator turn-on bias for env_ids."""
-        self._randomize_mass_properties(env_ids)
+        """Per-episode randomization, called from reset_idx().
+
+        Rigid-body properties are deliberately NOT resampled here -- see
+        _randomize_mass_properties.
+        """
         self._resample_estimator_bias(env_ids)
 
     def _randomize_mass_properties(self, env_ids):
         """Resample base_link inertia. Prop links are 13 g and left alone.
+
+        CALL THIS ONCE, AT BUILD, BEFORE ANY STEPPING. Never from reset_idx().
+
+        gym.set_actor_rigid_body_properties is a CPU-side actor API. Under the GPU pipeline,
+        calling it mid-episode DISCARDS the root states that were staged for the next
+        simulate() -- and the episode reset stages exactly those. env_manager.reset_idx()
+        writes the sampled spawn and calls IGE_env.write_to_sim(), then task.reset_idx()
+        runs; a rigid-body-properties call in there throws the spawn away and every actor
+        reverts to its creation pose at the world origin.
+
+        Measured, one env, spawn pinned to a fixed ratio:
+            randomize_mass_properties = True  -> spawn written [4.05, -0.69, 0.63],
+                                                 one step later [0.00, 0.00, 0.00]
+            randomize_mass_properties = False -> spawn holds to 0.003 m
+        The drone silently started every episode at the origin, and the viewer's green
+        start sphere -- which correctly marks the SAMPLED spawn -- never sat on it.
+        Re-pushing set_actor_root_state_tensor afterwards does NOT recover it.
+
+        Drawing once at build still gives each env its own airframe for the whole run, which
+        is the mismatch that matters (robot_manager copies ONE inertia to every env, so the
+        controller never learns the per-env draw). What is lost is per-episode resampling.
 
         INERTIA ONLY. Mass and CoM were dropped deliberately -- see
         robot_config.domain_randomization for the measurements behind that. In short: the
