@@ -1,12 +1,6 @@
 from aerial_gym.config.asset_config.env_object_config import (
-    panel_asset_params,
     thin_asset_params,
-    tree_asset_params,
     tile_asset_params,
-    left_wall,
-    right_wall,
-    back_wall,
-    front_wall,
     bottom_wall,
     top_wall,
 )
@@ -14,8 +8,20 @@ from config.asset_config.sphere_cylinder_config import (
     sphere_asset_params,
     cylinder_asset_params,
 )
-# Pool-size override (35 -> 40) so the Poisson sampler rarely hits the actor ceiling.
-from config.asset_config.enlarged_object_config import object_asset_params
+# Pool-size override (objects 35 -> 40) so the Poisson sampler rarely hits the actor
+# ceiling, plus panels/trees demoted to keep_in_env=False so they are cullable clutter
+# rather than fixtures — the ground plane is the only structural asset.
+# The four side walls come from here too: subclassed to keep_in_env=False so they are
+# drawn from the Poisson pool and seal their side of the env only some of the time.
+from config.asset_config.enlarged_object_config import (
+    object_asset_params,
+    panel_asset_params,
+    tree_asset_params,
+    left_wall,
+    right_wall,
+    front_wall,
+    back_wall,
+)
 
 import numpy as np
 
@@ -43,16 +49,26 @@ class ForestEnvCfg:
         write_to_sim_at_every_timestep = False  # write to sim at every timestep
 
         use_warp = True
-        # Bounds scaled 1.2x in x and y (about the env centre: x=4.0, y=0), z left alone.
-        # The drone now spawns at the env centre and the target lands on a vertical wall,
-        # which halves the traverse compared with the old low-x spawn / high-x goal layout.
-        # Scaling x/y restores the mean path to ~5.3 m (was ~5.2 m). z is deliberately NOT
-        # scaled: targets sit on vertical walls, so z adds volume -- and therefore obstacle
-        # count and actor cost -- without buying any path length.
-        lower_bound_min = [-3.2, -4.8, -3.0]  # lower bound for the environment space
-        lower_bound_max = [-2.0, -3.0, -2.0]  # lower bound for the environment space
-        upper_bound_min = [10.0, 3.0, 2.0]  # upper bound for the environment space
-        upper_bound_max = [11.2, 4.8, 3.0]  # upper bound for the environment space
+        # FIXED 20 x 20 m footprint, centred on x = 4.0, y = 0 -- the env centre the drone
+        # spawns at and everything else is calibrated around. The x/y area is deliberately
+        # NOT randomized any more: min == max on both axes, so every env has the same
+        # footprint. That also makes the footprint exactly match bottom_wall.urdf, which is
+        # a fixed 20 x 20 x 0.2 m slab and used to overhang the bounds by metres per side.
+        #
+        # z IS still randomized (4-6 m of headroom), so per-env volume still varies and the
+        # per-env obstacle draw still means something. Targets sit on the four VERTICAL
+        # walls, so z buys no path length -- only volume, and therefore obstacle count and
+        # actor cost.
+        #
+        # The footprint grows ~13 x 7.7 -> 20 x 20 m, so volume goes ~550 -> ~2000 m^3 and
+        # the longest centre-to-wall run goes ~6.5 -> 10 m. Episode length is unaffected:
+        # 800 steps x (dt 0.01 * 3 physics steps) = 24 s, ample for 10 m. Obstacle DENSITY
+        # is held at the calibrated 0.067 /m^3, so the actor pool had to grow with the
+        # volume -- see config/asset_config/enlarged_object_config.py.
+        lower_bound_min = [-6.0, -10.0, -3.0]  # lower bound for the environment space
+        lower_bound_max = [-6.0, -10.0, -2.0]  # lower bound for the environment space
+        upper_bound_min = [14.0, 10.0, 2.0]  # upper bound for the environment space
+        upper_bound_max = [14.0, 10.0, 3.0]  # upper bound for the environment space
 
     class env_config:
         include_asset_type = {
@@ -62,10 +78,14 @@ class ForestEnvCfg:
             "trees": True,
             "spheres": True,
             "cylinders": True,
-            "left_wall": False,
-            "right_wall": False,
-            "back_wall": False,
-            "front_wall": False,
+            # The four SIDE walls are cullable pool members (keep_in_env=False), so each
+            # is sealed on ~count/200 of resets rather than always. top_wall stays off:
+            # nothing flies out through the ceiling that the bounds check does not catch,
+            # and it would only darken every depth image.
+            "left_wall": True,
+            "right_wall": True,
+            "back_wall": True,
+            "front_wall": True,
             "top_wall": False,
             "bottom_wall": True,
             # Must be listed explicitly: asset_loader.select_and_order_assets() only skips

@@ -1,0 +1,116 @@
+params:
+  seed: 42
+  
+  algo:
+    name: a2c_teacher                 # custom PPO + annealed ANN->SNN distillation tail (agents/a2c_teacher_agent.py)
+  
+  model:
+    name: continuous_a2c_logstd
+
+  load_checkpoint: False
+
+  network:
+      name: popsan                  # Custom SNN network (registered in networks/__init__.py)
+      device: cuda
+
+      actor:
+        encoder:
+          pop_dim: 10
+          threshold: 0.95                   # Activation threshold for the population encoding layer (matches PopSAN reference vth=0.5)
+        num_steps: 5                        # Number of SNN simulation timesteps per forward pass
+        sigma_init: 0.5                     # Initial action std (log_std = log(sigma_init)); learnable thereafter
+        hidden_dims: [256, 256]         # Hidden layer dimensions (matches MLP architecture)
+        beta: 0.75                          # Voltage decay factor for LIF neurons (0 = no memory, 1 = perfect memory)
+        alpha: 0.5                          # Current decay factor (matches PopSAN reference alpha=0.5)
+        threshold: 0.5                      # LIF firing threshold for hidden/output populations (matches PopSAN reference vth=0.5)
+        spike_grad: fast_sigmoid            # Surrogate gradient function for backprop (fast_sigmoid is more stable)
+        reset_mechanism: subtract           # Reset mechanism after spike: "subtract" or "zero"
+        reset_delay: False                  # Whether to delay reset by one timestep
+
+      critic:
+        hidden_dims: [256, 256, 64]   # MUST match the teacher critic (distillation.network.critic) for the ANN->SNN critic warm-start
+
+  config:
+    # Teacher Student distillation configuration
+    distillation:
+      # TODO: this teacher was trained on the LEGACY navigation_with_obstacles task.
+      # Its obs vector is the same width (17 state + 32 VAE latent = 49), but the state
+      # semantics and reward are the old task's — retrain a teacher on f450_navigation_task
+      # before trusting distillation from it. The runner warns and falls back to the task's
+      # default encoder bounds if this path is missing.
+      checkpoint: navigation_with_obstacles/runs/nav_vae_ann_cluster_2026-06-22_11-47-23/nn/last_nav_vae_ann_cluster_ep_450_rew_15.500851.pth
+      normalize_input: True
+      normalize_value: True
+      kd_actor_coeff: 0.5           # weight on the actor distillation term (full Gaussian KL by default)
+      kd_critic_coeff: 0.0          # weight on critic-value distillation (0 = critic trains purely on PPO returns)
+      kd_actor_loss: kl             # 'kl' (full diagonal-Gaussian KL, mu+sigma) or 'mse' (means only, == warm-up)
+      # Monotonic, success-gated KD anneal: scale starts at 1.0 and only ever decreases.
+      kd_release_success: 0.50      # each curriculum check with success >= this subtracts one step
+      kd_anneal_step: 0.05          # per-check decrement of the KD scale (~20 sustained checks -> 0)
+      network:
+        name: mlp_actor_critic
+        separate: True
+        actor:
+          hidden_dims: [256, 256, 64]
+          activation: elu
+        critic: 
+          hidden_dims: [256, 256, 64]
+          activation: elu
+    
+    name: f450_navigation
+    env_name: f450_navigation_task
+    env_config:
+      headless: True
+      use_warp: True
+
+    # Reward scaling
+    reward_shaper:
+      scale_value: 1.0
+
+    # PPO settings
+    normalize_advantage: True
+    gamma: 0.99
+    tau: 0.95
+    ppo: True
+
+    # Learning rate
+    learning_rate: 3e-4
+    lr_schedule: adaptive
+    kl_threshold: 0.08
+    min_lr: 1e-6
+    max_lr: 1e-3
+
+    # Training params
+    save_best_after: 10
+    save_frequency: 50
+    score_to_win: 100000
+    grad_norm: 1.0
+    entropy_coef: 0.002
+    truncate_grads: True
+    e_clip: 0.2
+    clip_value: False
+
+    # Batch settings
+    num_actors: 1024
+    horizon_length: 64
+    minibatch_size: 8192
+    mini_epochs: 4
+
+    # Value function
+    critic_coef: 2
+    normalize_value: True
+    value_bootstrap: True
+
+    normalize_input: True   # RL-GAMES normalization of observations
+
+    # Other settings
+    bounds_loss_coef: 0.0001
+    max_epochs: 1000
+    use_diagnostics: True
+
+    # Player settings (for inference/testing)
+    player:
+      render: False
+      deterministic: True
+      games_num: 100000
+      num_actors: 1

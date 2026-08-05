@@ -80,6 +80,26 @@ class NavigationWithObstaclesTask(BaseTask):
         if use_warp is not None:
             task_config.use_warp = use_warp
 
+        # Fail before building the sim: with use_warp=False this robot's depth camera
+        # returns the same stale frame forever, silently.
+        #
+        # The Isaac-Gym-native camera path only re-renders when
+        # EnvManager.post_reward_calculation_step() calls IGE_env.step_graphics(), which
+        # it gates on robot_manager.has_IGE_sensors. That flag is set in exactly one
+        # place (robots/robot_manager.py:270), an `elif use_warp == False and
+        # camera_sensor is not None` chained off `if sensor_config.enable_imu:`. The F450
+        # config sets enable_imu = True, so the `if` always wins and the `elif` is
+        # unreachable -- the flag stays False and no render ever happens. Upstream bug;
+        # the warp path is effectively the only working camera path for this robot.
+        if not task_config.use_warp and task_config.vae_config.use_vae:
+            raise ValueError(
+                "use_warp=False is not supported for this task while vae_config.use_vae "
+                "is True: the Isaac Gym camera would never re-render and the VAE would "
+                "encode one frozen depth frame for the whole run (see the comment above "
+                "this check). Run with use_warp=True, or set use_vae=False to train a "
+                "state-only policy that needs no camera."
+            )
+
         super().__init__(task_config)
         self.device = self.task_config.device
 
@@ -99,8 +119,10 @@ class NavigationWithObstaclesTask(BaseTask):
         logger.info(f"Warp: {self.task_config.use_warp}")
         logger.info(f"Num Envs: {self.task_config.num_envs}")
 
-        # Build simulation environment
-        self.sim_env = SimBuilder().build_env(
+        # Build simulation environment. Keep the SimBuilder: build_env() returns an
+        # EnvManager, but delete_env() lives on the builder, so close() needs this handle.
+        self.sim_builder = SimBuilder()
+        self.sim_env = self.sim_builder.build_env(
             sim_name=self.task_config.sim_name,
             env_name=self.task_config.env_name,
             robot_name=self.task_config.robot_name,
@@ -138,9 +160,26 @@ class NavigationWithObstaclesTask(BaseTask):
         # Previous distance to target (for progress tracking)
         self.prev_dist = torch.zeros(self.sim_env.num_envs, device=self.device)
 
-        # Previous transformed action for jerk penalty
+        # Previous transformed action, for the jerk penalty and observation dims [13:17].
         self.prev_action = torch.zeros(
             (self.sim_env.num_envs, 4), device=self.device, requires_grad=False
+        )
+
+        # Per-channel command range of the TRANSFORMED action, used to make the jerk
+        # penalty dimensionless. Without it, ||a_curr - a_prev|| sums a dimensionless
+        # thrust in [-1, 1] with radians and rad/s, so the channel with the widest
+        # numeric range (yaw_rate, +/-pi/3) dominates the norm and lambda_jerk means
+        # something different for each channel. Dividing by these makes every channel
+        # contribute its change as a fraction of its own range.
+        # Mirrors action_transformation_function -- keep the two in step.
+        self._action_scale = torch.tensor(
+            [
+                1.0,  # thrust: passed through untransformed, already in [-1, 1]
+                self.task_config.max_inclination_angle_rad,  # roll
+                self.task_config.max_inclination_angle_rad,  # pitch
+                self.task_config.max_yaw_rate,               # yaw_rate
+            ],
+            device=self.device,
         )
 
         # VAE encoder for depth images (custom DepthVAE). Encodes all envs in one batch.
@@ -168,13 +207,6 @@ class NavigationWithObstaclesTask(BaseTask):
             self.curriculum_level = self.obs_dict["curriculum_level"]
 
         self.obs_dict["num_obstacles_in_env"] = self.curriculum_level
-        self.curriculum_progress_fraction = (
-            self.curriculum_level - self.task_config.curriculum.min_level
-        ) / max(
-            self.task_config.curriculum.max_level
-            - self.task_config.curriculum.min_level,
-            1,
-        )
         self._publish_obstacle_intensity()
 
         # Swap in the Poisson obstacle sampler. SimBuilder.build_env returns the
@@ -296,11 +328,18 @@ class NavigationWithObstaclesTask(BaseTask):
         )
 
     def close(self):
-        """Clean up simulation resources."""
+        """Clean up simulation resources.
+
+        Upstream's task template calls self.sim_env.delete_env(), which raises
+        AttributeError: build_env() returns an EnvManager and delete_env() is a
+        SimBuilder method. Every shipped aerial_gym task has this bug, so cleanup never
+        runs and VRAM is not reclaimed between task constructions — invisible in a single
+        training run, but it bites in sweeps and test suites.
+        """
         if not self._headless:
             cv2.destroyAllWindows()
 
-        self.sim_env.delete_env()
+        self.sim_builder.delete_env()
 
     def reset(self):
         """Reset all environments."""
@@ -308,12 +347,22 @@ class NavigationWithObstaclesTask(BaseTask):
         return self.get_return_tuple()
 
     def _publish_obstacle_intensity(self):
-        """Write the Poisson intensity (obstacles/m^3) that PoissonAssetManager reads.
+        """Recompute the curriculum progress fraction and write the Poisson intensity
+        (obstacles/m^3) that PoissonAssetManager reads.
 
-        Density ramps linearly with the curriculum: 0 at min_level, obstacle_density_max
-        at max_level. Density -- not count -- is the invariant, so clutter stays constant
-        as the randomized env bounds vary in size.
+        Density ramps linearly with the ABSOLUTE curriculum level: 0 at level 0, and
+        obstacle_density_max at curriculum.density_at_level. It deliberately does not
+        normalize by (max_level - min_level) -- pinning the curriculum sets min == max,
+        which would make every pinned level produce an empty world. See the comment on
+        density_at_level in the task config.
+
+        Density -- not count -- is the invariant, so clutter stays constant as the
+        randomized env bounds vary in size.
         """
+        self.curriculum_progress_fraction = min(
+            self.curriculum_level / max(self.task_config.curriculum.density_at_level, 1),
+            1.0,
+        )
         self.obs_dict["obstacle_intensity"] = (
             self.task_config.obstacle_density_max * self.curriculum_progress_fraction
         )
@@ -501,6 +550,19 @@ class NavigationWithObstaclesTask(BaseTask):
             successes, crashes, timeouts, exceeds
         )
 
+        # Capture the TERMINAL observation, before the reset below overwrites the state.
+        # Off by default: the agent should receive the first observation of the NEW
+        # episode, so returning it after the reset is the correct PPO bootstrapping order.
+        #
+        # Placed here rather than at upstream's line (right after compute_rewards), because
+        # get_return_tuple() reads self.truncations and self.infos -- upstream's earlier
+        # placement captures the PREVIOUS step's values for both. The image half of the
+        # observation is one step stale on this path either way, since the sensors are not
+        # re-rendered until post_reward_calculation_step().
+        return_tuple = None
+        if self.task_config.return_state_before_reset:
+            return_tuple = self.get_return_tuple()
+
         # Handle resets for terminated/truncated environments
         reset_envs = self.sim_env.post_reward_calculation_step()
         if len(reset_envs) > 0:
@@ -519,7 +581,9 @@ class NavigationWithObstaclesTask(BaseTask):
             self._draw_debug_visuals()
             self._show_depth_camera()
 
-        return self.get_return_tuple()
+        if return_tuple is None:
+            return_tuple = self.get_return_tuple()
+        return return_tuple
 
     def _update_infos(self, successes, timeout_mask, ended):
         """Write the per-step entries of self.infos, returned to the RL algorithm.
@@ -755,13 +819,6 @@ class NavigationWithObstaclesTask(BaseTask):
                 self.task_config.curriculum.max_level,
             )
             self.obs_dict["num_obstacles_in_env"] = self.curriculum_level
-            self.curriculum_progress_fraction = (
-                self.curriculum_level - self.task_config.curriculum.min_level
-            ) / max(
-                self.task_config.curriculum.max_level
-                - self.task_config.curriculum.min_level,
-                1,
-            )
             self._publish_obstacle_intensity()
 
             logger.warning(
@@ -850,11 +907,19 @@ class NavigationWithObstaclesTask(BaseTask):
 
     def _reward_arrive(self):
         """Bonus for reaching the target, scaled by curriculum level (MAVRL-style).
-        Higher curriculum (more obstacles) = bigger reward."""
+        Higher curriculum (more obstacles) = bigger reward.
+
+        Scales on curriculum_progress_fraction, not level / curriculum.max_level: pinning
+        the curriculum (--curriculum_level N) sets min_level == max_level == N, so the
+        latter is 0/0 -> ZeroDivisionError at level 0 and a constant 1.0 at every other
+        pinned level. The progress fraction is the same ramp for an un-pinned run, is
+        already clamped and guarded against a zero denominator, and keys off the same
+        reference level as the obstacle density -- so the bonus tracks the clutter the
+        drone actually flew through, which is what this reward is for."""
         params = self.task_config.reward_parameters
         bonus_min = params["arrive_bonus_min"]
         bonus_max = params["arrive_bonus_max"]
-        t = self.curriculum_level / self.task_config.curriculum.max_level
+        t = self.curriculum_progress_fraction
         return bonus_min + t * (bonus_max - bonus_min)
 
     def _reward_collision(self):
@@ -878,8 +943,10 @@ class NavigationWithObstaclesTask(BaseTask):
                          (vx, vy, vz) vehicle-frame velocity, so climbs and dives
                          count the same as forward flight. Yaw rate is NOT
                          penalized here -- only linear velocity.
-        4. p_jerk:     lambda_jerk * ||a_curr - a_prev||
-                       - PENALIZE large changes in the (transformed) action
+        4. p_jerk:     lambda_jerk * ||(a_curr - a_prev) / action_scale||
+                       - PENALIZE large changes in the (transformed) action, with each
+                         channel normalized by its own command range so thrust, roll,
+                         pitch and yaw_rate all weigh equally
 
         Args:
             mask: Boolean tensor indicating which envs get this reward
@@ -912,10 +979,14 @@ class NavigationWithObstaclesTask(BaseTask):
             speed - self.task_config.v_max, min=0.0
         )
 
-        # 4. Penalize jerk (difference between current and previous transformed actions)
+        # 4. Penalize jerk (change in the transformed action), per-channel normalized by
+        # each channel's own command range so the norm is dimensionless -- see
+        # self._action_scale in __init__ for why the raw difference would not be.
         a_curr = current_action
         a_prev = self.prev_action
-        p_jerk = params["lambda_jerk"] * torch.linalg.norm(a_curr - a_prev, dim=1)
+        p_jerk = params["lambda_jerk"] * torch.linalg.norm(
+            (a_curr - a_prev) / self._action_scale, dim=1
+        )
 
         # Apply mask to zero out rewards for envs that had terminal events
         r_bearing = r_bearing[mask]

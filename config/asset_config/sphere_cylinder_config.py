@@ -17,7 +17,7 @@ class sphere_asset_params(asset_state_params):
     entries [3:6] are still read.
     """
 
-    num_assets = 18
+    num_assets = 44
 
     asset_folder = str(_ENVIRONMENT_ASSETS_DIR / "spheres")
 
@@ -65,7 +65,7 @@ class cylinder_asset_params(asset_state_params):
     sphere_asset_params).
     """
 
-    num_assets = 18
+    num_assets = 44
 
     asset_folder = str(_ENVIRONMENT_ASSETS_DIR / "cylinders")
 

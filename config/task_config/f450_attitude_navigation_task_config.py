@@ -72,6 +72,10 @@ class task_config:
     # --- OBSERVATIONS ---
     state_dim = 17
     privileged_observation_space_dim = 0
+    # False (default, and what PPO wants): step() returns the first observation of the
+    # NEW episode for envs that terminated this step. True returns the terminal
+    # observation instead — on that path the VAE latents are one step stale, because the
+    # sensors are not re-rendered until after the reward calculation.
     return_state_before_reset = False
 
     class vae_config:
@@ -103,18 +107,17 @@ class task_config:
     # Observation space: state_dim [+ vae_config.latent_dims when use_vae].
     observation_space_dim = state_dim + (vae_config.latent_dims if vae_config.use_vae else 0)
 
-    # --- POPSAN OBSERVATION BOUNDS ---
+    # --- OBSERVATION LAYOUT ---
     #
-    # Per-dimension observation bounds for the PopSAN population encoder.
+    # The single source of truth for what each dimension of the observation vector MEANS.
+    # MUST match process_obs_for_task() below.
     #
-    # Bounds are in the rl_games-normalized space (z-scores, hard-clamped to
-    # [-5, 5] by RunningMeanStd when normalize_input=True), NOT raw units.
-    # Tune from tools/collect_obs_stats.py if empirically tighter values help.
+    # This says nothing about how any consumer scales or clamps those dimensions — the
+    # PopSAN encoder's per-type clamp windows live with the encoder
+    # (rl_training/rl_games/networks/snn/encoder.py: DEFAULT_TYPE_BOUNDS), since the task
+    # runs perfectly well under an MLP or GRU policy that has no encoder at all.
     #
-    # observation_layout is the single source of truth for the observation
-    # vector and MUST match process_obs_for_task() in navigation_task.py;
-    # observation_bounds is derived from it below. Editing the layout or the
-    # per-type bounds is enough — no per-index numbers to maintain.
+    # Other consumers: the obs-stats collector's column names, and the encoder trace plots.
     observation_layout = [
             (slice(0, 3),   "direction_to_target"), # unit vector to target — vehicle frame
             (slice(3, 4),   "distance"),            # normalized distance to target, clamped [0,1]
@@ -129,27 +132,11 @@ class task_config:
             (slice(17, 17 + vae_config.latent_dims), "vae_latent")  # DepthVAE latents
         )
 
-    # TODO: This should be removed specifically to where popsan is defined!!!
-    observation_type_bounds = {
-            "direction_to_target": (-3.0, 3.0),
-            "distance":            (-3.0, 3.0),
-            "linvel":              (-3.0, 3.0),
-            "angvel":              (-3.0, 3.0),
-            "gravity":             (-3.0, 3.0),
-            "prev_action":         (-3.0, 3.0),
-            "vae_latent":          (-3.0, 3.0),
-    }
-
-    # Expand layout + per-type bounds into a flat per-index list of (min, max).
-    # Runs once at class-definition time; consumed by popsan.py via
-    # task_config.observation_bounds.
-    observation_bounds = [None] * observation_space_dim
-    for obj_slice, obj_type in observation_layout:
-        lo, hi = observation_type_bounds[obj_type]
-        for idx in range(obj_slice.start, obj_slice.stop):
-            observation_bounds[idx] = (lo, hi)
-    assert all(b is not None for b in observation_bounds), \
-        "observation_layout has gaps — every index in [0, observation_space_dim) must be covered"
+    # The layout must tile [0, observation_space_dim) exactly. Checked here rather than at
+    # a consumer, so an edit to the layout fails at import, not mid-rollout.
+    assert sorted(i for sl, _ in observation_layout for i in range(sl.start, sl.stop)) \
+        == list(range(observation_space_dim)), \
+        "observation_layout must cover every index in [0, observation_space_dim) exactly once"
 
 
     # --- REWARD PARAMETERS ---
@@ -179,6 +166,14 @@ class task_config:
         """
         min_level = 0
         max_level = 25
+
+        # The level at which obstacle density reaches obstacle_density_max. Deliberately
+        # NOT derived from min_level/max_level: pinning the curriculum (--curriculum_level
+        # N, or the obs-stats collector) sets min == max == N, which would collapse a
+        # (level - min) / (max - min) ramp to 0/1 and silently empty the world at EVERY
+        # pinned level. Density is a function of the absolute level, so it keys off this
+        # fixed reference instead. Equals max_level, so the un-pinned ramp is unchanged.
+        density_at_level = 25
         check_after_num_rollouts = 16  # curriculum check every N rollouts (instances = num_rollouts * num_envs)
         increase_step = 1                  # slower progression, no double-jumps (was 2)
         decrease_step = 1
