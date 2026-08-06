@@ -6,6 +6,8 @@ its config advertises, that nothing goes non-finite, and that the aliasing rule 
 """
 import torch
 
+from aerial_gym.registry.robot_registry import robot_registry
+
 
 def test_observation_matches_configured_dim(task, task_config, zero_actions, num_envs):
     obs, *_ = task.step(zero_actions)
@@ -292,4 +294,38 @@ def test_spawn_survives_the_step_after_reset(task, num_envs):
     assert float(moved.max()) < 0.5, (
         f"robot moved {float(moved.max()):.2f} m in one step after reset — the spawn was "
         "discarded and the robot reverted to its creation pose"
+    )
+
+
+def test_first_episode_spawns_inside_the_spawn_box(task):
+    """Episode 1 must spawn like every other episode.
+
+    The task's own _setup_domain_randomization() writes rigid-body properties during
+    __init__, which discards the root states staged for the next simulate(). Without the
+    warm-up step that follows it, the first episode starts at the world origin in EVERY env
+    while every later episode is fine. That asymmetry is what made it survive the earlier
+    spawn fix. Not an upstream issue: with randomize_mass_properties off, the pre-fix code
+    spawned correctly with no warm-up at all.
+
+    Measured on the fixture's own first episode (recorded in conftest, because only one sim
+    may exist per process and the fixture has stepped on by the time tests run).
+    """
+    spawn = task.first_episode_spawn
+    after = task.first_episode_after_one_step
+
+    moved = (after - spawn).norm(dim=1)
+    assert float(moved.max()) < 0.5, (
+        f"robot moved {float(moved.max()):.2f} m on the first step of the run — the first "
+        "episode's spawn was discarded (missing warm-up simulate before the initial reset)"
+    )
+
+    # And the spawn must actually be in the configured box, not at the origin by luck.
+    lo, hi = task.first_episode_bounds
+    ratio = (spawn - lo) / (hi - lo)
+    cfg = robot_registry.get_robot_config(task.task_config.robot_name).init_config
+    lo_r = torch.tensor(cfg.min_init_state[0:3], device=task.device) - 1e-3
+    hi_r = torch.tensor(cfg.max_init_state[0:3], device=task.device) + 1e-3
+    assert bool(((ratio >= lo_r) & (ratio <= hi_r)).all()), (
+        f"first-episode spawn ratios {ratio.tolist()} fall outside init_config's box "
+        f"{lo_r.tolist()}..{hi_r.tolist()}"
     )

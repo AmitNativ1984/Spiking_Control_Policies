@@ -46,7 +46,24 @@ def task():
 
     t = task_registry.make_task(TASK_NAME, num_envs=NUM_ENVS, headless=True, use_warp=True)
     t.reset()
-    for _ in range(5):  # a few steps so the state isn't the trivial post-reset one
-        t.step(torch.zeros((NUM_ENVS, F450NavTaskConfig.action_space_dim), device=t.device))
+
+    # Evidence for the FIRST episode, recorded here because it cannot be recovered later:
+    # the fixture steps below, and only one sim may exist per process so a test cannot build
+    # a second task to look at episode 1. Isaac Gym drops root states staged before the
+    # first simulate(), which used to silently dump every env at the world origin for
+    # episode 1 only. See test_first_episode_spawns_inside_the_spawn_box.
+    zero = torch.zeros((NUM_ENVS, F450NavTaskConfig.action_space_dim), device=t.device)
+    # Bounds are cloned at the same instant: they are re-randomized on every reset, so the
+    # spawn ratio is only meaningful against the bounds that were live when it was drawn.
+    t.first_episode_spawn = t.obs_dict["robot_position"].clone()
+    t.first_episode_bounds = (
+        t.obs_dict["env_bounds_min"].clone(),
+        t.obs_dict["env_bounds_max"].clone(),
+    )
+    t.step(zero)
+    t.first_episode_after_one_step = t.obs_dict["robot_position"].clone()
+
+    for _ in range(4):  # a few more steps so the state isn't the trivial post-reset one
+        t.step(zero)
     yield t
     t.close()

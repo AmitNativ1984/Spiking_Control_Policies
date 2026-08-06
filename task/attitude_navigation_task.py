@@ -230,6 +230,35 @@ class NavigationWithObstaclesTask(BaseTask):
         )
         asset_manager.clearance = self.task_config.obstacle_spawn_clearance
         self.sim_env.asset_manager = asset_manager
+
+        # One throwaway physics step BEFORE the reset below, and it is load-bearing.
+        #
+        # This exists to absorb OUR OWN _setup_domain_randomization() call above, not to work
+        # around anything in Isaac Gym or aerial_gym. That call writes rigid-body properties
+        # via gym.set_actor_rigid_body_properties, which under the GPU pipeline discards the
+        # root states staged for the next simulate() -- the same mechanism documented on
+        # _randomize_mass_properties. At build time it lands between build_env()'s initial
+        # placement and the reset below, and restaging does NOT recover it: a set_actor_root_
+        # _state_tensor call after the property write is dropped too, until a simulate() has
+        # run. So the FIRST episode's spawn was lost and every env started at the world
+        # origin. Later episodes were unaffected, which is what made it so easy to miss.
+        #
+        # Measured on the pre-fix code, one env, spawn box centred at ~[4.8, 0.3, 0.8]:
+        #   randomize_mass_properties=True,  no warm-up  -> [0.00, 0.00, 0.00]  (4.90 m off)
+        #   randomize_mass_properties=True,  restage only-> [0.00, 0.00, 0.00]  (no help)
+        #   randomize_mass_properties=False, no warm-up  -> at the spawn, 0.005 m
+        #   randomize_mass_properties=True,  warm-up     -> at the spawn, 0.001 m
+        #
+        # So this step becomes unnecessary the moment the rigid-body randomization is
+        # dropped; keep the two together.
+        # Zero is the neutral attitude command for lee_attitude_control, so the step is inert.
+        self.sim_env.step(
+            actions=torch.zeros(
+                (self.sim_env.num_envs, self.task_config.action_space_dim),
+                device=self.device,
+            )
+        )
+
         # build_env already placed obstacles with the upstream manager; re-reset so the
         # very first episode sees a Poisson layout rather than the old ratio-box one.
         self.sim_env.reset()
