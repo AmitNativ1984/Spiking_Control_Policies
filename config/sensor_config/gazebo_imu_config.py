@@ -42,23 +42,27 @@ class GazeboImuConfig(BaseSensorConfig):
     #   Aerial Gym noise density = Gazebo per-sample std / sqrt(Gazebo update rate)
     # -> accel 1.3729e-03, gyro 6.1087e-05. See the docstring on the divide vs multiply.
     #
-    # TODO(bias): bias_std below is still the verbatim VN100 default from
-    # base_imu_config.py -- it was never ported. The SDF's own bias_stddev is
-    # 1.5466700035883543e-05 (accel) and 4.196600114477603e-04 (gyro). Porting is not a
-    # straight value swap: gz-sensors samples bias ONCE at load and holds it constant (a
-    # fixed turn-on bias; the SDF sets no dynamic_bias_stddev, so no drift), whereas
-    # Aerial Gym random-walks it via `bias += randn * bias_std * sqrt_dt`. For parity,
-    # set max_bias_init_value to the SDF sigmas and bias_std to 0. As shipped,
-    # max_bias_init_value = 1.0e-03 is 65x the SDF's accel bias sigma and 2.4x the
-    # gyro's, with an unmodelled random walk on top.
-    bias_std = [
-        9.782812831313576e-07,
-        9.782812831313576e-07,
-        9.782812831313576e-07,
-        2.6541629581345176e-05,
-        2.6541629581345176e-05,
-        2.6541629581345176e-05,
-    ]  # first 3 values for acc bias std, next 3 for gyro bias std
+    # BIAS: ported from the SDF (was the verbatim VN100 default from base_imu_config.py).
+    #
+    # The two simulators model bias differently, so this is not a value swap:
+    #   gz-sensors   draws bias ONCE at load and holds it -- a fixed turn-on offset. The
+    #                SDF sets no dynamic_bias_stddev, so there is no drift.
+    #   Aerial Gym   random-walks it every substep, `bias += randn * bias_std * sqrt_dt`
+    #                (imu_sensor.update_bias), seeded by a uniform draw in
+    #                +/- max_bias_init_value (imu_sensor.reset_idx).
+    #
+    # Parity therefore means: kill the walk (bias_std = 0) and put the SDF's bias_stddev
+    # into max_bias_init_value, so each episode gets a fixed turn-on bias of the right
+    # magnitude and holds it -- which is what the real gyro does within a flight.
+    #
+    # Distribution: Gazebo draws bias ~ N(0, sigma), Aerial Gym draws uniform on
+    # +/- max_bias_init_value. A Gaussian is unbounded, so matching the BOUND is
+    # meaningless -- match the variance instead. Uniform on +/- a has std a/sqrt(3), so
+    # a = sigma * sqrt(3). That factor is folded into the values below.
+    #
+    # Previously max_bias_init_value was 1.0e-03 on every axis: 65x the SDF's accel bias
+    # sigma and 2.4x the gyro's, with an unmodelled random walk on top.
+    bias_std = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # no dynamic bias in the SDF -> no drift
     imu_noise_std = (np.array([
         0.021707945151263165,
         0.021707945151263165,
@@ -78,13 +82,18 @@ class GazeboImuConfig(BaseSensorConfig):
         10.0,
     ]  # max measurement value for acc and gyro outputs will be clamped by + & - of these
 
+    # Turn-on bias, drawn uniformly in +/- these values once per episode and then held
+    # (bias_std = 0 above). Values are the SDF's <bias_stddev> * sqrt(3), so the uniform
+    # draw has the same VARIANCE as Gazebo's Gaussian:
+    #   accel 1.5466700035883543e-05 * sqrt(3) = 2.678911e-05
+    #   gyro  4.196600114477603e-04  * sqrt(3) = 7.268725e-04
     max_bias_init_value = [
-        1.0e-03,
-        1.0e-03,
-        1.0e-03,
-        1.0e-03,
-        1.0e-03,
-        1.0e-03,
+        2.678911e-05,
+        2.678911e-05,
+        2.678911e-05,
+        7.268725e-04,
+        7.268725e-04,
+        7.268725e-04,
     ]  # max bias init value for acc and gyro biases will be sampled within +/- of this range
 
     # Setting this to true will provide acceelration of the object in a static frame w.r.t ground.

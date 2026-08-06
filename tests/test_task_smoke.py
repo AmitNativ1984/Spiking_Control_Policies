@@ -87,6 +87,37 @@ def test_gyro_channel_comes_from_the_imu_not_ground_truth(task, zero_actions):
         "obs[7:10] is bit-identical to ground truth — the IMU swap is not active"
 
 
+def test_imu_bias_is_a_held_turn_on_offset_matching_the_sdf(task, zero_actions):
+    """The IMU bias must be a FIXED turn-on offset of the SDF's magnitude, not a drift.
+
+    gz-sensors draws the bias once at load and holds it (the F450 SDF sets no
+    dynamic_bias_stddev), so Aerial Gym's random walk is switched off via bias_std = 0 and
+    the magnitude lives in max_bias_init_value. Both halves are easy to undo by accident --
+    restoring base_imu_config's VN100 defaults would reintroduce a 65x-too-large accel bias
+    plus an unmodelled walk, and nothing else would notice.
+    """
+    imu = getattr(task.sim_env.robot_manager, "imu_sensor", None)
+    if imu is None:
+        import pytest
+        pytest.skip("enable_imu is False in the robot config")
+
+    cfg = task.sim_env.robot_manager.cfg.sensor_config.imu_config
+    bound = torch.tensor(cfg.max_bias_init_value, device=task.device)
+
+    assert not any(cfg.bias_std), \
+        "bias_std is non-zero — the bias now drifts, which the F450 SDF does not model"
+
+    start = imu.bias.clone()
+    assert bool((start.abs() <= bound + 1e-12).all()), \
+        f"initial bias exceeds max_bias_init_value: {start.abs().max(dim=0).values.tolist()}"
+
+    for _ in range(5):
+        task.step(zero_actions)
+
+    assert torch.equal(imu.bias, start), \
+        "IMU bias changed during an episode — it should be a held turn-on offset"
+
+
 def test_gyro_channel_is_the_gyro_and_not_the_accelerometer(task, zero_actions):
     """imu_meas is (num_envs, 6) = [0:3] accel, [3:6] gyro. Slicing [0:3] by mistake is a
     plausible edit, and it would not crash: the shapes match. It would however feed the
