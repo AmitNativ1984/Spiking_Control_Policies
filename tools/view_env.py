@@ -64,8 +64,16 @@ def main():
           f"(min {int(live.min())}, max {int(live.max())})")
     print("\n  Ctrl-C to quit.\n")
 
-    # Zero is the neutral attitude command: LeeAttitudeController maps thrust via
-    # (cmd + 1) * m * g, so 0 == hover, level, no yaw rate.
+    # Zero is the neutral ATTITUDE command: LeeAttitudeController maps thrust via
+    # (cmd + 1) * m * g, so 0 == level, no yaw rate, and exactly enough thrust to cancel
+    # gravity while level.
+    #
+    # That is zero ACCELERATION, not zero velocity -- attitude control has no position or
+    # velocity loop, so nothing here holds station. The drone still drifts slowly from its
+    # randomized spawn tilt and velocity, from the random disturbances in the robot config,
+    # and (vertically) from the motor spin-up dip at t=0, which the zero z-axis linear
+    # damping never removes. Expect slow wandering; a steady one-directional run means
+    # something is biased, which is how the CoM/allocation-matrix bug was found.
     hover = torch.zeros((args.num_envs, task_config.action_space_dim), device=task.device)
 
     task.reset()
