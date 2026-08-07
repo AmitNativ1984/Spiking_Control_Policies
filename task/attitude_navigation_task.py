@@ -12,8 +12,9 @@ Features:
   task_config.obstacle_density_max at level 25. Density -- not count -- is the
   invariant, so clutter stays constant as the randomized env bounds vary in size.
 - Custom 32D DepthVAE encoding (matching VAE training distribution)
-- Randomized environment bounds: L×W×H in [12.0,14.4]×[6.0,9.6]×[4.0,6.0]
-  (derived from config/env_config/env_forest_with_obstacles.py)
+- Environment bounds: 20 x 20 m in x/y (fixed), height randomized in [4.0, 6.0] m
+  -> 1600-2400 m^3. Only the z bounds are randomized; x/y are pinned at
+  [-6, 14] and [-10, 10] (config/env_config/env_forest_with_obstacles.py).
 - Observation (49D): state(17) + VAE latent(32). See process_obs_for_task() for layout.
 """
 from aerial_gym.task.base_task import BaseTask

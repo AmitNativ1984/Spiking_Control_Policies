@@ -49,10 +49,15 @@ class task_config:
     # Obstacles are placed by a homogeneous Poisson point process over the env volume,
     # thinned by a keep-out ellipsoid around the spawn box. See task/poisson_asset_manager.py.
     #
-    # density_max reproduces today's level-25 clutter (24 obstacles in the old 357 m^3
-    # env). Path length is restored by enlarging the env in x/y (see the env config)
-    # rather than by raising density, so both local clutter and route length match the
-    # old distribution.
+    # density_max was calibrated to reproduce the level-25 clutter of the ORIGINAL 357 m^3
+    # env (24 obstacles). The env was then enlarged in x/y to restore path length (see the
+    # env config) WITHOUT lowering the density, so the count scaled with the volume: the
+    # box is now 20 x 20 x [4, 6] m = 1600-2400 m^3, and level 25 draws ~110-160 obstacles
+    # per env, not 24. Local clutter matches the old distribution; total count does not.
+    #
+    # The count is a Poisson draw per env, mean = density * free_volume (free_volume is the
+    # box minus the spawn keep-out ellipsoid), so it varies env to env by ~sqrt(mean).
+    # To target a count N at level 25: density = N / ~1900 (e.g. 24 obstacles -> 0.0126).
     obstacle_density_max = 0.067  # obstacles / m^3 at curriculum max_level
     obstacle_spawn_clearance = 0.95  # m added to the spawn-box half-extents to form the
                                      # keep-out ellipsoid: max sphere radius 0.6 + F450 ~0.35
