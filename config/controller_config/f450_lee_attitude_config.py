@@ -5,7 +5,7 @@ upstream class is shared by every lee_* controller in the registry, so flipping
 randomize_params there would silently change every other task in the tree.
 
 Why randomize the gains at all: this is the cheapest sim-to-real hedge available here.
-The real F450 flies a PX4 cascade whose effective attitude stiffness is not the Lee
+The real F450 flies a controller_configPX4 cascade whose effective attitude stiffness is not the Lee
 controller's, and unlike mass, the gains are NOT communicated to the policy in any
 form -- the policy only ever sees the resulting motion. That makes gain spread a genuine
 plant/model mismatch, and it costs nothing to apply: randomize_params is pure tensor

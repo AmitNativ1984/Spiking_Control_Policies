@@ -20,12 +20,13 @@ import torch
 import numpy as np
 from gym.spaces import Dict, Box
 from typing import Tuple, Dict as DictType
-logger = CustomLogger("simple_hover_snn_task")
+from isaacgym import gymapi, gymutil
+logger = CustomLogger("hover_task")
+logger.setLevel("INFO")
 
-
-class HoverSNNTask(BaseTask):
+class HoverTask(BaseTask):
     """
-    Simple hover SNN task for quadrotor.
+    Simple hover task for quadrotor.
     - Observation space: IMU readings (linear acceleration, angular velocity)
     - Action space: Attitude commands (roll, pitch, yaw_rate, thrust)
 
@@ -41,7 +42,7 @@ class HoverSNNTask(BaseTask):
                  use_warp=None
     ):
         """
-        Initialize the Simple Hover SNN Task.
+        Initialize the Simple Hover Task.
 
         Args:
             task_config: Task configuration class
@@ -72,7 +73,7 @@ class HoverSNNTask(BaseTask):
                 device=self.device
             )
 
-        logger.info("Building environment for Simple Hover SNN Task...")
+        logger.info("Building environment for Hover Task...")
         logger.info(
             "\nSim Name: {}\nEnv Name: {}\nRobot Name: {}\nController Name: {}".format(
                 self.task_config.sim_name,
@@ -91,8 +92,10 @@ class HoverSNNTask(BaseTask):
             )
         )
 
-        # Build the simulation with SimBuilder
-        self.sim_env = SimBuilder().build_env(
+        # Build the simulation with SimBuilder. Keep the builder: build_env() returns an
+        # EnvManager, but delete_env() lives on the builder, so close() needs this handle.
+        self.sim_builder = SimBuilder()
+        self.sim_env = self.sim_builder.build_env(
             sim_name=self.task_config.sim_name,
             env_name=self.task_config.env_name,
             robot_name=self.task_config.robot_name,
@@ -102,6 +105,11 @@ class HoverSNNTask(BaseTask):
             num_envs=self.task_config.num_envs,
             use_warp=self.task_config.use_warp,
             headless=self.task_config.headless
+        )
+
+        # Action transformation function
+        self.action_transformation_function = (
+            self.task_config.action_transformation_function
         )
 
         # Initialize action tensors
@@ -172,6 +180,8 @@ class HoverSNNTask(BaseTask):
             device=self.device
         )
 
+        self.target_inset = 5.0 * torch.tensor(self.task_config.success_threshold, device=self.device)
+
         # Success tracking: count consecutive steps within threshold
         self.success_counter = torch.zeros(
             self.num_envs,
@@ -218,8 +228,30 @@ class HoverSNNTask(BaseTask):
             dtype=torch.float32
         ) * 5.0  # Start with reasonable initial distance
 
+        # Debug visualization: goal (red) and spawn (green) wireframe spheres.
+        #
+        # Not cosmetic for this task. The target is sampled anywhere in the env box and is
+        # otherwise INVISIBLE, so watching a playback shows a drone flying towards a point
+        # the viewer cannot see -- "is it hovering on target?" is unanswerable by eye.
+        #
+        # The goal sphere is drawn at success_threshold so what you see IS the capture
+        # region, not an arbitrary marker: the episode succeeds when the drone stays inside
+        # that sphere for success_hold_steps.
+        self._headless = self.task_config.headless
+        if not self._headless:
+            self._gym = self.sim_env.IGE_env.gym
+            self._viewer = self.sim_env.IGE_env.viewer.viewer
+            self._env_handles = self.sim_env.IGE_env.env_handles
+            self._goal_sphere = gymutil.WireframeSphereGeometry(
+                float(self.task_config.success_threshold), 16, 16, None, color=(1, 0, 0)
+            )
+            self._start_sphere = gymutil.WireframeSphereGeometry(
+                0.15, 12, 12, None, color=(0, 1, 0)
+            )
+            self._start_positions = self.obs_dict["robot_position"].clone()
+
         logger.info(
-            f"Simple Hover SNN Task initialized with {self.num_envs} environments."
+            f"Hover Task initialized with {self.num_envs} environments."
             f" Observation space dim: {self.task_config.observation_space_dim},"
             f" Action space dim: {self.task_config.action_space_dim}"
         )
@@ -228,10 +260,22 @@ class HoverSNNTask(BaseTask):
     def close(self):
         """
         Clean up the environment and free resources.
+
+        delete_env() is a SimBuilder method, not an EnvManager one — calling it on
+        self.sim_env (as every shipped aerial_gym task does) raises AttributeError, so
+        cleanup never runs and VRAM is not reclaimed between task constructions.
         """
-        self.sim_env.delete_env()
+        self.sim_builder.delete_env()
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
+
+    def _sample_target(self, env_ids):
+        """Uniform target in the env box"""
+
+        lower = self.obs_dict["env_bounds_min"][env_ids] + self.target_inset
+        upper = self.obs_dict["env_bounds_max"][env_ids] - self.target_inset
+        ratio = torch.rand(len(env_ids), 3, device=self.device)
+        return lower + (upper - lower) * ratio
 
     def set_success_rate_window(self, num_episodes):
         """
@@ -292,7 +336,8 @@ class HoverSNNTask(BaseTask):
         self.infos = {}
         self.sim_env.reset()
         # Target remains at origin [0, 0, 0] (matching position_setpoint_task)
-        self.target_position[:, 0:3] = 0.0
+        all_envs = torch.arange(self.num_envs, device=self.device)
+        self.target_position[:, 0:3] = self._sample_target(all_envs)
         # Reset success tracking for all environments
         self.success_counter[:] = 0
         self.success_achieved[:] = 0
@@ -312,7 +357,7 @@ class HoverSNNTask(BaseTask):
         self.infos = {}
         self.sim_env.reset_idx(env_ids)
         # Target remains at origin [0, 0, 0] (matching position_setpoint_task)
-        self.target_position[env_ids, 0:3] = 0.0
+        self.target_position[env_ids, 0:3] = self._sample_target(env_ids)
         # Reset success tracking for reset environments
         self.success_counter[env_ids] = 0
         self.success_achieved[env_ids] = 0
@@ -321,6 +366,10 @@ class HoverSNNTask(BaseTask):
         self.prev_dist[env_ids] = torch.norm(
             robot_position[env_ids] - self.target_position[env_ids], dim=1
         )
+        # Spawn markers follow the new episode's spawn, so the green sphere always shows
+        # where THIS episode started rather than where the run began.
+        if not self._headless:
+            self._start_positions[env_ids] = robot_position[env_ids].clone()
         return
 
     def render(self):
@@ -328,6 +377,29 @@ class HoverSNNTask(BaseTask):
         Render the current state of the environment.
         """
         return None
+
+    def _draw_debug_visuals(self):
+        """Draw the goal (red, radius = success_threshold) and spawn (green) spheres.
+
+        clear_lines() wipes the whole viewer's debug geometry, so everything has to be
+        redrawn every frame -- this cannot be done once at reset.
+        """
+        self._gym.clear_lines(self._viewer)
+        for i in range(self.num_envs):
+            goal_pose = gymapi.Transform(
+                p=gymapi.Vec3(*self.target_position[i].cpu().numpy())
+            )
+            gymutil.draw_lines(
+                self._goal_sphere, self._gym, self._viewer,
+                self._env_handles[i], goal_pose,
+            )
+            start_pose = gymapi.Transform(
+                p=gymapi.Vec3(*self._start_positions[i].cpu().numpy())
+            )
+            gymutil.draw_lines(
+                self._start_sphere, self._gym, self._viewer,
+                self._env_handles[i], start_pose,
+            )
 
     def step(self, actions):
         """
@@ -345,19 +417,39 @@ class HoverSNNTask(BaseTask):
 
 
         """
-
         self.counter += 1
-        self.prev_actions[:] = self.actions
-        self.actions = actions
+        
+        # Transform network outputs to controller commands
+        transformed_action = self.action_transformation_function(actions)
+
+        # The jitter penalty tracks the RAW (normalized) action, not the transformed one.
+        #
+        # After transformation the four channels carry different units -- thrust is
+        # dimensionless in [-1, 1], roll/pitch are radians in [-pi/4, pi/4], yaw_rate is
+        # rad/s in [-pi/3, pi/3] -- so ||a_curr - a_prev|| would sum quantities that are not
+        # comparable, and whichever channel has the widest numeric range would dominate the
+        # norm. k_jitter would then mean something different for every channel.
+        #
+        # In the [-1, 1] network space all four channels already share a range, so the norm
+        # is dimensionless by construction and each channel contributes its change as a
+        # fraction of what it can command. (The nav task solves the same problem the other
+        # way, dividing the transformed action by a per-channel _action_scale.)
+        #
+        # Clamped, so that two successive out-of-range outputs that both saturate to the
+        # same command are correctly scored as zero jitter rather than as movement.
+        current_action = torch.clamp(actions, -1.0, 1.0).clone()
+
+        # Step the simulation and update the observation dictionary
+        self.sim_env.step(actions=transformed_action)
+        self.actions = current_action
+
 
         # Increment episode step counter for all active environments
         self.episode_steps += 1
 
-        # Run the actions in the simulation environment (direct pass, no transformation)
-        self.sim_env.step(self.actions)
-
         # Calculate the rewards and check for terminations/truncations
         self.rewards[:], self.terminations[:] = self.compute_rewards_and_crashes(self.obs_dict)
+        self.prev_actions[:] = current_action
 
         # Check for success: hovering within threshold
         position = self.obs_dict["robot_position"]
@@ -372,48 +464,52 @@ class HoverSNNTask(BaseTask):
         )
 
         # Success = held position within threshold for the required # of steps.
-        # Success TERMINATES the episode (truncation). This is safe now that the
-        # per-step time penalty (-k_time) exceeds the per-step hover bonus
-        # ceiling (k_hover < k_time), so loitering is net-negative: the agent can
-        # no longer profit by hovering well while avoiding the success condition.
-        # Succeeding quickly and ending the episode (with success_bonus) is the
-        # reward-optimal behavior, re-coupling reward with the success metric.
+        #
+        # PURELY A METRIC. It pays no bonus and does NOT end the episode, and both of those
+        # are deliberate:
+        #   - terminating on success caps how long the agent is ever asked to hold, so it
+        #     never learns to hold longer than success_hold_steps -- the opposite of a
+        #     hover task;
+        #   - a large terminal bonus re-creates the reward cliff the dense R_pos field was
+        #     introduced to remove, and made "try and fail" score far worse than "give up
+        #     immediately" (see compute_reward's docstring).
+        # The agent is paid continuously for proximity instead, so reward and this metric
+        # already point the same way without coupling them.
         success = self.success_counter >= self.task_config.success_hold_steps
         num_successes = success.sum().item()
 
-        # One-time terminal success bonus, awarded the step success is first met.
-        # The success_achieved latch ensures it is awarded once per episode; it
-        # is reset to 0 in reset()/reset_idx(), so it re-arms each episode.
-        newly_successful = success.bool() & (self.success_achieved < 0.5)
-        self.rewards = self.rewards + newly_successful.float() * self.task_config.success_bonus
-        # Latch: mark envs that have achieved success at any point this episode.
+        # Latch: marks envs that have achieved success at any point this episode. Read for
+        # the per-episode outcome below, reset in reset()/reset_idx().
         self.success_achieved = torch.where(success.bool(), 1.0, self.success_achieved)
-
-        # Terminate on success (use truncations: post_reward_calculation_step()
-        # resets envs whose truncation flag is set).
-        self.truncations[:] = torch.where(
-            success,
-            torch.ones_like(self.truncations),
-            self.truncations
-        )
 
         if self.task_config.return_state_before_reset:
             return_tuple = self.get_return_tuple()
 
-        # Also truncate if episode length exceeded (timeout = failure)
+        # Truncate on the step limit. This is now the ONLY way a non-crashed episode ends,
+        # which is what makes the return the integral of R_pos over a fixed horizon.
         timeout = self.sim_env.sim_steps > self.task_config.episode_len_steps
         num_timeouts = timeout.sum().item()
         self.truncations[:] = torch.where(
             timeout, 1, self.truncations
         )
 
-        # One-time timeout penalty for episodes that hit the time limit WITHOUT
-        # ever achieving success. Mirrors the crash penalty so that crashing to
-        # escape the per-step time penalty is not a profitable shortcut (giving
-        # up ends with a comparable terminal cost whether by crash or timeout).
-        # Computed from the success_achieved latch before reset_idx() clears it.
-        timeout_failure = timeout.bool() & (self.success_achieved < 0.5)
-        self.rewards = self.rewards - timeout_failure.float() * self.task_config.timeout_penalty
+        # rl_games value-bootstrap signal, consumed by a2c_common when value_bootstrap=True:
+        # shaped_rewards += gamma * V(s') * time_outs. Bootstrap ONLY on the artificial
+        # step-limit cutoff -- success, crash and out-of-bounds are TRUE terminals whose
+        # value really is zero, so bootstrapping them would inflate their returns.
+        #
+        # Load-bearing here in a way it is not for most tasks: EVERY non-crashed episode
+        # ends at the step limit, so without this key rl_games treats the horizon as a real
+        # terminal and the critic learns a cliff at episode_len_steps -- which would undo
+        # the whole point of paying continuously for proximity.
+        #
+        # Crashes are excluded because they ARE true terminals. Success is no longer
+        # excluded: it neither ends the episode nor prevents the timeout, so an env that
+        # succeeded still deserves the bootstrap when it later reaches the limit.
+        #
+        # Held in a local and written into the self.infos literal below, NOT assigned here:
+        # that literal REBUILDS the dict, so anything set on self.infos before it is lost.
+        time_outs = (timeout.bool() & (~self.terminations.bool())).float()
 
         # Track statistics before reset.
         # Episodes end on success, crash, or timeout. An episode counts as a
@@ -450,6 +546,11 @@ class HoverSNNTask(BaseTask):
             self.episode_steps[reset_envs] = 0
             self.reset_idx(reset_envs)
 
+        # After the resets, so the spheres show the NEW episode's goal and spawn rather
+        # than one frame of the episode that just ended.
+        if not self._headless:
+            self._draw_debug_visuals()
+
         # Calculate success rate (percentage of completed episodes that were successful)
         success_rate = (self.total_successes / self.total_episodes * 100.0) if self.total_episodes > 0 else 0.0
 
@@ -462,8 +563,28 @@ class HoverSNNTask(BaseTask):
         else:
             success_rate_window = 0.0
 
+        # CONTINUOUS progress diagnostics. `pos_error` is this step's distance for every
+        # env, captured BEFORE the resets above moved anyone, so it describes the flying
+        # population rather than fresh spawns.
+        #
+        # These exist because the success metric is a binary that stays at exactly 0 until
+        # the policy can hold a 10 cm ball for 3.6 s, which can be many hundreds of epochs
+        # of real progress -- during which it reports nothing at all. Mean distance and
+        # near-fraction move from the first epoch, so they answer "is R_pos working?" long
+        # before success does. Watch these first on any retrain.
+        mean_dist = float(pos_error.mean())
+        frac_near = float((pos_error < self.task_config.diagnostic_radius).float().mean())
+
         # Log metrics for tensorboard (IsaacAlgoObserver logs scalar values from infos)
         self.infos = {
+            # FUNCTIONAL, not logging: rl_games' value-bootstrap mask (see above).
+            # Per-env tensor, unlike every other entry here, which are scalars.
+            "time_outs": time_outs,
+
+            # Continuous progress signals -- move long before "successes" leaves zero.
+            "metrics/mean_dist_to_target": mean_dist,
+            "metrics/frac_within_radius": frac_near,
+
             # Instantaneous metrics (per step)
             "successes": num_successes,           # Envs currently holding the success condition this step
             "timeouts": num_timeouts,             # Number of timeouts this step
@@ -503,8 +624,9 @@ class HoverSNNTask(BaseTask):
         [10:13] Body Angular Velocity (wx, wy, wz)
         """
 
-        # Position error (target - robot_position)
-        self.task_obs["observations"][:, 0:3] = (
+        # Position error in vehicle frame (target - robot_position)
+        self.task_obs["observations"][:, 0:3] = quat_apply_inverse(
+            self.obs_dict["robot_vehicle_orientation"],
             self.target_position - self.obs_dict["robot_position"]
         )
 
@@ -550,15 +672,29 @@ class HoverSNNTask(BaseTask):
             robot_vehicle_orientation, (target_position - robot_position)
         )
 
-        rewards, crashes, self.success_counter, self.prev_dist = compute_reward(
+        # Effective termination box. The margin is applied here rather than inside
+        # compute_reward so it can stay a plain float in the config instead of being
+        # tensorized into reward_parameters.
+        bounds_min = obs_dict["env_bounds_min"]
+        bounds_max = obs_dict["env_bounds_max"]
+        margin = self.task_config.exceed_bounds_margin
+        if margin != 1.0:
+            center = 0.5 * (bounds_min + bounds_max)
+            half_extent = 0.5 * (bounds_max - bounds_min) * margin
+            bounds_min = center - half_extent
+            bounds_max = center + half_extent
+
+        rewards, crashes, self.prev_dist = compute_reward(
             pos_error_vehicle_frame,
+            robot_position,
+            bounds_min,
+            bounds_max,
             robot_linvel,
             robot_angvel,
             robot_vehicle_orientation,
             obs_dict["crashes"],
             self.actions,
             self.prev_actions,
-            self.success_counter,
             self.prev_dist,
             self.task_config.reward_parameters,
         )
@@ -568,137 +704,177 @@ class HoverSNNTask(BaseTask):
 @torch.jit.script
 def compute_reward(
     pos_error,
+    robot_position,
+    bounds_min,
+    bounds_max,
     robot_linvel,
     robot_angvel,
     robot_orientation,
     crashes,
     current_action,
     prev_actions,
-    success_counter,
     prev_dist,
     parameter_dict,
 ):
-    # type: (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor]) -> Tuple[Tensor, Tensor, Tensor, Tensor]
+    # type: (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor]) -> Tuple[Tensor, Tensor, Tensor]
     """
-    Potential-based reward for hover task.
+    Dense proximity reward for the go-to-and-hover task.
+
+    THE CENTRAL TERM IS R_pos, AND IT IS POSITIVE AND BOUNDED. Everything else shapes it.
+    That sign matters more than any coefficient here: an earlier version paid
+    `-k_dist * curr_dist` per step, which made the accumulated cost of FLYING to a distant
+    goal exceed the one-off crash penalty, so leaving the box immediately was the
+    return-maximising policy and PPO duly learned it (measured: 100% of episodes ended out
+    of bounds, 0 successes in 591k episodes, and mean episode length FELL over training as
+    the policy got better at dying quickly).
+
+    Removing that term without replacing it was no better -- it left the positional field
+    completely FLAT: a stationary drone earned -k_time per step whether it sat on the goal
+    or 4.45 m away, with the only positional signal a 12 cm step-function hover bonus that
+    random exploration never finds. Nothing rewarded BEING close, only BECOMING close.
+
+    So: distance costs nothing, proximity pays.
 
     Components:
-    0. Distance penalty: -k_dist * curr_dist
-       - Constant pressure to get closer to goal
-    1. Progress reward: k_progress * (prev_dist - curr_dist)
-       - Positive when moving toward goal, negative when moving away
-    2. Gated tilt penalty: -k_tilt * g(dist) * sqrt(pitch^2 + roll^2)
-       - g(dist) = sigmoid((gate_center - dist) / gate_width)
-       - Penalizes attitude deviation when near goal
-    3. Gated angular velocity penalty: -k_angvel * g(dist) * ||angvel||
-       - Penalizes rotation when near goal
-    4. Action jitter penalty: -k_jitter * ||action_diff||
-    5. Hover bonus: +k_hover * exp(-||vel|| / vel_scale) when dist < threshold
-       - Rewards being near goal with low velocity (exponential decay, no hard cutoff)
-    6. Crash penalty: -k_crash (one-time)
-    7. Time penalty: -k_time every (non-crash) step
-       - Constant per-step cost. With k_hover < k_time, loitering is net-negative,
-         so the agent is pushed to achieve hover quickly and end the episode on
-         success rather than farm the hover bonus.
+    1. Proximity:  +k_near * exp(-(d/s_near)^2) + k_far * exp(-(d/s_far)^2)
+       - The reward the task is actually about. Two scales on purpose: the narrow term
+         makes the last few cm worth fighting for, the wide one keeps a usable gradient
+         alive right across the env box. Bounded above, so it cannot be farmed into
+         dominating the terminal penalties, and asymptotically 0 rather than negative, so
+         being far away is merely worthless instead of expensive.
+    2. Progress:   k_progress * (prev_dist - curr_dist)
+       - Near potential-based (Phi(s') - Phi(s)), so it shapes exploration without moving
+         the optimum. Kept small: with a real positional field it is redundant, and at a
+         large weight it pays for dashing at the goal rather than settling on it.
+    3. Hold-still group:  -min(k_vel*||v|| + k_tilt*tilt + k_angvel*||w||, 0.9*k_near) * g(d)
+       - g(d) = exp(-(d/s_near)^2), THE SAME GAUSSIAN as the proximity peak, and the sum is
+         clamped below k_near. Together those two facts make the near-field reward
+         [k_near - penalty] * g(d), i.e. a positive multiple of a Gaussian, hence monotone
+         decreasing in d for ANY flight state. Without the group these penalties let the
+         drone maximise R_pos by repeatedly flying THROUGH the target; without the shared
+         width and the clamp they instead build a barrier around it. See the block comment
+         at the implementation.
+    4. Action jitter:           -k_jitter * ||a_curr - a_prev||   (normalized action space)
+    5. Crash:                   -k_crash, one-time, on leaving the env box
 
-    Optimal behavior: approach goal quickly, then stabilize with level attitude,
-    minimal rotation, minimal velocity, and smooth control.
+    There is deliberately NO per-step time penalty and NO success bonus. Success no longer
+    ends the episode, so every episode runs to the step limit and the return becomes the
+    integral of R_pos over the episode -- literally "how close was it, for how long", which
+    is the go-to-and-hover objective. A time penalty on top of that only re-creates the
+    die-early pathology, and a terminal success bonus re-creates the cliff.
+
+    Optimal behavior: reach the goal quickly, then hold it level, still, and smoothly, for
+    the rest of the episode.
     """
     # Extract parameters
-    k_dist = parameter_dict["k_dist"][0]
+    k_near = parameter_dict["k_near"][0]
+    sigma_near = parameter_dict["sigma_near"][0]
+    k_far = parameter_dict["k_far"][0]
+    sigma_far = parameter_dict["sigma_far"][0]
     k_progress = parameter_dict["k_progress"][0]
-    gate_midpoint = parameter_dict["gate_center"][0]
-    gate_steepness = parameter_dict["gate_width"][0]
+    penalty_clamp_frac = parameter_dict["penalty_clamp_frac"][0]
     k_jitter = parameter_dict["k_jitter"][0]
     k_tilt = parameter_dict["k_tilt"][0]
     k_angvel = parameter_dict["k_angvel"][0]
-    k_hover = parameter_dict["k_hover"][0]
-    threshold_hover = parameter_dict["threshold_hover"][0]
-    vel_scale_hover = parameter_dict["vel_scale_hover"][0]
+    k_vel = parameter_dict["k_vel"][0]
     k_crash = parameter_dict["k_crash"][0]
-    max_distance = parameter_dict["max_distance"][0]
-    k_time = parameter_dict["k_time"][0]
 
     # Current distance to target
     curr_dist = torch.norm(pos_error, dim=1)
 
     # ============================================================
-    # CRASH CHECK (distance beyond max)
+    # CRASH CHECK (robot left the environment box)
     # ============================================================
-    crashes = torch.where(curr_dist > max_distance, torch.ones_like(crashes), crashes)
+    # Tested against the WORLD box, not a radius around the target: the env is a box, so
+    # a sphere centred on the goal both cuts the corners off and makes "out of bounds"
+    # depend on where the goal happens to have been sampled. With an empty env (no ground
+    # plane, no assets) nothing can be collided with, so this is the only crash source.
+    exceed = ((robot_position < bounds_min) | (robot_position > bounds_max)).any(dim=1)
+    crashes = torch.where(exceed, torch.ones_like(crashes), crashes)
 
     # ============================================================
     # GATING FUNCTION (SIGMOID)
     # ============================================================
-    sigma = torch.sigmoid((gate_midpoint - curr_dist) / gate_steepness)
-    
+    # The gate is the SAME GAUSSIAN as the proximity peak below, and that is the whole
+    # trick -- see the "hold still" penalty block for why. It is deliberately not an
+    # independent sigmoid with its own centre and width: that version put a local maximum
+    # in the reward field at 0.9 m and a valley at 0.5 m, and training parked at a mean
+    # distance of 1.29 m with the fraction of time inside 0.5 m FALLING (0.008 -> 0.002)
+    # as the policy learned to avoid the valley.
+    gate = torch.exp(-((curr_dist / sigma_near) ** 2))
+
     # ============================================================
-    # 1. PROGRESS REWARD (positive for approaching goal)
+    # 1. PROXIMITY REWARD (positive, bounded, smooth -- the main term)
+    # ============================================================
+    # Sum of a narrow and a wide Gaussian in the distance to target. Monotone decreasing
+    # in d everywhere, so every metre closer pays, with no cliff for exploration to fall
+    # off. See the docstring for why this is positive rather than a distance penalty.
+    R_pos = k_near * gate + k_far * torch.exp(-((curr_dist / sigma_far) ** 2))
+
+    # ============================================================
+    # 2. PROGRESS REWARD (positive for approaching goal)
     # ============================================================
     progress = prev_dist - curr_dist  # Positive when getting closer
     R_progress = k_progress * progress  # Positive reward
 
     # ============================================================
-    # 2. TILT PENALTY (negative for pitch/roll deviation)
+    # 3. "HOLD STILL" PENALTIES -- gated, and CLAMPED BELOW k_near
     # ============================================================
-    # Extract roll, pitch, yaw from quaternion using built-in function.
-    # ssa() wraps to [-pi, pi]: get_euler_xyz returns angles through `% (2 * pi)`.
+    # Velocity, tilt and angular rate, summed and applied through the same Gaussian as the
+    # proximity peak. They are what turn "visit the goal" into "stop at the goal": without
+    # them the top-scoring behaviour is to keep flying THROUGH the target, re-collecting
+    # the peak on every pass.
+    #
+    # THE CLAMP IS WHAT MAKES THE REWARD FIELD MONOTONE, and it is not a safety net -- it
+    # is the mechanism. Because both R_pos's near term and this penalty are the SAME
+    # gate(d), the near-field reward collapses to
+    #
+    #     [k_near - penalty_raw] * gate(d)  +  k_far * exp(-(d/sigma_far)^2)
+    #
+    # and clamping penalty_raw below k_near forces the bracket positive. A positive
+    # multiple of a Gaussian is monotone decreasing in d, so moving closer ALWAYS pays,
+    # for any velocity, tilt or spin -- however badly the vehicle happens to be flying.
+    #
+    # Without the clamp (and with an independently-parameterised sigmoid gate) the penalty
+    # ramped in faster than R_pos rose, producing a local maximum at 0.9 m and a valley at
+    # 0.5 m. Training stalled at 1.29 m mean distance and the time spent within 0.5 m
+    # DECREASED as the policy learned to avoid the valley. Do not reintroduce a gate with
+    # its own centre/width, and do not remove the clamp.
     roll, pitch, yaw = get_euler_xyz(robot_orientation)
     roll, pitch = ssa(roll), ssa(pitch)
-
-    # Tilt magnitude: sqrt(pitch^2 + roll^2)
     tilt_magnitude = torch.sqrt(pitch ** 2 + roll ** 2)
-    R_tilt = k_tilt * sigma * tilt_magnitude  # Negative penalty (more negative for stronger tilt)
-
-    # ============================================================
-    # 3. ANGULAR VELOCITY PENALTY (negative for rotation)
-    # ============================================================
+    vel_magnitude = torch.norm(robot_linvel, dim=1)
     angvel_magnitude = torch.norm(robot_angvel, dim=1)
-    R_angvel = k_angvel * sigma * angvel_magnitude  # Negative penalty (more negative for higher angular velocity)
+
+    hold_penalty_raw = (
+        k_vel * vel_magnitude
+        + k_tilt * tilt_magnitude
+        + k_angvel * angvel_magnitude
+    )
+    R_hold = torch.clamp(hold_penalty_raw, max=float(penalty_clamp_frac * k_near)) * gate
 
     # ============================================================
     # 4. ACTION JITTER PENALTY (negative for rapid action changes)
     # ============================================================
+    # Deliberately UNGATED: it does not vary with distance, so it cannot create a barrier,
+    # and control smoothness is wanted during the approach as much as at the goal.
     action_diff = torch.norm(current_action - prev_actions, dim=1)
     R_jitter = k_jitter * action_diff  # Negative penalty (more negative for stronger jitter)
 
     # ============================================================
-    # 5. HOVER BONUS (positive for stable hovering near goal)
+    # TOTAL: R_pos + R_progress - R_hold - R_jitter
     # ============================================================
-  
-    # Update success counter for episode termination tracking
-    success_counter = torch.where(
-        curr_dist < threshold_hover,
-        success_counter + 1,
-        torch.zeros_like(success_counter)
-    )
-
-    # Compute velocity magnitude
-    vel_magnitude = torch.norm(robot_linvel, dim=1)
-
-    # Velocity bonus: exponential decay with velocity
-    # vel=0 → bonus=1.0, vel=vel_scale → bonus≈0.37, approaches 0 asymptotically
-    vel_bonus_scale = torch.exp(-vel_magnitude / vel_scale_hover)
-
-    # Hover bonus: only active when within distance threshold, scaled by velocity
-    R_hover = torch.where(
-        curr_dist < threshold_hover,
-        k_hover * vel_bonus_scale,  # Positive reward (more positive when stationary)
-        torch.zeros_like(curr_dist)
-    )
-
-    # ============================================================
-    # TOTAL REWARD: R_total = -k_dist*dist + R_progress - R_tilt - R_angvel - R_jitter + R_hover
-    # ============================================================
-    # If crashed: only crash penalty
-    # Otherwise: sum all reward components
+    # No per-step time term: the episode always runs to the step limit, so the return is
+    # the integral of R_pos and "spend longer near the goal" is the objective, not a thing
+    # to be taxed. If crashed, ONLY the crash penalty applies -- forfeiting the rest of the
+    # episode's proximity reward is itself the larger part of the punishment.
     R_total = torch.where(
         crashes > 0.0,
         -k_crash * torch.ones_like(curr_dist),
-        -k_dist * curr_dist + R_progress - R_tilt - R_angvel - R_jitter + R_hover - k_time
+        R_pos + R_progress - R_hold - R_jitter
     )
 
     # Update prev_dist for next step (return as output)
     new_prev_dist = curr_dist.clone()
 
-    return R_total, crashes, success_counter, new_prev_dist
+    return R_total, crashes, new_prev_dist

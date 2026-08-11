@@ -33,7 +33,6 @@ from .agents import register_algos
 from .networks import bind_encoder_bounds
 from .vecenv import register_task
 
-TASK_NAME = "f450_navigation_task"
 
 # aerial_gym's asset_manager logs one line per asset per env; at 256 envs that buries
 # everything else. It uses stdlib logging (aerial_gym.utils.logging.CustomLogger), not loguru.
@@ -60,7 +59,7 @@ def get_args():
          "help": "Use warp"},
         {"name": "--experiment_name", "type": str, "default": "f450_navigation",
          "help": "Experiment name"},
-        {"name": "--task", "type": str, "default": TASK_NAME, "help": "Task name"},
+        {"name": "--task", "type": str, "required": True, "help": "Task name"},
         {"name": "--track", "action": "store_true",
          "help": "Track with Weights and Biases"},
         {"name": "--wandb-project-name", "type": str, "default": "aerial_gym",
