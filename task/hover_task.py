@@ -13,7 +13,13 @@ neural network architecture used in training, not a different task.
 
 from aerial_gym.task.base_task import BaseTask
 from aerial_gym.sim.sim_builder import SimBuilder
-from aerial_gym.utils.math import quat_apply_inverse, quat_axis, get_euler_xyz, ssa
+from aerial_gym.utils.math import (
+    quat_apply_inverse,
+    quat_axis,
+    quat_rotate_inverse,
+    get_euler_xyz,
+    ssa,
+)
 from aerial_gym.utils.logging import CustomLogger
 
 import torch
@@ -124,6 +130,8 @@ class HoverTask(BaseTask):
         # Get observations dictionary reference from environment
         # This dict is updated in-place by the sim step
         self.obs_dict = self.sim_env.get_obs()
+
+        self._install_imu_substep_tracker()
 
         # Initialize tensors (rewards, terminations, truncations)
         self.terminations = self.obs_dict["crashes"]
@@ -269,6 +277,96 @@ class HoverTask(BaseTask):
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
 
+    def _install_imu_substep_tracker(self):
+        """Track the IMU across physics substeps and keep the MOST RECENT gyro sample.
+
+        imu_sensor.update() runs once per PHYSICS substep while the policy reads once per
+        ENV step, so something has to decide which of the ~3 samples the policy sees. The
+        answer here is the LAST one, and that choice was measured rather than assumed.
+
+        The obvious alternative -- and what the navigation task does -- is to average the
+        substeps, on the reasoning that sampling one instant hands the policy more noise
+        than the hardware has. Measured on this task, that premise is false and the cure is
+        worse than the disease (64 envs, |angvel| ~ 0.2345 rad/s):
+
+            sensor error at a single instant     0.0072 rad/s   (3% of signal)
+            substep MEAN vs the true instant     0.0349 rad/s   (15% of signal)
+            true change in angvel per env step   0.0969 rad/s
+            => the mean sits ~0.36 of a step behind the truth
+
+        So averaging injected FIVE TIMES more distortion than the sensor itself, and of the
+        worst possible kind: ~11 ms of phase lag in the angular-rate feedback the policy
+        uses to damp attitude. A training run with the mean positioned better than the
+        ground-truth baseline (mean distance 0.128 m vs 0.521 m at matched iterations) while
+        crashing far more (episode length 461 vs 667) -- a loop sitting right on its
+        stability boundary, which is what removing phase margin does. It visibly wobbled.
+
+        A boxcar mean over the whole control interval also models the real vehicle badly.
+        PX4 publishes bias-corrected rates on vehicle_angular_velocity at up to 1 kHz,
+        already low-passed by IMU_GYRO_CUTOFF (~30-80 Hz, group delay ~2-5 ms), and a policy
+        at ~33 Hz reads the most recent one. A full-interval boxcar has near-maximal group
+        delay for its bandwidth. The last sample is both simpler and closer to the truth.
+
+        The per-substep wrapper is still needed even though we no longer accumulate: the
+        SAMPLE COUNT is what makes the two fallback cases in _consume_imu_gyro detectable.
+
+        Upstream exposes no per-substep hook, so we wrap the bound method. Remove this once
+        it does. imu_sensor.imu_meas is (num_envs, 6): [0:3] accel, [3:6] gyro, body frame.
+        """
+        imu = getattr(self.sim_env.robot_manager, "imu_sensor", None)
+        if imu is None:
+            # enable_imu = False in the robot config: the observation falls back to
+            # ground-truth angular velocity everywhere (count stays 0).
+            self._imu_gyro_latest = None
+            return
+
+        self._imu_gyro_latest = torch.zeros(
+            (self.sim_env.num_envs, 3), device=self.device, requires_grad=False
+        )
+        # Per-env, not a scalar: reset_idx() has to zero individual envs (see below).
+        self._imu_substep_count = torch.zeros(
+            (self.sim_env.num_envs,), device=self.device, requires_grad=False
+        )
+
+        _wrapped_update = imu.update
+
+        def _tracking_update():
+            _wrapped_update()
+            # Overwrite, not accumulate -- the last writer wins, which is the point.
+            self._imu_gyro_latest[:] = imu.imu_meas[:, 3:6]
+            self._imu_substep_count += 1.0
+
+        imu.update = _tracking_update
+
+    def _consume_imu_gyro(self):
+        """Most recent gyro sample of this env step, falling back to ground truth.
+
+        The LATEST substep rather than the mean -- see _install_imu_substep_tracker for the
+        measurements behind that. In short: the sensor itself contributes ~3% error, while
+        averaging added ~15% as pure phase lag and made the vehicle wobble.
+
+        ZEROES THE SAMPLE COUNT, so call exactly once per env step. process_obs_for_task is
+        the only caller and step() reaches it once (the two get_return_tuple() branches are
+        mutually exclusive). A second call in the same step is not a crash -- the count is
+        0, so it falls back to ground truth -- but it silently discards the measurement.
+
+        Two cases hit the fallback, both real rather than defensive:
+          1. num_physics_step_per_env_step is max(floor(gauss(mean, std)), 0) and can
+             legitimately be ZERO, leaving no samples.
+          2. Envs that reset this step. post_reward_calculation_step() re-renders only
+             camera/warp sensors, never the IMU, so the buffer still holds the PREVIOUS
+             episode; reset_idx() zeroes those envs's counts so they land here.
+
+        Safe either way: init_state draws angular velocity in +/-0.1 rad/s.
+        """
+        ground_truth = self.obs_dict["robot_body_angvel"]
+        if self._imu_gyro_latest is None:
+            return ground_truth
+        n = self._imu_substep_count.unsqueeze(1)
+        gyro = torch.where(n > 0, self._imu_gyro_latest, ground_truth)
+        self._imu_substep_count.zero_()
+        return gyro
+
     def _sample_target(self, env_ids):
         """Uniform target in the env box"""
 
@@ -347,6 +445,10 @@ class HoverTask(BaseTask):
         self.obs_dict = self.sim_env.get_obs()
         robot_position = self.obs_dict["robot_position"]
         self.prev_dist = torch.norm(robot_position - self.target_position, dim=1)
+        # Neutral action history, so the very first observation of a run reports a level
+        # hover command rather than whatever happened to be in the buffer. See reset_idx.
+        self.actions[:] = 0.0
+        self.prev_actions[:] = 0.0
         return self.get_return_tuple()
 
     def reset_idx(self, env_ids):
@@ -356,6 +458,14 @@ class HoverTask(BaseTask):
         """
         self.infos = {}
         self.sim_env.reset_idx(env_ids)
+        # Drop IMU samples belonging to the episode that just ended -- see _consume_imu_gyro
+        # for why they would otherwise leak into the new episode's first observation.
+        if self._imu_gyro_latest is not None:
+            # Zeroing the COUNT is what actually forces the ground-truth fallback for these
+            # envs; the sample buffer is cleared alongside it only so a stale reading can
+            # never be read by mistake.
+            self._imu_gyro_latest[env_ids] = 0.0
+            self._imu_substep_count[env_ids] = 0.0
         # Target remains at origin [0, 0, 0] (matching position_setpoint_task)
         self.target_position[env_ids, 0:3] = self._sample_target(env_ids)
         # Reset success tracking for reset environments
@@ -366,6 +476,16 @@ class HoverTask(BaseTask):
         self.prev_dist[env_ids] = torch.norm(
             robot_position[env_ids] - self.target_position[env_ids], dim=1
         )
+        # Clear the action history for reset envs. Load-bearing on two paths now that the
+        # action is observed: without it the first observation of a new episode carries the
+        # LAST action of the previous one, and the jitter penalty charges the new episode
+        # for a discontinuity that belongs to the old one.
+        #
+        # Zero is the correct neutral value here, not merely a convenient one: the action is
+        # the raw network output, and lee_attitude_control maps thrust as (cmd + 1) * m * g,
+        # so an all-zero command is level attitude at hover thrust.
+        self.actions[env_ids] = 0.0
+        self.prev_actions[env_ids] = 0.0
         # Spawn markers follow the new episode's spawn, so the green sphere always shows
         # where THIS episode started rather than where the run began.
         if not self._headless:
@@ -616,12 +736,13 @@ class HoverTask(BaseTask):
 
     def process_obs_for_task(self):
         """
-        Build 13D observation vector (matching position_setpoint_task)
+        Build the 16D observation vector.
 
-        [0:3]   Position error: target - robot_position (NO normalization)
-        [3:7]   Robot orientation (quaternion)
-        [7:10]  Body Linear Velocity (vx, vy, vz) (NO normalization)
-        [10:13] Body Angular Velocity (wx, wy, wz)
+        [0:3]   Position error: target - robot_position, VEHICLE frame (NO normalization)
+        [3:6]   Gravity direction in BODY frame (unit vector)
+        [6:9]   Body Linear Velocity (vx, vy, vz) (NO normalization)
+        [9:12]  Body Angular Velocity (wx, wy, wz)
+        [12:16] Previous action (thrust, roll, pitch, yaw_rate), normalized [-1, 1]
         """
 
         # Position error in vehicle frame (target - robot_position)
@@ -630,14 +751,69 @@ class HoverTask(BaseTask):
             self.target_position - self.obs_dict["robot_position"]
         )
 
-        # Robot orientation (quaternion)
-        self.task_obs["observations"][:, 3:7] = self.obs_dict["robot_orientation"]
+        # [3:6] Attitude, as the gravity direction seen in the body frame.
+        #
+        # Replaces the raw quaternion, which was AMBIGUOUS: q and -q are the same rotation
+        # but two different input vectors, so the network had to learn the double cover
+        # instead of being handed a unique encoding.
+        #
+        # Nothing is lost by dropping to three numbers. A quaternion also carries YAW, and
+        # this task has no use for it: the position error at [0:3] is already expressed in
+        # the vehicle (yaw-only) frame, so heading is factored out of the goal geometry
+        # before the policy sees it, and the reward never references yaw. What remains is
+        # roll and pitch, which is exactly what a gravity direction encodes.
+        #
+        # It is also the honest sim2real choice -- an accelerometer at hover measures this
+        # vector directly, whereas an absolute orientation quaternion is an estimator
+        # product with its own drift.
+        gravity_body = quat_rotate_inverse(
+            self.obs_dict["robot_orientation"], self.obs_dict["gravity"]
+        )
+        self.task_obs["observations"][:, 3:6] = gravity_body / torch.linalg.norm(
+            gravity_body + 1e-6, dim=-1, keepdim=True
+        )
 
         # Body linear velocity (NO normalization)
-        self.task_obs["observations"][:, 7:10] = self.obs_dict["robot_body_linvel"]
+        self.task_obs["observations"][:, 6:9] = self.obs_dict["robot_body_linvel"]
 
-        # Body angular velocity
-        self.task_obs["observations"][:, 10:13] = self.obs_dict["robot_body_angvel"]
+        # [9:12] Body angular velocity, from the SIMULATED IMU GYRO rather than ground
+        # truth, averaged over this env step's physics substeps (_consume_imu_gyro).
+        #
+        # A REPLACEMENT, not an addition, and that distinction is the entire point. Appending
+        # the IMU as extra channels would achieve nothing: the policy would still have a
+        # clean ground-truth copy of the same quantity and would simply learn to read that
+        # one. The IMU's job here is to DEGRADE the observation down to what the real F450
+        # can actually supply, so it has to take the clean source's place.
+        #
+        # Scope: the gyro is the only channel the IMU honestly covers end to end. PX4 feeds
+        # near-raw, bias-corrected rates (vehicle_angular_velocity) straight to its
+        # rate-control loop, so there is little filtering between sensor and consumer.
+        # [3:6] deliberately stays on true orientation: the accelerometer measures SPECIFIC
+        # FORCE, not gravity (gravity_compensation = False, world_frame = False), so it only
+        # coincides with the gravity direction at hover and tilts under acceleration. On the
+        # real vehicle that channel comes from EKF2's filtered attitude
+        # (vehicle_attitude.q), not from a raw accelerometer. [0:3] and [6:9] are likewise
+        # estimator products whose error model is drift, not white noise.
+        #
+        # The REWARD still uses obs_dict["robot_body_angvel"] (see compute_rewards_and_
+        # crashes): the policy is paid against true state while only ever seeing the noisy
+        # measurement, which is the situation on the real vehicle.
+        self.task_obs["observations"][:, 9:12] = self._consume_imu_gyro()
+
+        # [12:16] The action just applied, which is the PREVIOUS action from the point of
+        # view of whoever consumes this observation to choose the next one.
+        #
+        # Required for the jitter penalty to be learnable at all: the reward charges
+        # k_jitter * ||a_t - a_{t-1}||, and without a_{t-1} in the observation the policy is
+        # being billed for a quantity it cannot compute. It could only reduce the penalty by
+        # driving the whole action distribution toward a constant, rather than by being
+        # smooth about the state it is actually in -- and the unexplainable part of the
+        # reward goes into the value function as noise.
+        #
+        # self.actions is the raw CLAMPED NETWORK OUTPUT, not the transformed command, so
+        # these four channels already sit in [-1, 1] and need no scaling to sit alongside
+        # the metres and rad/s above. It is a command vector, so it has no coordinate frame.
+        self.task_obs["observations"][:, 12:16] = self.actions
 
         self.task_obs["rewards"] = self.rewards
         self.task_obs["terminations"] = self.terminations

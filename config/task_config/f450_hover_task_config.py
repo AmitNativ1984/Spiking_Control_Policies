@@ -30,12 +30,26 @@ class task_config:
 
     privileged_observation_space_dim = 0
 
-    # Observation space dim (matching position_setpoint_task):
-    # Position error to target (3): [tx - px, ty - py, tz - pz]
-    # Robot orientation (4): quaternion [qx, qy, qz, qw]
+    # Observation space dim:
+    # Position error to target (3): vehicle frame, [tx - px, ty - py, tz - pz]
+    # Gravity direction (3): unit vector in the BODY frame
     # Body Linear Velocity (3): [vx, vy, vz]
     # Body Angular Velocity (3): [wx, wy, wz]
-    observation_space_dim = 13
+    # Previous action (4): [thrust, roll, pitch, yaw_rate], normalized [-1, 1]
+    #
+    # Attitude is carried as a gravity direction rather than a quaternion. A quaternion is
+    # ambiguous (q and -q are the same rotation, two different inputs) and carries yaw,
+    # which this task cannot use: the position error is already in the vehicle (yaw-only)
+    # frame, so heading is factored out before the policy sees it. Gravity-in-body is the
+    # unique minimal encoding of the roll/pitch that remains, and is what an accelerometer
+    # measures directly.
+    #
+    # The previous action is in here because the reward charges a jitter penalty
+    # (k_jitter * ||a_t - a_{t-1}||). Without a_{t-1} observable the policy is billed for a
+    # quantity it cannot compute, which is both unlearnable and a source of value-function
+    # noise. Keep the two together: drop the jitter penalty and these 4 dims are optional
+    # again; keep the penalty and they are not.
+    observation_space_dim = 16
 
     # Action space dim (network output): [thrust_cmd, roll_cmd, pitch_cmd, yaw_rate_cmd]
     # Matches LeeAttitudeController expected format directly

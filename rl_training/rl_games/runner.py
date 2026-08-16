@@ -184,14 +184,20 @@ def load_config(args):
 
     config_dict = apply_args(config_dict, args)
 
-    # rl_games writes tensorboard logs and checkpoints under train_dir.
-    config_dict["params"]["config"]["train_dir"] = RUNS_DIR
-
-    # rl_games' default run name uses only "_%d-%H-%M-%S" (no year/month), which makes run
-    # folders ambiguous across months. Use a full date+time stamp instead.
+    # Run artifacts land in runs/<experiment>/<timestamp>/{nn,summaries}.
+    #
+    # rl_games builds its output path as train_dir/full_experiment_name (a2c_common.py:267),
+    # with no notion of a per-experiment grouping level. Folding the experiment name into
+    # train_dir and leaving only the timestamp as full_experiment_name gets the nesting we
+    # want without patching rl_games: every run of one experiment collects under a single
+    # folder instead of scattering across a flat runs/ directory that mixes experiments.
+    #
+    # rl_games' own default name uses "_%d-%H-%M-%S" (no year or month), which makes run
+    # folders ambiguous across months; the full date+time stamp below fixes that too.
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     experiment_name = config_dict["params"]["config"]["name"]
-    config_dict["params"]["config"]["full_experiment_name"] = f"{experiment_name}_{timestamp}"
+    config_dict["params"]["config"]["train_dir"] = os.path.join(RUNS_DIR, experiment_name)
+    config_dict["params"]["config"]["full_experiment_name"] = timestamp
 
     # Measured bounds win; bind_encoder_bounds fills in the layout-derived defaults for
     # any run that didn't collect them (setdefault, so it never overwrites the above).
@@ -317,10 +323,15 @@ def _start_wandb(config_dict, args):
 
     # Record git provenance in the run config so the run can always be restored to the
     # exact code state that produced it.
+    #
+    # full_experiment_name is only the timestamp (the experiment name lives in train_dir --
+    # see load_config), so recombine them here: W&B has no folder nesting and a run called
+    # "2026-08-11_10-52-30" would be unidentifiable in a project listing.
+    cfg = config_dict["params"]["config"]
     wandb.init(
         project=args["wandb_project_name"],
         entity=args["wandb_entity"],
-        name=config_dict["params"]["config"]["full_experiment_name"],
+        name=f"{cfg['name']}_{cfg['full_experiment_name']}",
         sync_tensorboard=True,
         config={**config_dict, "git": info},
         monitor_gym=True,
@@ -337,7 +348,9 @@ def _finish_wandb(config_dict, args, info):
 
     if args.get("train"):
         cfg = config_dict["params"]["config"]
-        log_final_weights(RUNS_DIR, cfg["full_experiment_name"], cfg["name"], info)
+        # train_dir already carries the experiment name (runs/<experiment>), so joining it
+        # with full_experiment_name (the timestamp) reproduces rl_games' own experiment_dir.
+        log_final_weights(cfg["train_dir"], cfg["full_experiment_name"], cfg["name"], info)
     wandb.finish()
 
 
