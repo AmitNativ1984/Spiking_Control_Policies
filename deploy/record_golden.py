@@ -17,12 +17,13 @@ identical arithmetic, and this measures the arithmetic.
 
 USAGE
 -----
-    python3 tools/record_golden.py \
+    python -m deploy.record_golden \
         --checkpoint /workspaces/aerial_gym_docker/runs/f450_hover/.../last_....pth \
-        --output tests/data/hover_golden.npz
+        --output <sail-uav-core>/libs/control-policy-api/policies/hover/hover_golden.npz
 
-Re-record whenever the checkpoint changes. The file carries the checkpoint's SHA-256, and
-the test refuses to compare against a different one rather than reporting a false pass.
+Re-record whenever the checkpoint changes, and re-export the graph from the SAME .pth --
+both files carry the checkpoint's SHA-256, and test_artifacts_share_one_checkpoint fails on
+a mismatched pair rather than letting the parity test report it as numerical drift.
 """
 
 import argparse

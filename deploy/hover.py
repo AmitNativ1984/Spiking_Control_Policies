@@ -1,6 +1,6 @@
 """The trained hover policy: an rl_games checkpoint behind the BasePolicy contract.
 
-Needs torch. For a torch-free deployment export the checkpoint with tools/export_onnx.py and
+Needs torch. For a torch-free deployment export the checkpoint with deploy/export_onnx.py and
 use control_policy_api.onnx.OnnxHoverPolicy instead -- it builds the same observation from
 the same module and produces the same actions (tests/test_golden_actions.py checks both).
 """

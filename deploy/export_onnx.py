@@ -15,9 +15,9 @@ working and only the vehicle notices.
 
 USAGE
 -----
-    python3 tools/export_onnx.py \
+    python -m deploy.export_onnx \
         --checkpoint /path/to/last_....pth \
-        --output tests/data/hover.onnx
+        --output <sail-uav-core>/libs/control-policy-api/policies/hover/hover.onnx
 """
 
 import argparse

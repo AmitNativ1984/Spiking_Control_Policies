@@ -26,5 +26,5 @@ Both import control_policy_api for the observation layout, so the deployment pac
 training container agree on the vector by construction rather than by transcription. Install
 it editable from the monorepo:
 
-    pip install -e <sail-uav-core>/libs/uav-frames -e <sail-uav-core>/libs/control-policy-api
+    pip install -e <sail-uav-core>/libs/frame-transforms -e <sail-uav-core>/libs/control-policy-api
 """
