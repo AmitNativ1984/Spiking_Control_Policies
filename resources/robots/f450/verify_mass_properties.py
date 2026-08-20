@@ -14,8 +14,8 @@ For each link, checks:
 
 Then prints a whole-vehicle summary (sum of all links, in the base_link
 frame) to eyeball against the SDF's own recorded "gz sdf, inertial-stats"
-figures in NOTES.md (mass 1.999 kg, CoM [0.0036, 0, -0.00749], Ixx/Iyy/Izz
-0.021692/0.022495/0.042039).
+figures in NOTES.md "Repower" (mass 2.373 kg, CoM [0.00303, 0, -0.01571],
+Ixx/Iyy/Izz 0.024360/0.025955/0.046023).
 
 NOTE: does not check collapse_fixed_joints=True, because every joint in
 model.urdf is marked dont_collapse="true" (needed so aerial_gym can apply
@@ -140,8 +140,8 @@ def main():
         sim_mass, sim_com, inertia_np_to_dict(sim_inertia),
     )
     print()
-    print("Reference (SDF NOTES.md): mass~1.999 kg, CoM~[0.0036, 0, -0.00749], "
-          "Ixx~0.021692, Iyy~0.022495, Izz~0.042039")
+    print("Reference (SDF NOTES.md 'Repower'): mass~2.373 kg, CoM~[0.00303, 0, -0.01571], "
+          "Ixx~0.024360, Iyy~0.025955, Izz~0.046023")
 
     gym.destroy_sim(sim)
 

@@ -20,7 +20,7 @@
 
     <inertial>
       <!-- CoM offset from the frame geometric center (base_link origin):
-           +3.7mm forward (RealSense on the nose), -8.0mm down (belly battery). -->
+           +3.1mm forward (RealSense on the nose), -16.4mm down (belly battery). -->
       <origin xyz="{{ base_link.com | join(' ') }}"/>
       <mass value="{{ base_link.mass }}"/>
       <inertia ixx="{{ base_link.inertia.ixx }}" ixy="{{ base_link.inertia.ixy }}" ixz="{{ base_link.inertia.ixz }}" iyy="{{ base_link.inertia.iyy }}" iyz="{{ base_link.inertia.iyz }}" izz="{{ base_link.inertia.izz }}"/>

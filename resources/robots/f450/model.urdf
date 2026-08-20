@@ -27,16 +27,16 @@
     <collision>
       <origin xyz="0.0 0.0 -0.081712"/>
       <geometry>
-        <box size="0.56097 0.56097 0.211577"/>
+        <box size="0.57927 0.57927 0.211577"/>
       </geometry>
     </collision>
 
     <inertial>
       <!-- CoM offset from the frame geometric center (base_link origin):
-           +3.7mm forward (RealSense on the nose), -8.0mm down (belly battery). -->
-      <origin xyz="0.003698 0.0 -0.007999"/>
-      <mass value="1.947"/>
-      <inertia ixx="0.020177" ixy="0.0" ixz="0.000158" iyy="0.020979" iyz="0.0" izz="0.039046"/>
+           +3.1mm forward (RealSense on the nose), -16.4mm down (belly battery). -->
+      <origin xyz="0.003107 0.0 -0.016366"/>
+      <mass value="2.317"/>
+      <inertia ixx="0.022686" ixy="0.0" ixz="9.8e-05" iyy="0.02428" iyz="0.0" izz="0.042759"/>
     </inertial>
   </link>
   <!-- front_right_prop: real DJI F450 spec, ccw rotation (see params.yaml
@@ -45,7 +45,7 @@
     <visual>
       <origin xyz="0 0 0"/>
       <geometry>
-        <cylinder radius="0.11785" length="0.01"/>
+        <cylinder radius="0.127" length="0.01"/>
       </geometry>
       <material name="White">
         <color rgba="1 1 1 1.0"/>
@@ -54,8 +54,8 @@
     <!-- No collision here - base_link's single collision_box already bounds
          the whole robot, including this prop's disc (see params.yaml). -->
     <inertial>
-      <mass value="0.013"/>
-      <inertia ixx="3.0092e-05" ixy="0.0" ixz="0.0" iyy="3.0092e-05" iyz="0.0" izz="6.0184e-05"/>
+      <mass value="0.014"/>
+      <inertia ixx="3.763433e-05" ixy="0.0" ixz="0.0" iyy="3.763433e-05" iyz="0.0" izz="7.526866e-05"/>
     </inertial>
   </link>
 
@@ -70,7 +70,7 @@
     <visual>
       <origin xyz="0 0 0"/>
       <geometry>
-        <cylinder radius="0.11785" length="0.01"/>
+        <cylinder radius="0.127" length="0.01"/>
       </geometry>
       <material name="White">
         <color rgba="1 1 1 1.0"/>
@@ -79,8 +79,8 @@
     <!-- No collision here - base_link's single collision_box already bounds
          the whole robot, including this prop's disc (see params.yaml). -->
     <inertial>
-      <mass value="0.013"/>
-      <inertia ixx="3.0092e-05" ixy="0.0" ixz="0.0" iyy="3.0092e-05" iyz="0.0" izz="6.0184e-05"/>
+      <mass value="0.014"/>
+      <inertia ixx="3.763433e-05" ixy="0.0" ixz="0.0" iyy="3.763433e-05" iyz="0.0" izz="7.526866e-05"/>
     </inertial>
   </link>
 
@@ -95,7 +95,7 @@
     <visual>
       <origin xyz="0 0 0"/>
       <geometry>
-        <cylinder radius="0.11785" length="0.01"/>
+        <cylinder radius="0.127" length="0.01"/>
       </geometry>
       <material name="White">
         <color rgba="1 1 1 1.0"/>
@@ -104,8 +104,8 @@
     <!-- No collision here - base_link's single collision_box already bounds
          the whole robot, including this prop's disc (see params.yaml). -->
     <inertial>
-      <mass value="0.013"/>
-      <inertia ixx="3.0092e-05" ixy="0.0" ixz="0.0" iyy="3.0092e-05" iyz="0.0" izz="6.0184e-05"/>
+      <mass value="0.014"/>
+      <inertia ixx="3.763433e-05" ixy="0.0" ixz="0.0" iyy="3.763433e-05" iyz="0.0" izz="7.526866e-05"/>
     </inertial>
   </link>
 
@@ -120,7 +120,7 @@
     <visual>
       <origin xyz="0 0 0"/>
       <geometry>
-        <cylinder radius="0.11785" length="0.01"/>
+        <cylinder radius="0.127" length="0.01"/>
       </geometry>
       <material name="White">
         <color rgba="1 1 1 1.0"/>
@@ -129,8 +129,8 @@
     <!-- No collision here - base_link's single collision_box already bounds
          the whole robot, including this prop's disc (see params.yaml). -->
     <inertial>
-      <mass value="0.013"/>
-      <inertia ixx="3.0092e-05" ixy="0.0" ixz="0.0" iyy="3.0092e-05" iyz="0.0" izz="6.0184e-05"/>
+      <mass value="0.014"/>
+      <inertia ixx="3.763433e-05" ixy="0.0" ixz="0.0" iyy="3.763433e-05" iyz="0.0" izz="7.526866e-05"/>
     </inertial>
   </link>
 

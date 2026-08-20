@@ -106,8 +106,8 @@ def main():
         f"Izz={full_inertia[2,2]:.6f}  Ixz={full_inertia[0,2]:.6f}"
     )
     print(
-        "  (expect from NOTES.md: mass~1.999, CoM~[0.0036, 0, -0.00749], "
-        "Ixx~0.021692, Iyy~0.022495, Izz~0.042039)"
+        "  (expect from NOTES.md 'Repower': mass~2.373, CoM~[0.00303, 0, -0.01571], "
+        "Ixx~0.024360, Iyy~0.025955, Izz~0.046023, Ixz~0.000103)"
     )
 
     env = jinja2.Environment(

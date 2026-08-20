@@ -259,8 +259,8 @@ class F450Config:
         theta_deg = 45.0  # angle of the motors relative to the x-axis in the x-y plane
         theta = np.radians(theta_deg)
 
-        K_T = 1.004544e-05
-        K_M = 0.016
+        K_T = 1.618e-05
+        K_M = 0.015
 
         arm_length = 0.23 # [m] distance from the base_link origin to each motor (in the x-y plane)
         # Columns are ordered [front_right, back_left, front_left, back_right], matching
@@ -274,9 +274,9 @@ class F450Config:
         motor_y = arm_length * np.sin(theta) * np.array([-1.0, +1.0, +1.0, -1.0])
 
         # Moment arms are referenced to the CENTER OF MASS, not the base_link origin, because
-        # that is the point PhysX takes moments about. The two differ by 3.6 mm on this
-        # airframe (the battery sits forward), and referencing the origin instead made a
-        # commanded zero torque produce 0.071 N.m of real pitch torque -- see
+        # that is the point PhysX takes moments about. The two differ by 3.0 mm on this
+        # airframe (the RealSense sits forward on the nose), and referencing the origin
+        # instead made a commanded zero torque produce real pitch torque -- see
         # _urdf_center_of_mass above for what that did to the vehicle.
         #
         # Tx = (y_i - com_y), Ty = -(x_i - com_x), Tz = -motor_directions[i] * K_M
@@ -291,17 +291,20 @@ class F450Config:
 
         class motor_model_config:
             use_rps = True
-            # nominal K_T (Gazebo motorConstant) = 1.004544e-05, randomized +/-10% per episode reset
-            motor_thrust_constant_min = 9.040896e-06
-            motor_thrust_constant_max = 1.104998e-05
+            # K_T nominal 1.618e-05, randomized [0.85, 1.10]. Band is centred on nominal
+            # deliberately: a one-sided range trains against a systematically weaker
+            # vehicle, which is bias, not robustness. Covers thrust-curve uncertainty,
+            # not battery sag (PX4's MPC_USE_HTE absorbs that on the real side).
+            motor_thrust_constant_min = 1.37530e-05
+            motor_thrust_constant_max = 1.77980e-05
             # nominal spin-up tau (Gazebo timeConstantUp) = 0.0125 s, randomized +/-20% per episode reset
             motor_time_constant_increasing_min = 0.01
             motor_time_constant_increasing_max = 0.015
             # nominal spin-down tau (Gazebo timeConstantDown) = 0.025 s, randomized +/-20% per episode reset
             motor_time_constant_decreasing_min = 0.02
             motor_time_constant_decreasing_max = 0.03
-            max_thrust = 10.045  # K_T * maxRotVelocity^2 = 1.004544e-05 * 1000^2 (Gazebo's rotor speed ceiling)
+            max_thrust = 16.18  # K_T * maxRotVelocity^2 = 1.618e-05 * 1000^2 (Gazebo's rotor speed ceiling)
             min_thrust = 0.0
             max_thrust_rate = 100000.0
-            thrust_to_torque_ratio = 0.016  # K_M, same value used in allocation_matrix's yaw row
+            thrust_to_torque_ratio = 0.015  # K_M, same value used in allocation_matrix's yaw row
             use_discrete_approximation = True

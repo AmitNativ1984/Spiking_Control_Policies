@@ -21,13 +21,13 @@
 # they need a distinct rigid body for force application.
 #
 # Sanity check (render.py prints this): composing ALL of base_link_components
-# + the 4 props reproduces the SDF's own "gz sdf, inertial-stats" output
-# recorded in NOTES.md - full-vehicle mass 1.999 kg (T/W ~= 2.05), CoM
-# +3.60mm/X -7.49mm/Z, Ixx/Iyy/Izz 0.021692/0.022495/0.042039 - matching to
+# + the 4 props reproduces the SDF's own composed mass properties recorded in
+# NOTES.md "Repower" - full-vehicle mass 2.373 kg (T/W ~= 2.78), CoM
+# +3.03mm/X -15.71mm/Z, Ixx/Iyy/Izz 0.024360/0.025955/0.046023 - matching to
 # the precision quoted there. NOTES.md flags a qualitative "small Ixz term"
 # (RealSense +X / battery -Z sharing the X-Z plane) without quantifying it;
 # render.py's composition gives it explicitly (1.62e-04 kg*m^2 at the full-
-# vehicle level), since it's exactly computable from the component data.
+# vehicle level, now 1.03e-04), since it's exactly computable from the component data.
 #
 # To regenerate model.urdf after editing this file or the templates/, run:
 #   python3 render.py
@@ -40,26 +40,24 @@ base_link_components:
     position: [0.0, 0.0, 0.0]
     inertia: {ixx: 0.013169, iyy: 0.013169, izz: 0.0258}
 
-  # 4x motor, real DJI F450 spec (57 g each - heavier than the props at 13 g).
-  # Solid-cylinder self-inertia, mounted at the same arm offset as the props
-  # (0.23 m arm * sin45 = 0.162635 m per axis) but 0.012 m below base_link's
-  # origin (props sit 0.0115 m above it - see prop.z below).
+  # 4x SunnySky X2216 880KV, solid-cylinder self-inertia, at the prop arm offset
+  # but 0.012 m below base_link origin.
   - name: motor_front_right
-    mass: 0.057
+    mass: 0.070
     position: [0.162635, -0.162635, -0.012]
-    inertia: {ixx: 2.5685e-06, iyy: 2.5685e-06, izz: 3.7691e-06}
+    inertia: {ixx: 1.0124e-05, iyy: 1.0124e-05, izz: 6.762e-06}
   - name: motor_back_right
-    mass: 0.057
+    mass: 0.070
     position: [-0.162635, -0.162635, -0.012]
-    inertia: {ixx: 2.5685e-06, iyy: 2.5685e-06, izz: 3.7691e-06}
+    inertia: {ixx: 1.0124e-05, iyy: 1.0124e-05, izz: 6.762e-06}
   - name: motor_back_left
-    mass: 0.057
+    mass: 0.070
     position: [-0.162635, 0.162635, -0.012]
-    inertia: {ixx: 2.5685e-06, iyy: 2.5685e-06, izz: 3.7691e-06}
+    inertia: {ixx: 1.0124e-05, iyy: 1.0124e-05, izz: 6.762e-06}
   - name: motor_front_left
-    mass: 0.057
+    mass: 0.070
     position: [0.162635, 0.162635, -0.012]
-    inertia: {ixx: 2.5685e-06, iyy: 2.5685e-06, izz: 3.7691e-06}
+    inertia: {ixx: 1.0124e-05, iyy: 1.0124e-05, izz: 6.762e-06}
 
   - name: realsense_d435
     mass: 0.072
@@ -69,10 +67,11 @@ base_link_components:
     mass: 0.175
     position: [0.0, 0.0, 0.006577]
     inertia: {ixx: 1.35989583e-04, iyy: 1.72579167e-04, izz: 2.72839583e-04}
-  - name: lipo_battery_3s_3000mah
-    mass: 0.182
-    position: [0.0, 0.0, -0.065]
-    inertia: {ixx: 2.94233333e-05, iyy: 1.45903333e-04, izz: 1.51545333e-04}
+  # Pack mass and dimensions are brand-specific: re-derive if yours differs.
+  - name: lipo_battery_4s_5000mah
+    mass: 0.500
+    position: [0.0, 0.0, -0.0671]
+    inertia: {ixx: 1.386667e-04, iyy: 1.043708e-03, izz: 1.097042e-03}
 
 base_link_geometry:
   visual_box:
@@ -86,19 +85,19 @@ base_link_geometry:
   # (props, legs, central hub, RealSense, Orin, battery) - not a hand-picked
   # safety margin. Key extremes:
   #   X/Y: the prop discs are the widest reach - arm offset 0.162635 + prop
-  #        radius 0.11785 = 0.280485 m from center on every side (the legs
+  #        radius 0.127 = 0.289635 m from center on every side (the legs
   #        at 0.1725 and the central hub at 0.09 are both inside this) ->
-  #        full width/depth = 0.56097 m, centered at x=y=0.
+  #        full width/depth = 0.57927 m, centered at x=y=0.
   #   Z top: Jetson Orin devkit top face, 0.006577 + 0.035/2 = 0.024077 m
   #          above origin (the tallest point on the vehicle).
   #   Z bottom: landing leg tips, -0.0975 - 0.18/2 = -0.1875 m below origin.
   #   -> Z span 0.024077 - (-0.1875) = 0.211577 m, centered at
   #      (0.024077 + -0.1875)/2 = -0.081712 m.
   collision_box:
-    size: [0.56097, 0.56097, 0.211577]
+    size: [0.57927, 0.57927, 0.211577]
     origin: [0.0, 0.0, -0.081712]
 
-# Real DJI F450 spec (13 g/prop, D=0.2357 m), thin-rod-about-center inertia
+# 10x4.5 ("1045") prop, 14 g each, D=0.254 m - thin-rod-about-center inertia
 # (izz=m*D^2/12, ixx=iyy=izz/2 by the perpendicular-axis theorem). Arm offset
 # is 0.23 m arm * sin45 = 0.162635 m per axis; z offset 0.0115 m above
 # base_link origin. Visual radius is the true prop radius. No collision
@@ -106,15 +105,15 @@ base_link_geometry:
 # bounds the prop discs (they're the widest reach and set that box's X/Y
 # extent - see the derivation there).
 prop:
-  mass: 0.013
-  radius: 0.11785
+  mass: 0.014
+  radius: 0.127
   visual_length: 0.01
   z: 0.0115
   arm_xy_offset: 0.162635
   inertia:
-    ixx: 3.0092e-05
-    iyy: 3.0092e-05
-    izz: 6.0184e-05
+    ixx: 3.763433e-05
+    iyy: 3.763433e-05
+    izz: 7.526866e-05
 
 # Diagonal opposite pairs share spin direction to cancel reactive yaw torque
 # (front_right/back_left ccw, front_left/back_right cw) - standard quad-X
