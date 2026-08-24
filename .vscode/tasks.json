@@ -142,7 +142,7 @@
             "problemMatcher": [],
             "group": "build"
         },
-                {
+        {
             "label": "PLOT ENCODING Hover PopSAN",
             "type": "shell",
             "command": "python",
@@ -166,7 +166,8 @@
             "type": "shell",
             "command": "python",
             "args": [
-                "-m", "navigation_with_obstacles.training.runner",
+                "-m",
+                "navigation_with_obstacles.training.runner",
                 "--file=navigation_with_obstacles/training/ppo_navigation_ann_local.yaml",
                 "--train",
                 "--headless=True"
@@ -182,7 +183,8 @@
             "type": "shell",
             "command": "python",
             "args": [
-                "-m", "navigation_with_obstacles.training.runner",
+                "-m",
+                "navigation_with_obstacles.training.runner",
                 "--file=navigation_with_obstacles/training/popsan_navigation_local.yaml",
                 "--train",
                 "--headless=True"
@@ -198,7 +200,8 @@
             "type": "shell",
             "command": "python",
             "args": [
-                "-m", "navigation_with_obstacles.training.runner",
+                "-m",
+                "navigation_with_obstacles.training.runner",
                 "--file=navigation_with_obstacles/training/popsan_navigation_local.yaml",
                 "--play",
                 "--num_envs=1",
@@ -218,7 +221,8 @@
             "type": "shell",
             "command": "python",
             "args": [
-                "-m", "navigation_with_obstacles.training.runner",
+                "-m",
+                "navigation_with_obstacles.training.runner",
                 "--file=navigation_with_obstacles/training/ppo_navigation.yaml",
                 "--train",
                 "--headless=True",
@@ -235,7 +239,8 @@
             "type": "shell",
             "command": "python",
             "args": [
-                "-m", "navigation_with_obstacles.training.runner",
+                "-m",
+                "navigation_with_obstacles.training.runner",
                 "--file=navigation_with_obstacles/training/ppo_navigation.yaml",
                 "--play",
                 "--num_envs=1",
@@ -247,6 +252,44 @@
             },
             "problemMatcher": [],
             "group": "test"
+        },
+        {
+            "label": "Train Teacher-Student Warmup",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "-m",
+                "navigation_with_obstacles.training.warmup_snn_from_ann",
+                "--file=navigation_with_obstacles/training/popsan_teacher_student_local.yaml",
+                "--headless=True",
+                "--bounds_episodes=500",
+                "--bounds_envs=16",
+                "--eval",
+                "--eval_max_step=400",
+                "--max_steps=100000",
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "Train Teacher-Student PPO Distillation",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "-m",
+                "navigation_with_obstacles.training.runner",
+                "--file=navigation_with_obstacles/training/popsan_teacher_student_local.yaml",
+                "--train",
+                "--headless=True",
+                "--curriculum_level=25",
+                "--checkpoint=navigation_with_obstacles/runs/warmup_snn_2026-06-25_21-54-13/nn/warmup_snn.pth",
+                "--track",
+                "--wandb-project-name=popsan_ann_teacher_distill"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "group": "build"
         }
     ],
     "inputs": [
@@ -269,6 +312,11 @@
             "id": "navCurriculum",
             "type": "promptString",
             "description": "Curriculum level for Navigation (e.g., 0, 1, 2, ...)"
+        },
+        {
+            "id": "warmupCheckpoint",
+            "type": "promptString",
+            "description": "Path to BC warmup SNN checkpoint (e.g., navigation_with_obstacles/runs/warmup_snn_xxx/nn/warmup_snn.pth)"
         }
     ]
 }

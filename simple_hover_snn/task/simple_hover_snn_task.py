@@ -13,7 +13,7 @@ neural network architecture used in training, not a different task.
 
 from aerial_gym.task.base_task import BaseTask
 from aerial_gym.sim.sim_builder import SimBuilder
-from aerial_gym.utils.math import quat_apply_inverse, quat_axis, get_euler_xyz
+from aerial_gym.utils.math import quat_apply_inverse, quat_axis, get_euler_xyz, ssa
 from aerial_gym.utils.logging import CustomLogger
 
 import torch
@@ -641,8 +641,10 @@ def compute_reward(
     # ============================================================
     # 2. TILT PENALTY (negative for pitch/roll deviation)
     # ============================================================
-    # Extract roll, pitch, yaw from quaternion using built-in function
+    # Extract roll, pitch, yaw from quaternion using built-in function.
+    # ssa() wraps to [-pi, pi]: get_euler_xyz returns angles through `% (2 * pi)`.
     roll, pitch, yaw = get_euler_xyz(robot_orientation)
+    roll, pitch = ssa(roll), ssa(pitch)
 
     # Tilt magnitude: sqrt(pitch^2 + roll^2)
     tilt_magnitude = torch.sqrt(pitch ** 2 + roll ** 2)

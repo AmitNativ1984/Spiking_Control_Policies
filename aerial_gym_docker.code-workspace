@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../../home/amit/DEV/SAIL/sail-uav-core"
+		}
+	],
+	"settings": {
+		"python-envs.defaultEnvManager": "ms-python.python:system",
+		"github.copilot.chat.codeGeneration.useInstructionFiles": true
+	}
+}

@@ -153,9 +153,11 @@ class NavigationWithObstaclesTask(BaseTask):
 
         # VAE warm-up state machine (see check_and_update_curriculum_level):
         #   "A" gated (vae_gate=0) -> "B" ungated consolidation -> "C" normal curriculum.
-        # Only runs when the VAE is part of the observation; otherwise jump straight to "C".
+        # The gating only runs when the VAE is part of the observation AND the run STARTS at
+        # curriculum level 0 (min_level == 0). If we start at level >= 1, there is no empty-room
+        # warm-up to gate, so the VAE is always on (jump straight to phase "C", gate=1.0).
         # task_config.vae_gate is the process-global flag the PopSAN actor reads each forward.
-        if self.task_config.vae_config.use_vae:
+        if self.task_config.vae_config.use_vae and self.curriculum_level == 0:
             self.vae_phase = "A"
             self.task_config.vae_gate = 0.0
         else:
@@ -432,6 +434,13 @@ class NavigationWithObstaclesTask(BaseTask):
         # Timeouts = episode ran out of steps (not arrive/exceed/collision)
         timeouts = timeout_mask.float()
 
+        # Per-env arrival flag, exported so consumers can count successes from the step
+        # return tuple WITHOUT reading the task's *_aggregate fields (which the curriculum
+        # state machine zeroes mid-rollout, corrupting any delta). arrive and exceed both
+        # land in `truncations`, so this is the only way to separate them downstream.
+        # Mirrors the time_outs export below.
+        self.infos["arrivals"] = successes
+
         # rl_games value-bootstrap signal: bootstrap value ONLY on timeout (artificial
         # step-limit cutoff), NOT on arrive/exceed/collision (true terminals). Consumed by
         # a2c_common when value_bootstrap=True: shaped_rewards += gamma * V(s') * time_outs.
@@ -617,8 +626,9 @@ class NavigationWithObstaclesTask(BaseTask):
             self.logged_exceed_rate = float(exceed_rate)
             self.logged_timeout_rate = float(timeout_rate)
 
-            # VAE warm-up phases A/B pin the level at min_level and only handle the gate;
-            # normal increase/decrease runs in phase C. Transitions are monotonic.
+            # VAE warm-up phases A/B pin the level at min_level (== 0; the gating only ever
+            # starts when the run begins at level 0) and only handle the gate; normal
+            # increase/decrease runs in phase C. Transitions are monotonic.
             if self.vae_phase == "A":
                 # Gated: learn pure navigation at level 0 with the VAE cancelled.
                 self.curriculum_level = self.task_config.curriculum.min_level

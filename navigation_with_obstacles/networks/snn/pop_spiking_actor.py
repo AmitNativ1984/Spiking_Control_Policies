@@ -1,4 +1,5 @@
 from rl_games.algos_torch.network_builder import NetworkBuilder
+import math
 import torch.nn as nn
 import snntorch as snn
 from snntorch import surrogate
@@ -97,6 +98,12 @@ class PopulationSpikingActorNetwork(nn.Module):
         self.action_decoder = SpikeDecoder(action_dim=self.action_dim,
                                            pop_dim=actor_config["pop_dim"])
 
+        # State-independent log std of the action distribution. A learnable network
+        # parameter, unrelated to the spiking decoder. Initialized so exp(log_std) ==
+        # sigma_init (default 1.0).
+        sigma_init = actor_config.get("sigma_init", 1.0)
+        self.log_std = nn.Parameter(torch.full((action_dim,), math.log(sigma_init)))
+
         # First encoder column belonging to the VAE-latent block. The population encoder
         # lays out obs dim d in columns [d*pop_dim : (d+1)*pop_dim], so the latents (obs
         # dims [state_dims : input_dim]) start at state_dims*pop_dim. Derived from config
@@ -106,7 +113,18 @@ class PopulationSpikingActorNetwork(nn.Module):
             task_config.vae_config.latent_dims if task_config.vae_config.use_vae else 0
         )
         self._lat_col_start = state_dims * self.pop_dim
-    
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # Back-compat: log_std used to live on the decoder (action_decoder.log_std)
+        # and warmup left it at its stale init (std=1.0). Legacy checkpoints have no
+        # top-level log_std, so seed it from the freshly built sigma_init value to
+        # satisfy strict loading; checkpoints that already trained log_std keep theirs.
+        state_dict.pop(prefix + "action_decoder.log_std", None)
+        log_std_key = prefix + "log_std"
+        if log_std_key not in state_dict:
+            state_dict[log_std_key] = self.log_std.data.clone()
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
     def is_rnn(self):
         """Required by rl_games - indicates this is not an RNN network."""
         return False
@@ -166,5 +184,6 @@ class PopulationSpikingActorNetwork(nn.Module):
             
         output_spike_act /= self.num_steps  # Average over timesteps to get mean spike activity for decoding
         output_spike_act = output_spike_act.view(-1, self.action_dim, self.pop_dim)
-        action_mu, action_log_std = self.action_decoder(output_spike_act)
+        action_mu = self.action_decoder(output_spike_act)
+        action_log_std = self.log_std.expand_as(action_mu)
         return action_mu, action_log_std

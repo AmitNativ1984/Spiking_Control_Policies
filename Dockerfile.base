@@ -77,6 +77,36 @@ RUN pip install -e .
 RUN pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python || true && \
     pip install --no-cache-dir opencv-python==4.5.5.64
 
+# Replace urdfpy with urchin, its maintained fork.
+#
+# urdfpy 0.0.22 is the final release (project abandoned) and its Cylinder.meshes is
+# broken two ways: _meshes initialises to None instead of [] (so len() raises
+# "object of type 'NoneType' has no len()") and it returns self._mesh instead of
+# self._meshes. Box and Sphere are both correct. The result is that EVERY urdf using
+# a <cylinder> primitive fails urdfpy's visual_trimesh_fk(), which is the code path
+# aerial_gym/assets/warp_asset.py takes -- killing all 100 tree assets (26 cylinders
+# each) and the cylinder obstacles. With use_warp=True the env dies before the sim is
+# built, and the traceback points at asset loading rather than at urdfpy.
+# urchin fixes both bugs and also drops the deprecated np.float usage.
+#
+# --no-deps is deliberate: urchin requires pyribbit (a pyrender fork), which would drag
+# a GL stack into an image that intentionally removes Mesa EGL above. The parser only
+# needs lxml/networkx/numpy/trimesh/six, all already present; pycollada is unnecessary
+# because none of the bundled assets are .dae.
+#
+# aerial_gym hardcodes `from urdfpy import URDF`, so a shim module keeps upstream
+# untouched and fixes every consumer of urdfpy at once.
+RUN pip uninstall -y urdfpy && \
+    pip install --no-cache-dir --no-deps urchin==0.0.29 && \
+    printf '%s\n' \
+      '"""Shim: urdfpy is abandoned; redirect to the maintained fork urchin."""' \
+      'from urchin import *  # noqa: F401,F403' \
+      'from urchin import URDF, Box, Cylinder, Sphere, Mesh, Geometry  # noqa: F401' \
+      'from urchin.utils import (  # noqa: F401' \
+      '    rpy_to_matrix, matrix_to_rpy, xyz_rpy_to_matrix, matrix_to_xyz_rpy,' \
+      ')' \
+      > /usr/local/lib/python3.8/dist-packages/urdfpy.py
+
 FROM aerial_gym AS dev
 
 RUN pip install \

@@ -31,6 +31,7 @@ from rl_games.common.algo_observer import IsaacAlgoObserver
 from rl_games.torch_runner import Runner
 
 
+import subprocess
 from aerial_gym.registry.task_registry import task_registry
 from aerial_gym.registry.env_registry import env_config_registry
 from aerial_gym.registry.robot_registry import robot_registry
@@ -46,8 +47,33 @@ from navigation_with_obstacles.config.robot_config import NavQuadWithCameraCfg
 from navigation_with_obstacles.networks.snn.popsan import POPSANNetworkBuilder
 from navigation_with_obstacles.networks.ann.actor_critic import MLPActorCriticNetworkBuilder
 from navigation_with_obstacles.networks.ann.gru_actor_critic import GRUActorCriticNetworkBuilder
+from navigation_with_obstacles.agents.a2c_teacher_agent import A2CTeacherAgent
 from rl_games.algos_torch import model_builder
 from rl_games.algos_torch.a2c_continuous import A2CAgent
+from rl_games.algos_torch import players as _rlg_players
+
+
+def _git_info():
+    repo = os.path.dirname(os.path.abspath(__file__))
+
+    def _run(cmd):
+        try:
+            return subprocess.check_output(
+                cmd, cwd=repo, stderr=subprocess.DEVNULL
+            ).decode().strip()
+        except Exception:
+            return None
+
+    commit = _run(["git", "rev-parse", "HEAD"])
+    count = _run(["git", "rev-list", "--count", "HEAD"])
+    status = _run(["git", "status", "--porcelain"])
+    return {
+        "git_commit": commit,
+        "git_commit_short": commit[:8] if commit else None,
+        "git_commit_number": int(count) if count and count.isdigit() else None,
+        "git_branch": _run(["git", "rev-parse", "--abbrev-ref", "HEAD"]),
+        "git_dirty": bool(status) if status is not None else None,
+    }
 
 # =============================================================================
 # Register Custom Environment, Task, and Networks
@@ -275,6 +301,17 @@ def get_args():
             "action": "store_true",
             "help": "Debug: when combined with --play, record PopSAN encoder activations and plot at end. Forces num_envs=1.",
         },
+        {
+            "name": "--recompute_bounds",
+            "action": "store_true",
+            "help": "Force re-collection of PopSAN encoder observation_bounds even if a cache exists (student/PopSAN --train runs only).",
+        },
+        {
+            "name": "--bounds_steps",
+            "type": int,
+            "default": 10000,
+            "help": "Steps to collect when auto-computing PopSAN encoder observation_bounds.",
+        },
     ]
     args = parse_arguments(
         description="Navigation with Obstacles",
@@ -285,6 +322,88 @@ def get_args():
     if args.sim_device == "cuda":
         args.sim_device += f":{args.sim_device_id}"
     return args
+
+
+def _auto_set_observation_bounds(teacher_ckpt, config_path, num_envs, num_steps, recompute,
+                                 min_episodes=0, out_dir=None, curriculum_level=25,
+                                 bound_method="gaussian"):
+    """Set task_config.observation_bounds for the PopSAN encoder from collected
+    p01/p99 stats. Runs the collector in a SEPARATE subprocess (Isaac Gym allows
+    only one sim per process), which writes a JSON cache; this loads the cache.
+
+    `config_path` is the student YAML, forwarded to the collector so it reads the
+    teacher network architecture from config.distillation (single source of truth).
+
+    Reuses an existing cache only if it matches BOTH obs_dim AND the current teacher
+    checkpoint (a cache built with a different teacher is stale). `recompute` forces a
+    fresh collection. When `min_episodes`/`out_dir` are given they are forwarded to the
+    collector (episode-based stop + where the bounds-encoder PNGs are written).
+    `curriculum_level` pins the collector's env to the teacher's level (default 25) and
+    VAE-on state, so bounds reflect the world the student is actually deployed in.
+    """
+    import json
+    import subprocess
+    from navigation_with_obstacles.tools.collect_obs_stats import DEFAULT_BOUNDS_CACHE
+
+    obs_dim = task_config.observation_space_dim
+    cache = DEFAULT_BOUNDS_CACHE
+
+    def _load_valid_cache():
+        if not os.path.exists(cache):
+            return None
+        try:
+            with open(cache) as f:
+                payload = json.load(f)
+        except Exception as e:
+            logger.warning(f"[obs-bounds] cache unreadable ({e}); will recompute.")
+            return None
+        if payload.get("obs_dim") != obs_dim or \
+           len(payload.get("observation_bounds", [])) != obs_dim:
+            logger.warning(f"[obs-bounds] cache obs_dim mismatch "
+                           f"({payload.get('obs_dim')} != {obs_dim}); will recompute.")
+            return None
+        if payload.get("teacher_checkpoint") != teacher_ckpt:
+            logger.warning(f"[obs-bounds] cache was built for a different teacher "
+                           f"({payload.get('teacher_checkpoint')!r} != {teacher_ckpt!r}); "
+                           "will recompute.")
+            return None
+        return [tuple(b) for b in payload["observation_bounds"]]
+
+    bounds = None if recompute else _load_valid_cache()
+
+    if bounds is None:
+        logger.info(f"[obs-bounds] collecting bounds in a subprocess "
+                    f"(teacher={teacher_ckpt}, steps={num_steps}, episodes={min_episodes}, "
+                    f"envs={num_envs})")
+        cmd = [
+            sys.executable, "-m", "navigation_with_obstacles.tools.collect_obs_stats",
+            f"--teacher_checkpoint={teacher_ckpt}",
+            f"--config={config_path}",
+            f"--num_steps={num_steps}",
+            f"--num_envs={num_envs}",
+            f"--bounds_cache={cache}",
+            f"--curriculum_level={curriculum_level}",
+            f"--bound_method={bound_method}",
+            "--no_wandb",
+        ]
+        if min_episodes and min_episodes > 0:
+            cmd.append(f"--min_episodes={min_episodes}")
+        if out_dir:
+            cmd.append(f"--out_dir={out_dir}")
+        result = subprocess.run(cmd, cwd="/workspaces/aerial_gym_docker")
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"[obs-bounds] collection subprocess failed (exit {result.returncode}); "
+                "fix the teacher checkpoint / collector before training the student.")
+        bounds = _load_valid_cache()
+        if bounds is None:
+            raise RuntimeError("[obs-bounds] subprocess finished but produced no valid cache.")
+
+    assert len(bounds) == obs_dim, \
+        f"[obs-bounds] got {len(bounds)} bounds, expected {obs_dim}"
+    task_config.observation_bounds = bounds
+    logger.info(f"[obs-bounds] task_config.observation_bounds set from cache "
+                f"({len(bounds)} dims).")
 
 
 def update_config(config, args):
@@ -369,7 +488,8 @@ if __name__ == "__main__":
         # full date+time stamp: <name>_YYYY-MM-DD_HH-MM-SS
         experiment_name = config["params"]["config"]["name"]
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        config["params"]["config"]["full_experiment_name"] = f"{experiment_name}_{timestamp}"
+        full_experiment_name = f"{experiment_name}_{timestamp}"
+        config["params"]["config"]["full_experiment_name"] = full_experiment_name
 
         # DEBUG: surface the runtime values rl_games will actually use
         logger.debug(f"[DEBUG] args['num_envs'] = {args.get('num_envs')!r} (type={type(args.get('num_envs')).__name__})")
@@ -379,7 +499,42 @@ if __name__ == "__main__":
         logger.debug(f"[DEBUG] config.minibatch_size        = {config['params']['config']['minibatch_size']}")
         logger.debug(f"[DEBUG] config.seq_length            = {config['params']['config'].get('seq_length')}")
 
+        # --- Phase 2: auto-set PopSAN encoder observation_bounds ------------
+        # For a student (PopSAN) training run with a configured teacher, set
+        # task_config.observation_bounds from per-dim p01/p99 collected in the
+        # teacher's NORMALIZED obs space, BEFORE the network is built (the encoder
+        # reads observation_bounds at construction).
+        #
+        # Collection itself runs in a SEPARATE subprocess: Isaac Gym does not
+        # support creating a second sim in a process that will create another, so
+        # we never build the collector's env in the training process. The
+        # subprocess writes a JSON cache; we load it here. Cache is reused unless
+        # --recompute_bounds is passed.
+        net_name = config["params"]["network"]["name"]
+        distill_cfg = config["params"]["config"].get("distillation")
+        if args.get("train") and net_name == "PopSAN" and distill_cfg is not None:
+            teacher_ckpt = distill_cfg.get("checkpoint")
+            if teacher_ckpt and os.path.exists(teacher_ckpt):
+                _auto_set_observation_bounds(
+                    teacher_ckpt=teacher_ckpt,
+                    config_path=config_name,
+                    num_envs=min(config["params"]["config"]["env_config"]["num_envs"], 64),
+                    num_steps=args.get("bounds_steps", 10000),
+                    recompute=args.get("recompute_bounds", False),
+                )
+            else:
+                logger.warning(
+                    f"[obs-bounds] distillation.checkpoint missing/not found "
+                    f"({teacher_ckpt!r}); using task_config default bounds.")
+
         runner = Runner(algo_observer=IsaacAlgoObserver())
+        # Register the teacher-student PPO agent (adds the annealed ANN->SNN distillation
+        # tail on top of standard PPO). Selected via the YAML's `algo.name: a2c_teacher`.
+        # The player is the stock continuous PPO player — distillation only affects training.
+        runner.algo_factory.register_builder(
+            "a2c_teacher", lambda **kwargs: A2CTeacherAgent(**kwargs))
+        runner.player_factory.register_builder(
+            "a2c_teacher", lambda **kwargs: _rlg_players.PpoPlayerContinuous(**kwargs))
         try:
             runner.load(config)
         except yaml.YAMLError as exc:
@@ -388,11 +543,23 @@ if __name__ == "__main__":
 
     rank = int(os.getenv("LOCAL_RANK", "0"))
     if args["track"] and rank == 0:
+        git_info = _git_info()
+        # Record git provenance in the run config so the run can always be
+        # restored to its exact code state (commit hash + commit number).
+        wandb_config = dict(config)
+        wandb_config["git"] = git_info
+        logger.info(
+            f"[wandb] git commit {git_info['git_commit_short']} "
+            f"(#{git_info['git_commit_number']}, branch {git_info['git_branch']}, "
+            f"dirty={git_info['git_dirty']})"
+        )
+
         wandb.init(
             project=args["wandb_project_name"],
             entity=args["wandb_entity"],
+            name=full_experiment_name,
             sync_tensorboard=True,
-            config=config,
+            config=wandb_config,
             monitor_gym=True,
             save_code=True,
         )
@@ -403,12 +570,11 @@ if __name__ == "__main__":
         "Starting training..." if args.get("train") else "Starting playback..."
     )
 
-    # Inference/play always runs with the VAE fully enabled, regardless of any curriculum
-    # warm-up phase a checkpoint was saved in. The training-time gate (Phase A=0.0) is a
-    # warm-up device only; the task's curriculum state machine drives it during --train.
+    # The VAE is always on (gate=1.0) in both train and play; the task sets it in __init__.
+    # This is a defensive re-assert for play mode.
     if not args.get("train"):
         task_config.vae_gate = 1.0
-        logger.info("[VAE warm-up] play mode: forcing task_config.vae_gate = 1.0 (full VAE)")
+        logger.info("[VAE] play mode: forcing task_config.vae_gate = 1.0 (full VAE)")
 
     if plot_encoding:
         # Wrap run_play: enable recording on the encoder right after player construction,
@@ -458,6 +624,30 @@ if __name__ == "__main__":
     runner.run(args)
 
     if args["track"] and rank == 0:
+        # Link the trained weights to this W&B run as a versioned artifact so the
+        # graphs and the model that produced them stay together. rl_games saves the
+        # best/last weights at <runs_dir>/<full_experiment_name>/nn/<name>.pth.
+        if args.get("train"):
+            best_ckpt = os.path.join(
+                runs_dir, full_experiment_name, "nn", f"{experiment_name}.pth"
+            )
+            if os.path.exists(best_ckpt):
+                artifact = wandb.Artifact(
+                    name=f"{experiment_name}-weights",
+                    type="model",
+                    metadata={
+                        "git_commit": git_info["git_commit_short"],
+                        "git_commit_number": git_info["git_commit_number"],
+                        "git_branch": git_info["git_branch"],
+                        "git_dirty": git_info["git_dirty"],
+                    },
+                )
+                artifact.add_file(best_ckpt)
+                wandb.log_artifact(artifact)
+                logger.info(f"[wandb] logged model artifact from {best_ckpt}")
+            else:
+                logger.warning(
+                    f"[wandb] no checkpoint found at {best_ckpt}; skipping artifact upload")
         wandb.finish()
 
     logger.info("Done!")

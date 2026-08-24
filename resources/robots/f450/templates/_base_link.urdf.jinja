@@ -1,0 +1,28 @@
+  <link name="base_link">
+    <visual>
+      <origin xyz="{{ base_link.visual_box.origin | join(' ') }}"/>
+      <geometry>
+        <box size="{{ base_link.visual_box.size | join(' ') }}"/>
+      </geometry>
+      <material name="Gray">
+        <color rgba="0.175 0.175 0.175 1.0"/>
+      </material>
+    </visual>
+
+    <!-- Single tight box bounding the entire robot - see params.yaml
+         base_link_geometry.collision_box for the derivation. -->
+    <collision>
+      <origin xyz="{{ base_link.collision_box.origin | join(' ') }}"/>
+      <geometry>
+        <box size="{{ base_link.collision_box.size | join(' ') }}"/>
+      </geometry>
+    </collision>
+
+    <inertial>
+      <!-- CoM offset from the frame geometric center (base_link origin):
+           +3.1mm forward (RealSense on the nose), -16.4mm down (belly battery). -->
+      <origin xyz="{{ base_link.com | join(' ') }}"/>
+      <mass value="{{ base_link.mass }}"/>
+      <inertia ixx="{{ base_link.inertia.ixx }}" ixy="{{ base_link.inertia.ixy }}" ixz="{{ base_link.inertia.ixz }}" iyy="{{ base_link.inertia.iyy }}" iyz="{{ base_link.inertia.iyz }}" izz="{{ base_link.inertia.izz }}"/>
+    </inertial>
+  </link>

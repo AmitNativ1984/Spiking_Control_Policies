@@ -23,23 +23,20 @@ class SpikeDecoder(nn.Module):
 
         self.action_dim = action_dim
         self.pop_dim = pop_dim
-        self.decoder = nn.Conv1d(in_channels=action_dim, 
-                                 out_channels=action_dim, 
+        self.decoder = nn.Conv1d(in_channels=action_dim,
+                                 out_channels=action_dim,
                                  kernel_size=pop_dim,
                                  groups=action_dim)  # Shape: [batch_size, action_dim, 1] after decoding - one value per action dimension
-        self.log_std = nn.Parameter(torch.zeros(action_dim))
 
     def forward(self, mean_spikes: torch.Tensor) -> torch.Tensor:
-        """Decode the latent spike activity into action distribution parameters.
-        
+        """Decode the latent spike activity into the action mean.
+
         Args:
             mean_spikes(torch.Tensor): Tensor of shape [batch_size, action_dim, pop_dim]
         Returns:
-            torch.Tensor: Action distribution parameters tensor of shape [batch_size, action_dim].
+            torch.Tensor: Action mean tensor of shape [batch_size, action_dim].
         """
 
-        
         action_mu = self.decoder(mean_spikes).squeeze(-1)  # Shape: [batch_size, action_dim]
-        action_log_std = self.log_std.expand_as(action_mu)
-        return action_mu, action_log_std
+        return action_mu
     

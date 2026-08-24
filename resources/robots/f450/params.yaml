@@ -1,0 +1,138 @@
+# Single source of truth for the F450 URDF's physical parameters.
+#
+# All numbers here are individual, real components ported from the Gazebo
+# SITL source of truth: sail-uav-core/gazebo-sitl/models/f450/model.sdf
+# (+ NOTES.md), which models the frame, each motor, the RealSense D435, the
+# Jetson Orin devkit, and the 3S 3000mAh LiPo as separate links (exactly so
+# each one's parallel-axis contribution to the airframe's inertia is
+# individually correct and independently editable) plus the 4 props.
+#
+# base_link_components below are lumped into ONE rigid body in the URDF
+# (matching resources/robots/x500/model.urdf's single-base_link pattern,
+# and because none of them need their own force-application point the way
+# props do - aerial_gym applies thrust/torque at the prop links, not at a
+# motor stator link). render.py composes their mass/CoM/inertia via the
+# parallel axis theorem at render time - base_link's <inertial> block in
+# model.urdf is DERIVED, never hand-typed. To change any one component's
+# mass or position (e.g. swap motors, move the battery), edit its entry here
+# and rerun render.py; base_link's aggregate numbers update automatically.
+#
+# Props stay separate URDF links (own mass/inertia/position below) since
+# they need a distinct rigid body for force application.
+#
+# Sanity check (render.py prints this): composing ALL of base_link_components
+# + the 4 props reproduces the SDF's own composed mass properties recorded in
+# NOTES.md "Repower" - full-vehicle mass 2.373 kg (T/W ~= 2.78), CoM
+# +3.03mm/X -15.71mm/Z, Ixx/Iyy/Izz 0.024360/0.025955/0.046023 - matching to
+# the precision quoted there. NOTES.md flags a qualitative "small Ixz term"
+# (RealSense +X / battery -Z sharing the X-Z plane) without quantifying it;
+# render.py's composition gives it explicitly (1.62e-04 kg*m^2 at the full-
+# vehicle level, now 1.03e-04), since it's exactly computable from the component data.
+#
+# To regenerate model.urdf after editing this file or the templates/, run:
+#   python3 render.py
+
+base_link_components:
+  - name: frame
+    # Frame + ESC + FC + wiring only (SDF base_link, with battery/motors/
+    # props already split into their own links there).
+    mass: 1.290
+    position: [0.0, 0.0, 0.0]
+    inertia: {ixx: 0.013169, iyy: 0.013169, izz: 0.0258}
+
+  # 4x SunnySky X2216 880KV, solid-cylinder self-inertia, at the prop arm offset
+  # but 0.012 m below base_link origin.
+  - name: motor_front_right
+    mass: 0.070
+    position: [0.162635, -0.162635, -0.012]
+    inertia: {ixx: 1.0124e-05, iyy: 1.0124e-05, izz: 6.762e-06}
+  - name: motor_back_right
+    mass: 0.070
+    position: [-0.162635, -0.162635, -0.012]
+    inertia: {ixx: 1.0124e-05, iyy: 1.0124e-05, izz: 6.762e-06}
+  - name: motor_back_left
+    mass: 0.070
+    position: [-0.162635, 0.162635, -0.012]
+    inertia: {ixx: 1.0124e-05, iyy: 1.0124e-05, izz: 6.762e-06}
+  - name: motor_front_left
+    mass: 0.070
+    position: [0.162635, 0.162635, -0.012]
+    inertia: {ixx: 1.0124e-05, iyy: 1.0124e-05, izz: 6.762e-06}
+
+  - name: realsense_d435
+    mass: 0.072
+    position: [0.10, 0.0, -0.03]
+    inertia: {ixx: 5.235e-05, iyy: 7.5e-06, izz: 5.235e-05}
+  - name: jetson_orin_devkit
+    mass: 0.175
+    position: [0.0, 0.0, 0.006577]
+    inertia: {ixx: 1.35989583e-04, iyy: 1.72579167e-04, izz: 2.72839583e-04}
+  # Pack mass and dimensions are brand-specific: re-derive if yours differs.
+  - name: lipo_battery_4s_5000mah
+    mass: 0.500
+    position: [0.0, 0.0, -0.0671]
+    inertia: {ixx: 1.386667e-04, iyy: 1.043708e-03, izz: 1.097042e-03}
+
+base_link_geometry:
+  visual_box:
+    size: [0.18, 0.18, 0.08]
+    origin: [0.0, 0.0, -0.03]
+  # Single tight collision box bounding the ENTIRE robot (replaces the old
+  # 5-box central-hub+legs collision; props have no collision of their own
+  # any more either - one shape total, on base_link).
+  #
+  # Derived as the axis-aligned min/max over every real part's own geometry
+  # (props, legs, central hub, RealSense, Orin, battery) - not a hand-picked
+  # safety margin. Key extremes:
+  #   X/Y: the prop discs are the widest reach - arm offset 0.162635 + prop
+  #        radius 0.127 = 0.289635 m from center on every side (the legs
+  #        at 0.1725 and the central hub at 0.09 are both inside this) ->
+  #        full width/depth = 0.57927 m, centered at x=y=0.
+  #   Z top: Jetson Orin devkit top face, 0.006577 + 0.035/2 = 0.024077 m
+  #          above origin (the tallest point on the vehicle).
+  #   Z bottom: landing leg tips, -0.0975 - 0.18/2 = -0.1875 m below origin.
+  #   -> Z span 0.024077 - (-0.1875) = 0.211577 m, centered at
+  #      (0.024077 + -0.1875)/2 = -0.081712 m.
+  collision_box:
+    size: [0.57927, 0.57927, 0.211577]
+    origin: [0.0, 0.0, -0.081712]
+
+# 10x4.5 ("1045") prop, 14 g each, D=0.254 m - thin-rod-about-center inertia
+# (izz=m*D^2/12, ixx=iyy=izz/2 by the perpendicular-axis theorem). Arm offset
+# is 0.23 m arm * sin45 = 0.162635 m per axis; z offset 0.0115 m above
+# base_link origin. Visual radius is the true prop radius. No collision
+# geometry of its own - the single base_link.collision_box above already
+# bounds the prop discs (they're the widest reach and set that box's X/Y
+# extent - see the derivation there).
+prop:
+  mass: 0.014
+  radius: 0.127
+  visual_length: 0.01
+  z: 0.0115
+  arm_xy_offset: 0.162635
+  inertia:
+    ixx: 3.763433e-05
+    iyy: 3.763433e-05
+    izz: 7.526866e-05
+
+# Diagonal opposite pairs share spin direction to cancel reactive yaw torque
+# (front_right/back_left ccw, front_left/back_right cw) - standard quad-X
+# mixing. URDF fixed joints don't encode spin direction; recorded here for
+# whoever wires up the motor model.
+props:
+  - name: front_right
+    x_sign: 1
+    y_sign: -1
+    spin: ccw
+  - name: back_right
+    x_sign: -1
+    y_sign: -1
+    spin: cw
+  - name: back_left
+    x_sign: -1
+    y_sign: 1
+    spin: ccw
+  - name: front_left
+    x_sign: 1
+    y_sign: 1
+    spin: cw
