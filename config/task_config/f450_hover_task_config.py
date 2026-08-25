@@ -51,6 +51,24 @@ class task_config:
     # again; keep the penalty and they are not.
     observation_space_dim = 16
 
+    # What each dimension means; must match process_obs_for_task(). The encoder's clamp
+    # windows per type live with the encoder, not here.
+    # "position_error" is its own type because bounds_from_layout refuses unknown ones.
+    # It keeps the shared ±3 window: measured over a 400-step rollout, this dim z-scores to
+    # max|z| 3.66 and fires all 10 receptive fields. Narrowing to ±2 clips real tails.
+    observation_layout = [
+        (slice(0, 3),   "position_error"),  # to target, vehicle (yaw-only) frame, metres
+        (slice(3, 6),   "gravity"),         # gravity in body frame, unit vector
+        (slice(6, 9),   "linvel"),          # body linear velocity
+        (slice(9, 12),  "angvel"),          # body angular velocity, from the IMU gyro
+        (slice(12, 16), "prev_action"),     # raw clamped [-1, 1]
+    ]
+
+    # Fails at import rather than mid-rollout.
+    assert sorted(i for sl, _ in observation_layout for i in range(sl.start, sl.stop)) \
+        == list(range(observation_space_dim)), \
+        "observation_layout must cover every index in [0, observation_space_dim) exactly once"
+
     # Action space dim (network output): [thrust_cmd, roll_cmd, pitch_cmd, yaw_rate_cmd]
     # Matches LeeAttitudeController expected format directly
     action_space_dim = 4

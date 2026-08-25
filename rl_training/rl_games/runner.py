@@ -23,10 +23,10 @@ from loguru import logger
 from rl_games.common.algo_observer import IsaacAlgoObserver
 from rl_games.torch_runner import Runner
 
+from aerial_gym.registry.task_registry import task_registry
 from aerial_gym.utils.helpers import parse_arguments
 
 import config  # noqa: F401  — registers the env, robot and task
-from config.task_config import F450NavTaskConfig as task_config
 
 from . import RUNS_DIR
 from .agents import register_algos
@@ -88,6 +88,9 @@ def get_args():
     if not args.file:
         sys.exit("--file is required: path to a config YAML under "
                  "rl_training/rl_games/cfg/")
+    if args.task not in task_registry.get_task_names():
+        sys.exit(f"--task must be a registered task, got {args.task!r}. "
+                 f"Known: {task_registry.get_task_names()}")
 
     args.sim_device_id = args.compute_device_id
     args.sim_device = args.sim_device_type
@@ -128,9 +131,19 @@ def apply_args(config_dict, args):
     # Task-config overrides. These reach the task through the config class itself, which
     # the task reads at construction — so they must be set before the env is built.
     if args.get("curriculum_level") is not None:
+        task_config = task_registry.get_task_config(args["task"])
+        if not hasattr(task_config, "curriculum"):
+            raise ValueError(
+                f"--curriculum_level was passed but task {args['task']!r} has no curriculum."
+            )
         task_config.curriculum.min_level = args["curriculum_level"]
         task_config.curriculum.max_level = args["curriculum_level"]
     if args.get("exceed_margin") is not None:
+        task_config = task_registry.get_task_config(args["task"])
+        if not hasattr(task_config, "exceed_bounds_margin"):
+            raise ValueError(
+                f"--exceed_margin was passed but task {args['task']!r} does not read it."
+            )
         task_config.exceed_bounds_margin = args["exceed_margin"]
 
     if args.get("checkpoint"):
@@ -167,6 +180,7 @@ def resolve_encoder_bounds(config_dict, args):
     from .tools.collect_obs_stats import load_or_collect_bounds
 
     bounds = load_or_collect_bounds(
+        task_name=args["task"],
         teacher_checkpoint=teacher_ckpt,
         config_path=args["file"],
         num_envs=min(config_dict["params"]["config"]["env_config"]["num_envs"], 64),
@@ -202,7 +216,7 @@ def load_config(args):
     # Measured bounds win; bind_encoder_bounds fills in the layout-derived defaults for
     # any run that didn't collect them (setdefault, so it never overwrites the above).
     resolve_encoder_bounds(config_dict, args)
-    bind_encoder_bounds(config_dict, task_config)
+    bind_encoder_bounds(config_dict)
 
     return config_dict
 
@@ -212,11 +226,11 @@ def load_config(args):
 # =============================================================================
 
 
-def install_encoder_recording(runner):
+def install_encoder_recording(runner, task_config):
     """Wrap runner.run_play so the PopSAN encoder records its activations during playback
     and plots them once the play loop returns. Debug-only.
 
-    Takes no args: rl_games passes them to run_play itself, as `play_args` below.
+    `play_args` comes from rl_games, which passes it to run_play itself.
     """
     def run_play_with_recording(play_args):
         from rl_games.torch_runner import _override_sigma, _restore
@@ -240,12 +254,12 @@ def install_encoder_recording(runner):
         finally:
             encoder.record = False
             logger.info(f"[plot-encoding] recorded {len(encoder._trace)} forward passes")
-            _plot_recorded_trace(encoder, play_args.get("checkpoint"))
+            _plot_recorded_trace(encoder, play_args.get("checkpoint"), task_config)
 
     runner.run_play = run_play_with_recording
 
 
-def _plot_recorded_trace(encoder, checkpoint):
+def _plot_recorded_trace(encoder, checkpoint, task_config):
     """Save the encoder plots next to the checkpoint's run directory (weights live in
     <run_dir>/nn/, so the run dir is two levels up). Best-effort."""
     try:
@@ -302,7 +316,7 @@ def main():
 
     logger.info("Starting training..." if args.get("train") else "Starting playback...")
     if plot_encoding:
-        install_encoder_recording(runner)
+        install_encoder_recording(runner, task_registry.get_task_config(args["task"]))
     runner.run(args)
 
     if tracking:

@@ -42,11 +42,29 @@ from torch.utils.tensorboard import SummaryWriter
 
 import config  # registers the env, robot and task
 from aerial_gym.registry.task_registry import task_registry
-from config.task_config import F450NavTaskConfig as task_config
 
 from .. import DEFAULT_BOUNDS_CACHE, OBS_STATS_DIR, REPO_ROOT
 
-TASK_NAME = "f450_navigation_task"
+DEFAULT_TASK_NAME = "f450_navigation_task"
+
+
+def resolve_task(config_path, task_name=None):
+    """(task_name, task_config) for the student YAML at `config_path`.
+
+    The config names its own task in `config.env_name`, the same key the runner uses, so
+    the measured bounds cannot be collected against a different task than the one that
+    will consume them.
+    """
+    if task_name is None and config_path is not None:
+        try:
+            import yaml
+            with open(config_path, encoding="utf-8") as f:
+                task_name = yaml.safe_load(f)["params"]["config"]["env_name"]
+        except Exception as e:
+            print(f"[obs-stats] couldn't read env_name from {config_path} ({e}); "
+                  f"falling back to {DEFAULT_TASK_NAME}.")
+    task_name = task_name or DEFAULT_TASK_NAME
+    return task_name, task_registry.get_task_config(task_name)
 
 # This module's own dotted path, used to re-launch it as a subprocess (see
 # load_or_collect_bounds). Hard-coded rather than derived, because __spec__.name is
@@ -64,7 +82,7 @@ UPPER_PCT = 99.0
 #                  for the SAME coverage band (z(99%) ~= 2.326). CENTERED on the mean (center of
 #                  mass) and symmetric. Cleaner centering, but imposes symmetry — for strongly
 #                  skewed dims it clips the long-tail side and over-extends the short side.
-DEFAULT_BOUND_METHOD = "gaussian"
+DEFAULT_BOUND_METHOD = "gaussian"  # "gaussian" is the other option
 
 
 def _gaussian_z(upper_pct):
@@ -123,7 +141,7 @@ def _compute_bounds(bounds_arr, method, lower_pct, upper_pct):
     return lo, hi
 
 
-def _obs_names(obs_dim: int):
+def _obs_names(obs_dim: int, task_config):
     """Names per obs dim, derived from the task's observation_layout so they stay in sync
     with the real vector (state dims + however many VAE latents)."""
     names = [None] * obs_dim
@@ -134,15 +152,35 @@ def _obs_names(obs_dim: int):
     return [n if n is not None else f"dim_{i}" for i, n in enumerate(names)]
 
 
-def _load_distillation_cfg(config_path):
-    """Read the `params.config.distillation` block from a student YAML. This is the SINGLE
-    source of truth for the teacher's architecture / normalization, so the collector never
-    duplicates the teacher network dims."""
+def _load_teacher_cfg(config_path, teacher_config_path=None):
+    """The teacher's architecture + normalization, from exactly one source of truth.
+
+    Two shapes, because there are two ways to have a teacher:
+      * `--teacher_config` pointing at the ANN's OWN training YAML (e.g. ppo_hover_local),
+        whose `network:` block IS the teacher. This is the path for measuring bounds off a
+        trained policy without distilling from it.
+      * otherwise the student YAML's `config.distillation` block, which restates the
+        teacher's architecture for the distillation run.
+    """
     import yaml
-    with open(config_path) as f:
+
+    if teacher_config_path is not None:
+        with open(teacher_config_path, encoding="utf-8") as f:
+            params = yaml.safe_load(f)["params"]
+        cfg = params["config"]
+        return {
+            "network": params["network"],
+            "model_name": params["model"]["name"],
+            "normalize_input": cfg.get("normalize_input", True),
+            "normalize_value": cfg.get("normalize_value", True),
+        }
+
+    with open(config_path, encoding="utf-8") as f:
         params = yaml.safe_load(f)["params"]
     distill = params.get("config", {}).get("distillation")
-    assert distill is not None, f"{config_path} has no config.distillation block"
+    assert distill is not None, (
+        f"{config_path} has no config.distillation block. Pass --teacher_config pointing "
+        "at the ANN's own training YAML to measure bounds off a trained policy instead.")
     # model.name (e.g. continuous_a2c_logstd) lives at params.model, not in distillation.
     distill = dict(distill)
     distill.setdefault("model_name", params["model"]["name"])
@@ -197,8 +235,35 @@ def _build_encoder(observation_bounds, device, pop_dim, threshold, num_steps):
     return encoder
 
 
+# Share of the rollout the diagnostics (encoder plots, silent-neuron check) run on.
+# A fraction rather than a fixed count, so the picture scales with the collection instead
+# of shrinking to a rounding error on a long run.
+DIAGNOSTIC_FRACTION = 0.25
+
+
+def _subsample(sample_arr, fraction=DIAGNOSTIC_FRACTION, seed=0, cap=None):
+    """A RANDOM `fraction` of the rollout, never a contiguous slice.
+
+    Rows are appended per step (num_envs at a time), so sample_arr[:n] is the first
+    n/num_envs STEPS — the post-reset transient, not the episode. On hover that slice has
+    ~2.8x the std of the full rollout, which made the diagnostics describe a different
+    distribution than the bounds were computed from.
+
+    Seeded, so the plot and the silent-neuron check see the SAME rows and their verdicts
+    can be read against each other.
+    """
+    n = max(1, int(len(sample_arr) * fraction))
+    if cap is not None:
+        n = min(n, cap)
+    if n >= len(sample_arr):
+        return sample_arr
+    idx = np.random.default_rng(seed).choice(len(sample_arr), n, replace=False)
+    return sample_arr[np.sort(idx)]
+
+
 def _check_silent_neurons(observation_bounds, sample_arr, device,
-                          pop_dim=10, threshold=0.95, num_steps=5, max_batch=4096):
+                          pop_dim=10, threshold=0.95, num_steps=5,
+                          fraction=DIAGNOSTIC_FRACTION):
     """Feed a batch of (normalized) obs through the encoder and report any column that
     never spikes across the batch — those are dead inputs to the actor.
 
@@ -207,7 +272,9 @@ def _check_silent_neurons(observation_bounds, sample_arr, device,
     encoder = _build_encoder(observation_bounds, device, pop_dim, threshold, num_steps)
     obs_dim = len(observation_bounds)
 
-    batch = torch.as_tensor(sample_arr[:max_batch], dtype=torch.float, device=device)
+    batch = torch.as_tensor(_subsample(sample_arr, fraction), dtype=torch.float, device=device)
+    print(f"[silent-neuron check] {len(batch)} samples "
+          f"({fraction:.0%} of {len(sample_arr)}, randomly drawn)")
     with torch.no_grad():
         spikes = encoder(batch)  # [B, obs_dim*pop_dim, num_steps]
 
@@ -226,8 +293,9 @@ def _check_silent_neurons(observation_bounds, sample_arr, device,
               "Consider widening those bounds or lowering the encoder threshold.")
 
 
-def _plot_bounds_encoder(observation_bounds, sample_arr, device, save_dir,
-                         pop_dim=10, threshold=0.95, num_steps=5, max_batch=4096):
+def _plot_bounds_encoder(observation_bounds, sample_arr, device, save_dir, task_config,
+                         pop_dim=10, threshold=0.95, num_steps=5,
+                         fraction=DIAGNOSTIC_FRACTION):
     """Render the encoder receptive fields + activations these bounds define, and save the
     PNGs into save_dir — so the clamping can be inspected BEFORE the bounds reach the
     student. Best-effort: any failure is logged, not raised.
@@ -242,7 +310,9 @@ def _plot_bounds_encoder(observation_bounds, sample_arr, device, save_dir,
     encoder.record = True
     encoder._trace = []
 
-    batch = torch.as_tensor(sample_arr[:max_batch], dtype=torch.float, device=device)
+    batch = torch.as_tensor(_subsample(sample_arr, fraction), dtype=torch.float, device=device)
+    print(f"[bounds-plot] {len(batch)} samples "
+          f"({fraction:.0%} of {len(sample_arr)}, randomly drawn)")
     with torch.no_grad():
         encoder(batch)  # records one entry covering the full collected distribution
 
@@ -265,7 +335,7 @@ def _read_encoder_cfg(config_path):
         return pop_dim, threshold, num_steps
     try:
         import yaml
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             actor = yaml.safe_load(f)["params"]["network"]["actor"]
         return actor["encoder"]["pop_dim"], actor["encoder"]["threshold"], actor["num_steps"]
     except Exception as e:
@@ -277,7 +347,8 @@ def _read_encoder_cfg(config_path):
 def collect(num_steps, num_envs, out_dir, use_wandb, teacher_checkpoint=None,
             config_path=None, bounds_cache=DEFAULT_BOUNDS_CACHE, min_episodes=0,
             lower_pct=LOWER_PCT, upper_pct=UPPER_PCT, curriculum_level=25,
-            bound_method=DEFAULT_BOUND_METHOD):
+            bound_method=DEFAULT_BOUND_METHOD, task_name=None, teacher_config_path=None,
+            plot_bounds=None, max_episode_steps=None):
     """Run a rollout, compute per-dim stats, write the CSV + bounds cache, return the bounds."""
     os.makedirs(out_dir, exist_ok=True)
 
@@ -294,35 +365,63 @@ def collect(num_steps, num_envs, out_dir, use_wandb, teacher_checkpoint=None,
         except Exception as e:
             print(f"W&B init failed (continuing without W&B): {e}")
 
+    task_name, task_config = resolve_task(config_path, task_name)
+
+    # Shorten the episode so the sample is not dominated by steady-state hover.
+    #
+    # A converged policy spends ~90% of a 667-step episode parked on the target, so the
+    # pooled distribution is that one narrow mode plus a thin approach tail — and every
+    # mass-weighted estimator (mean/std, percentiles) is dragged onto the mode. Bounds fit
+    # to it clip the approach hard, which is exactly when the policy needs to see where it
+    # is. Truncating restarts the env on a fresh target instead, so the same budget buys
+    # many approaches over diverse start/target pairs.
+    #
+    # Done through the task's OWN episode length rather than by resetting envs from here:
+    # an external reset_idx leaves cur_obs stale for one step and bypasses the task's
+    # episode bookkeeping.
+    if max_episode_steps is not None:
+        original = getattr(task_config, "episode_len_steps", None)
+        task_config.episode_len_steps = max_episode_steps
+        print(f"[obs-stats] episode truncated to {max_episode_steps} steps "
+              f"(task default {original}) — sampling approaches, not hover dwell")
+    print(f"[obs-stats] task: {task_name} "
+          f"({task_config.observation_space_dim}-D obs)")
     task_config.num_envs = num_envs
 
     # Pin the obstacle-density curriculum to the teacher's level BEFORE make_task. The task
     # constructor inits curriculum_level = curriculum.min_level and spawns the obstacle field
     # from it, so setting min == max == level here makes the env born at the right difficulty,
     # and the task's own clamp holds it fixed (no drift with success).
-    if curriculum_level is not None and curriculum_level >= 0:
+    has_curriculum = hasattr(task_config, "curriculum")
+    if curriculum_level is not None and curriculum_level >= 0 and has_curriculum:
         task_config.curriculum.min_level = curriculum_level
         task_config.curriculum.max_level = curriculum_level
         print(f"[obs-stats] curriculum pinned at level {curriculum_level} before make_task")
+    elif not has_curriculum:
+        curriculum_level = None  # recorded in the cache; this task has no curriculum
 
+    # Warp is only needed by a task with cameras; forcing it on a camera-less task
+    # (hover) costs a renderer it never reads.
     task = task_registry.make_task(
-        TASK_NAME, num_envs=num_envs, headless=True, use_warp=True,
+        task_name, num_envs=num_envs, headless=True,
+        use_warp=getattr(task_config, "use_warp", True),
     )
-    print(f"[obs-stats] env born at curriculum level {task.curriculum_level}")
+    if has_curriculum:
+        print(f"[obs-stats] env born at curriculum level {task.curriculum_level}")
 
     obs_dim = task_config.observation_space_dim
     action_dim = task_config.action_space_dim
     device = task_config.device
-    obs_names = _obs_names(obs_dim)
+    obs_names = _obs_names(obs_dim, task_config)
 
     teacher = None
     if teacher_checkpoint is not None:
         assert os.path.exists(teacher_checkpoint), \
             f"teacher_checkpoint not found: {teacher_checkpoint}"
-        assert config_path is not None, \
-            "--config (student YAML) is required with --teacher_checkpoint so the " \
-            "teacher network architecture can be read from config.distillation.network"
-        distill_cfg = _load_distillation_cfg(config_path)
+        assert config_path is not None or teacher_config_path is not None, \
+            "--config (student YAML) or --teacher_config (the ANN's own YAML) is required " \
+            "with --teacher_checkpoint, to read the teacher network architecture"
+        distill_cfg = _load_teacher_cfg(config_path, teacher_config_path)
         teacher = _build_teacher_from_checkpoint(
             teacher_checkpoint, distill_cfg, obs_dim, action_dim, device)
         print(f"Teacher-driven rollout using: {teacher_checkpoint}")
@@ -388,6 +487,15 @@ def collect(num_steps, num_envs, out_dir, use_wandb, teacher_checkpoint=None,
 
     raw_np = all_obs.numpy()
 
+    # Stats in the space the ENCODER BOUNDS live in. The raw table below is for physical
+    # sanity-checking; this is the one you read to choose a window.
+    zstats = {
+        "z_min": bounds_arr.min(axis=0), "z_max": bounds_arr.max(axis=0),
+        "z_mean": bounds_arr.mean(axis=0), "z_std": bounds_arr.std(axis=0),
+        "z_p01": np.percentile(bounds_arr, 1, axis=0),
+        "z_p99": np.percentile(bounds_arr, 99, axis=0),
+    }
+
     # --- Per-dim statistics (raw space, for inspection) ---------------------
     stats = {
         "dim":  list(range(obs_dim)),
@@ -423,18 +531,36 @@ def collect(num_steps, num_envs, out_dir, use_wandb, teacher_checkpoint=None,
     _check_silent_neurons(observation_bounds, bounds_arr, device,
                           pop_dim=enc_pop_dim, threshold=enc_threshold,
                           num_steps=enc_num_steps)
-    _plot_bounds_encoder(observation_bounds, bounds_arr, device, out_dir,
+    # The plot window is decoupled from the computed bounds on purpose: the histogram is
+    # drawn with range=(lo, hi), so plotting against the very window under evaluation hides
+    # the tails outside it. --plot_bounds pins a fixed, wider frame (e.g. RunningMeanStd's
+    # own [-5, 5]) so you can SEE what a candidate window would clip. Only the picture
+    # changes; the cached bounds are always the computed ones.
+    plot_window = observation_bounds
+    if plot_bounds is not None:
+        plot_window = [tuple(plot_bounds)] * obs_dim
+        print(f"[bounds-plot] plotting against a fixed window {tuple(plot_bounds)} "
+              f"(cached bounds are unchanged)")
+    _plot_bounds_encoder(plot_window, bounds_arr, device, out_dir, task_config,
                          pop_dim=enc_pop_dim, threshold=enc_threshold,
                          num_steps=enc_num_steps)
 
     # --- Save CSV ------------------------------------------------------------
     csv_path = os.path.join(out_dir, "obs_stats.csv")
     with open(csv_path, "w", newline="") as f:
+        zkeys = ["z_min", "z_p01", "z_mean", "z_p99", "z_max", "z_std"]
         writer = csv.DictWriter(f, fieldnames=["dim", "name", "min", "max", "mean",
-                                               "std", "p01", "p05", "p50", "p95", "p99"])
+                                               "std", "p01", "p05", "p50", "p95", "p99"]
+                                              + zkeys + ["bound_lo", "bound_hi", "pct_clipped"])
         writer.writeheader()
         for i in range(obs_dim):
-            writer.writerow({k: stats[k][i] for k in stats})
+            row = {k: stats[k][i] for k in stats}
+            row.update({k: float(zstats[k][i]) for k in zkeys})
+            row["bound_lo"], row["bound_hi"] = observation_bounds[i]
+            row["pct_clipped"] = round(float(
+                ((bounds_arr[:, i] < observation_bounds[i][0]) |
+                 (bounds_arr[:, i] > observation_bounds[i][1])).mean() * 100), 3)
+            writer.writerow(row)
     print(f"CSV saved to: {csv_path}")
 
     # --- Write the bounds cache the student runner reads --------------------
@@ -446,8 +572,9 @@ def collect(num_steps, num_envs, out_dir, use_wandb, teacher_checkpoint=None,
         "curriculum_level": curriculum_level,
         "space": bounds_space,
         "teacher_checkpoint": teacher_checkpoint,
-        "use_vae": task_config.vae_config.use_vae,
-        "latent_dims": task_config.vae_config.latent_dims if task_config.vae_config.use_vae else 0,
+        "task": task_name,
+        "use_vae": getattr(getattr(task_config, "vae_config", None), "use_vae", False),
+        "latent_dims": getattr(getattr(task_config, "vae_config", None), "latent_dims", 0),
         "observation_bounds": observation_bounds,
     }
     os.makedirs(os.path.dirname(bounds_cache), exist_ok=True)
@@ -475,6 +602,7 @@ def collect(num_steps, num_envs, out_dir, use_wandb, teacher_checkpoint=None,
 
     # --- Print summary + ready-to-paste bounds ------------------------------
     print()
+    print(f"RAW space (physical units — for sanity-checking, NOT for setting bounds)")
     print(f"{'dim':<5} {'name':<22} {'min':>8} {'p01':>8} {'mean':>8} {'p99':>8} {'max':>8} {'std':>8}")
     print("-" * 80)
     for i in range(obs_dim):
@@ -483,11 +611,33 @@ def collect(num_steps, num_envs, out_dir, use_wandb, teacher_checkpoint=None,
               f"{stats['mean'][i]:>8.3f} {stats['p99'][i]:>8.3f} "
               f"{stats['max'][i]:>8.3f} {stats['std'][i]:>8.3f}")
 
-    print(f"\n# observation_bounds from {bound_method} bounds in {bounds_space}:")
-    print("observation_bounds = [")
+    # The table to actually read: observation_bounds are set in THIS space.
+    print()
+    print(f"NORMALIZED space — {bounds_space}")
+    print("This is the space observation_bounds live in. z_min/z_max are the extremes the")
+    print("encoder will ever see; a window covering them clips nothing. %clip is what the")
+    print(f"proposed {bound_method} window below would discard.")
+    print(f"{'dim':<5} {'name':<22} {'z_min':>8} {'z_p01':>8} {'z_p99':>8} {'z_max':>8} "
+          f"{'z_std':>7} | {'bound_lo':>9} {'bound_hi':>9} {'%clip':>7}")
+    print("-" * 104)
+    for i in range(obs_dim):
+        lo, hi = observation_bounds[i]
+        clipped = ((bounds_arr[:, i] < lo) | (bounds_arr[:, i] > hi)).mean() * 100
+        flag = "  <-- clips >1%" if clipped > 1.0 else ""
+        print(f"{i:<5} {obs_names[i]:<22} "
+              f"{zstats['z_min'][i]:>8.3f} {zstats['z_p01'][i]:>8.3f} "
+              f"{zstats['z_p99'][i]:>8.3f} {zstats['z_max'][i]:>8.3f} "
+              f"{zstats['z_std'][i]:>7.3f} | {lo:>9.3f} {hi:>9.3f} {clipped:>6.2f}%{flag}")
+
+    # YAML, indented for a config's `network.actor` block — the only place these are
+    # consumed. Paste over the existing observation_bounds rows.
+    print(f"\n# {bound_method} bounds in {bounds_space}")
+    print(f"# paste into {config_path or '<student yaml>'} under network.actor:")
+    print("        observation_bounds:")
+    width = max(len(n) for n in obs_names)
     for i, (l, h) in enumerate(observation_bounds):
-        print(f"    ({l}, {h}),   # {i:>2} {obs_names[i]}")
-    print("]")
+        entry = f"[{l}, {h}]"
+        print(f"          - {entry:<22}# {i:>2} {obs_names[i]:<{width}}")
 
     return observation_bounds
 
@@ -497,7 +647,7 @@ def collect(num_steps, num_envs, out_dir, use_wandb, teacher_checkpoint=None,
 # ---------------------------------------------------------------------------
 
 
-def _load_valid_cache(cache_path, obs_dim, teacher_checkpoint):
+def _load_valid_cache(cache_path, obs_dim, teacher_checkpoint, task_name=None):
     """Return the cached bounds, or None if the cache is missing, unreadable, or stale.
 
     A cache is stale if it was built for a different observation size or a different
@@ -518,6 +668,11 @@ def _load_valid_cache(cache_path, obs_dim, teacher_checkpoint):
               f"({payload.get('obs_dim')} != {obs_dim}); will recompute.")
         return None
 
+    if task_name is not None and payload.get("task") not in (None, task_name):
+        print(f"[obs-bounds] cache was built for task {payload.get('task')!r} "
+              f"(need {task_name!r}); will recompute.")
+        return None
+
     if payload.get("teacher_checkpoint") != teacher_checkpoint:
         print(f"[obs-bounds] cache was built for a different teacher "
               f"({payload.get('teacher_checkpoint')!r} != {teacher_checkpoint!r}); "
@@ -532,7 +687,7 @@ def _load_valid_cache(cache_path, obs_dim, teacher_checkpoint):
 def load_or_collect_bounds(teacher_checkpoint, config_path, num_envs=64, num_steps=10000,
                            recompute=False, cache_path=DEFAULT_BOUNDS_CACHE,
                            min_episodes=0, out_dir=None, curriculum_level=25,
-                           bound_method=DEFAULT_BOUND_METHOD):
+                           bound_method=DEFAULT_BOUND_METHOD, task_name=None):
     """Return per-dim encoder bounds for `teacher_checkpoint`, collecting them if needed.
 
     Collection runs in a SEPARATE subprocess: Isaac Gym does not support creating a second
@@ -542,9 +697,11 @@ def load_or_collect_bounds(teacher_checkpoint, config_path, num_envs=64, num_ste
     Raises RuntimeError if collection fails — training a student on wrong encoder bounds
     silently produces a policy whose inputs are clipped in the wrong places.
     """
+    task_name, task_config = resolve_task(config_path, task_name)
     obs_dim = task_config.observation_space_dim
 
-    bounds = None if recompute else _load_valid_cache(cache_path, obs_dim, teacher_checkpoint)
+    bounds = None if recompute else _load_valid_cache(
+        cache_path, obs_dim, teacher_checkpoint, task_name)
     if bounds is None:
         print(f"[obs-bounds] collecting bounds in a subprocess "
               f"(teacher={teacher_checkpoint}, steps={num_steps}, "
@@ -557,6 +714,7 @@ def load_or_collect_bounds(teacher_checkpoint, config_path, num_envs=64, num_ste
             f"--num_envs={num_envs}",
             f"--bounds_cache={cache_path}",
             f"--curriculum_level={curriculum_level}",
+            f"--task={task_name}",
             f"--bound_method={bound_method}",
             "--no_wandb",
         ]
@@ -571,7 +729,7 @@ def load_or_collect_bounds(teacher_checkpoint, config_path, num_envs=64, num_ste
                 f"[obs-bounds] collection subprocess failed (exit {result.returncode}); "
                 "fix the teacher checkpoint / collector before training the student.")
 
-        bounds = _load_valid_cache(cache_path, obs_dim, teacher_checkpoint)
+        bounds = _load_valid_cache(cache_path, obs_dim, teacher_checkpoint, task_name)
         if bounds is None:
             raise RuntimeError("[obs-bounds] subprocess finished but produced no valid cache.")
 
@@ -601,6 +759,13 @@ def _parse_args():
                         help="Student YAML. Required with --teacher_checkpoint: the teacher "
                              "network architecture and normalization are read from its "
                              "config.distillation block (single source of truth).")
+    parser.add_argument("--task", type=str, default=None,
+                        help="Task to collect against. Defaults to the --config YAML's "
+                             "config.env_name, so it normally needs no setting.")
+    parser.add_argument("--teacher_config", type=str, default=None,
+                        help="The ANN teacher's OWN training YAML (e.g. ppo_hover_local). "
+                             "Use this to measure bounds off a trained policy when the "
+                             "student YAML has no config.distillation block.")
     parser.add_argument("--bounds_cache", type=str, default=DEFAULT_BOUNDS_CACHE,
                         help="Where to write the JSON bounds cache the runner reads")
     parser.add_argument("--lower_pct", type=float, default=LOWER_PCT,
@@ -620,6 +785,18 @@ def _parse_args():
                              "centered on the center of mass, symmetric. 'percentile': "
                              "empirical p{lower}/p{upper}, follows asymmetric tails. The "
                              "coverage band (--upper_pct) sets z for the gaussian method too.")
+    parser.add_argument("--max_episode_steps", type=int, default=None,
+                        help="Truncate episodes to this many steps during collection. A "
+                             "converged policy dwells in hover for most of a full episode, "
+                             "which drags mean/std and percentiles onto that one narrow "
+                             "mode; truncating resamples the approach across many fresh "
+                             "targets instead. Try ~150 for hover (default 667).")
+    parser.add_argument("--plot_bounds", type=str, default=None, metavar="LO,HI",
+                        help="Draw the encoder plots against this FIXED window instead of "
+                             "the computed bounds, e.g. --plot_bounds=-5,5 (RunningMeanStd's "
+                             "own clamp range). The histogram is clipped to the plotted "
+                             "window, so a wide frame is what shows you the tails a "
+                             "candidate window would cut. Does not change the cached bounds.")
     parser.add_argument("--no_wandb", action="store_false", dest="wandb",
                         help="Disable W&B logging (default: enabled)")
     parser.set_defaults(wandb=True)
@@ -641,4 +818,9 @@ if __name__ == "__main__":
         upper_pct=args.upper_pct,
         curriculum_level=args.curriculum_level,
         bound_method=args.bound_method,
+        task_name=args.task,
+        teacher_config_path=args.teacher_config,
+        plot_bounds=([float(v) for v in args.plot_bounds.split(",")]
+                     if args.plot_bounds else None),
+        max_episode_steps=args.max_episode_steps,
     )

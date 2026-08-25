@@ -50,11 +50,13 @@ def test_custom_network_builders_are_registered():
 
 
 @pytest.mark.parametrize("path", CFG_PATHS, ids=cfg_id)
-def test_config_builds_a_model(path, task_config):
-    """Build the model the way the runner does, and check it is sized for this task."""
+def test_config_builds_a_model(path):
+    """Build the model the way the runner does, and check it is sized for the task the
+    config actually names — not for whichever task a fixture happens to hold."""
     config_dict = yaml.safe_load(open(path))
-    bind_encoder_bounds(config_dict, task_config)
+    bind_encoder_bounds(config_dict)
     params = config_dict["params"]
+    task_config = task_registry.get_task_config(params["config"]["env_name"])
 
     model = ModelBuilder().load(
         {"model": params["model"], "network": params["network"]}

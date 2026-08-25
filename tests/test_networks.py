@@ -164,12 +164,38 @@ def test_bind_ignores_networks_without_an_actor_block(task_config):
 
 
 def test_bind_ignores_a_task_with_no_layout():
-    """A task that publishes no observation_layout (a hover task, say) must not break
-    a run that uses a network needing no encoder bounds."""
-    class HoverCfg:
+    """A task that publishes no observation_layout must not break a run that uses a
+    network needing no encoder bounds."""
+    class LayoutlessCfg:
         observation_space_dim = 13
         action_space_dim = 4
 
     cfg = {"params": {"network": {"name": "mlp_actor_critic", "actor": {}, "critic": {}}}}
-    bind_encoder_bounds(cfg, HoverCfg)
+    bind_encoder_bounds(cfg, LayoutlessCfg)
     assert cfg["params"]["network"]["actor"] == {}
+
+
+def test_bind_resolves_the_task_the_config_names():
+    """No caller should have to import a task config: env_name is a registered task name."""
+    from aerial_gym.registry.task_registry import task_registry
+
+    cfg = {"params": {"config": {"env_name": "f450_hover_task"},
+                      "network": {"name": "popsan", "actor": {}, "critic": {}}}}
+    bind_encoder_bounds(cfg)
+
+    hover = task_registry.get_task_config("f450_hover_task")
+    assert len(cfg["params"]["network"]["actor"]["observation_bounds"]) \
+        == hover.observation_space_dim
+
+
+def test_every_registered_layout_type_has_encoder_bounds():
+    """bounds_from_layout raises KeyError on an unknown type — which would otherwise
+    surface minutes into a run, after the sim has built."""
+    from aerial_gym.registry.task_registry import task_registry
+
+    for name in task_registry.get_task_names():
+        layout = getattr(task_registry.get_task_config(name), "observation_layout", None)
+        if layout is None:
+            continue
+        unknown = {t for _, t in layout} - set(DEFAULT_TYPE_BOUNDS)
+        assert not unknown, f"task {name!r} names types with no encoder bounds: {unknown}"

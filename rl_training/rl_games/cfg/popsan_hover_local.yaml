@@ -1,0 +1,114 @@
+params:
+  seed: 42
+
+  algo:
+    name: a2c_continuous
+
+  model:
+    name: continuous_a2c_logstd
+
+  load_checkpoint: False
+
+  # Network block is popsan_local.yaml's; the config block below is ppo_hover_local.yaml's,
+  # so the ANN and SNN hover runs are comparable.
+  network:
+      name: popsan
+      device: cuda
+
+      actor:
+        encoder:
+          pop_dim: 10
+          threshold: 0.95                   # encoder IF threshold
+
+        num_steps: 5                        # SNN timesteps per forward pass
+        sigma_init: 0.5                     # initial action std; learnable thereafter
+        hidden_dims: [128, 128]
+        beta: 0.75                          # LIF voltage decay
+        alpha: 0.5                          # LIF current decay
+        threshold: 0.5                      # LIF firing threshold
+        spike_grad: fast_sigmoid
+        reset_mechanism: subtract
+        reset_delay: False
+        # Per-dim encoder clamp window, in rl_games-NORMALIZED space (z-scores).
+        # Measured p01/p99 from a teacher-driven rollout with episodes truncated so the
+        # sample is approaches rather than hover dwell (collect_hover_bounds.bash).
+        # Re-measure after changing the task, the teacher, or the observation layout.
+        observation_bounds:
+          - [-3.583, 3.637]     #  0 position_error_0
+          - [-3.79, 3.447]      #  1 position_error_1
+          - [-4.052, 4.533]     #  2 position_error_2
+          - [-4.671, 4.644]     #  3 gravity_0
+          - [-3.701, 3.364]     #  4 gravity_1
+          - [-0.391, 5.0]       #  5 gravity_2
+          - [-5.0, 4.296]       #  6 linvel_0
+          - [-3.024, 3.375]     #  7 linvel_1
+          - [-2.249, 2.625]     #  8 linvel_2
+          - [-3.978, 4.181]     #  9 angvel_0
+          - [-5.0, 5.0]         # 10 angvel_1
+          - [-2.641, 4.071]     # 11 angvel_2
+          - [-2.463, 2.403]     # 12 prev_action_0
+          - [-2.472, 2.502]     # 13 prev_action_1
+          - [-2.49, 2.569]      # 14 prev_action_2
+          - [-1.868, 1.853]     # 15 prev_action_3
+
+      critic:
+        hidden_dims: [128, 128]
+
+  config:
+    name: f450_hover_snn
+    env_name: f450_hover_task
+    env_config:
+      headless: True
+      use_warp: False    # inert — the runner always overwrites this from --use_warp
+
+    # num_actors IS the environment count — the runner derives env_config.num_envs from it.
+    num_actors: 128
+    horizon_length: 64
+    minibatch_size: 8192
+    mini_epochs: 4
+
+    # Reward scaling
+    reward_shaper:
+      scale_value: 1.0
+
+    # PPO settings
+    normalize_advantage: True
+    gamma: 0.99
+    tau: 0.95
+    ppo: True
+
+    # Learning rate
+    # Not adaptive: the spiking actor's rate-quantized output makes KL near-zero, so
+    # AdaptiveScheduler ratchets to its hardcoded max_lr=1e-2 and saturates the LIF layers.
+    learning_rate: 1e-4
+    lr_schedule: constant
+
+    # Training params
+    save_best_after: 10
+    save_frequency: 50
+    score_to_win: 100000
+    grad_norm: 1.0
+    entropy_coef: 0.01
+    truncate_grads: True
+    e_clip: 0.2
+    clip_value: False
+
+    # Value function
+    critic_coef: 2
+    normalize_value: True
+    value_bootstrap: True
+
+    # Encoder bounds are in this normalized space, so it must stay on.
+    normalize_input: True
+
+    # Other settings
+    bounds_loss_coef: 0.0001
+    max_epochs: 1000
+    use_diagnostics: True
+
+    # Player settings (for inference/testing)
+    player:
+      render: False
+      deterministic: True
+      games_num: 100000
+      num_actors: 1

@@ -35,14 +35,15 @@ rl_training/rl_games/
 
 ## Task
 
-There is currently **one** registered task:
+Two registered tasks:
 
 | Task name              | Class                                                    | Config                                          |
 | ---------------------- | -------------------------------------------------------- | ----------------------------------------------- |
 | `f450_navigation_task` | `task/attitude_navigation_task.py::NavigationWithObstaclesTask` | `config/task_config/f450_attitude_navigation_task_config.py` |
+| `f450_hover_task`      | `task/hover_task.py::HoverTask`                          | `config/task_config/f450_hover_task_config.py`  |
 
-F450 quadrotor, attitude-rate control, flying through a procedurally generated forest with an
-obstacle-density curriculum.
+**`f450_navigation_task`** — F450, attitude-rate control, flying through a procedurally
+generated forest with an obstacle-density curriculum.
 
 - **Action space:** 4 (raw `[-1, 1]`; the task maps it onto the controller's command range)
 - **Observation space:** 49 = 17 state dims + 32 DepthVAE latent dims
@@ -50,9 +51,16 @@ obstacle-density curriculum.
 Set `vae_config.use_vae = False` in the task config to train a state-only 17-D policy — the
 observation layout, the encoder bounds and the VAE encode step all key off that one flag.
 
-`--task` defaults to `f450_navigation_task`; you only need to pass it if you register another
-task. Whatever you pass must match a name in aerial_gym's `task_registry` (registered from
-`config/task_config/__init__.py`).
+**`f450_hover_task`** — F450, attitude control, hold a sampled target point in an empty box.
+No camera, no VAE, no curriculum.
+
+- **Action space:** 4
+- **Observation space:** 16 = position error (3) + gravity in body (3) + linvel (3) +
+  angvel (3) + previous action (4)
+
+`--task` must match a name in aerial_gym's `task_registry` (registered from
+`config/task_config/__init__.py`), and must match the config's `env_name` — the runner
+resolves the task config from that name to derive PopSAN's encoder bounds.
 
 > **Note on naming:** the legacy tree `navigation_with_obstacles/` contains a *different* class
 > that is also called `NavigationWithObstaclesTask`. Check the import path before assuming which
@@ -112,8 +120,10 @@ python -m rl_training.rl_games.runner \
 
 ## Config matrix
 
-Each architecture ships a `_local` (single workstation / 8 GB VRAM) and a `_cluster`
-(A100-class) variant. They differ only in batch sizing and learning-rate schedule.
+Each navigation architecture ships a `_local` (single workstation / 8 GB VRAM) and a
+`_cluster` (A100-class) variant, differing only in batch sizing and learning-rate schedule.
+The two `*_hover_*` configs target `f450_hover_task`; everything else targets
+`f450_navigation_task`.
 
 | Config                              | Kind | `network.name`         | `algo.name`     | `num_actors` |
 | ----------------------------------- | ---- | ---------------------- | --------------- | -----------: |
@@ -123,6 +133,8 @@ Each architecture ships a `_local` (single workstation / 8 GB VRAM) and a `_clus
 | `ppo_gru_cluster.yaml`              | ANN  | `mlp_gru_actor_critic` | `a2c_continuous` |         1024 |
 | `ppo_baseline_local.yaml`           | ANN  | `actor_critic` (stock rl_games, GRU) | `a2c_continuous` | 1024 |
 | `ppo_baseline_cluster.yaml`         | ANN  | `actor_critic` (stock rl_games, GRU) | `a2c_continuous` | 4096 |
+| `ppo_hover_local.yaml`              | ANN  | `mlp_actor_critic`     | `a2c_continuous` |          128 |
+| `popsan_hover_local.yaml`           | SNN  | `popsan`               | `a2c_continuous` |          128 |
 | `popsan_local.yaml`                 | SNN  | `popsan`               | `a2c_continuous` |          128 |
 | `popsan_cluster.yaml`               | SNN  | `popsan`               | `a2c_continuous` |         1024 |
 | `popsan_teacher_student_local.yaml` | SNN  | `popsan`               | `a2c_teacher`   |          128 |
@@ -196,15 +208,22 @@ network:
 ### Encoder observation bounds
 
 The population encoder needs a per-dimension clamp window to place its Gaussian receptive
-fields. You never write those 49 numbers by hand — they are resolved at startup, in this
-priority order:
+fields. You never write those numbers by hand (49 for navigation, 16 for hover) — they are
+resolved at startup, in this priority order:
 
 1. `network.actor.observation_bounds` explicitly set in the YAML — always wins.
 2. **Measured** from a teacher rollout, for a `popsan` + `distillation` `--train` run
    (`resolve_encoder_bounds` → `tools/collect_obs_stats.py`). Collection runs in a subprocess
    (Isaac Gym allows one sim per process) and is cached to `runs/obs_stats/observation_bounds.json`.
 3. **Derived** from the task's `observation_layout` via a per-type table
-   (`bind_encoder_bounds` → `snn/encoder.py::DEFAULT_TYPE_BOUNDS`).
+   (`bind_encoder_bounds` → `snn/encoder.py::DEFAULT_TYPE_BOUNDS`). This is the hover path —
+   `popsan_hover_local.yaml` has no teacher, so its 16 windows come from here.
+
+`bind_encoder_bounds` takes no task argument: it reads `config.env_name` and pulls the task
+config out of `task_registry`, so the config's task and the encoder's bounds cannot disagree.
+Adding an observation type to a layout without adding it to `DEFAULT_TYPE_BOUNDS` raises a
+`KeyError` at startup by design, and `tests/test_networks.py` checks every registered task's
+layout against the table.
 
 Bounds live in rl_games-**normalized** space (z-scores), which is why measuring them requires
 pushing raw observations through the teacher's frozen `running_mean_std`.
