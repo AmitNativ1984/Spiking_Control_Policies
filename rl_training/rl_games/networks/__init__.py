@@ -46,7 +46,7 @@ _register("mlp_gru_actor_critic", GRUActorCriticNetworkBuilder)
 _register("popsan", POPSANNetworkBuilder)
 
 
-def bind_encoder_bounds(config: dict, task_config) -> dict:
+def bind_encoder_bounds(config: dict, task_config=None) -> dict:
     """Give the PopSAN encoder its per-dimension clamp bounds, derived from the task.
 
     The only task -> network bridge in this tree, and it exists because rl_games has no
@@ -66,11 +66,27 @@ def bind_encoder_bounds(config: dict, task_config) -> dict:
 
     Args:
         config: The full parsed rl_games config (the dict with a "params" key).
-        task_config: The task config class whose observation layout to expand.
+        task_config: The task config class whose observation layout to expand. Defaults to
+            the one the config already names — `config.env_name` is a registered task name,
+            so no caller needs to import a task config to get this right.
 
     Returns:
         The same `config`, mutated in place.
     """
+    if task_config is None:
+        # Deferred: importing aerial_gym pulls isaacgym, and this package must stay
+        # importable after torch.
+        from aerial_gym.registry.task_registry import task_registry
+
+        name = config["params"]["config"]["env_name"]
+        try:
+            task_config = task_registry.get_task_config(name)
+        except KeyError:
+            raise KeyError(
+                f"env_name {name!r} is not a registered task "
+                f"(known: {task_registry.get_task_names()}). Did you `import config`?"
+            ) from None
+
     actor = config["params"]["network"].get("actor")
     layout = getattr(task_config, "observation_layout", None)
     if actor is None or layout is None:

@@ -18,6 +18,7 @@ from snntorch import surrogate
 DEFAULT_TYPE_BOUNDS = {
     "direction_to_target": (-3.0, 3.0),
     "distance":            (-3.0, 3.0),
+    "position_error":      (-3.0, 3.0),
     "linvel":              (-3.0, 3.0),
     "angvel":              (-3.0, 3.0),
     "gravity":             (-3.0, 3.0),
