@@ -74,6 +74,12 @@ def get_args():
         {"name": "--plot-encoding", "action": "store_true",
          "help": "Debug: with --play, record PopSAN encoder activations and plot at the "
                  "end. Forces num_envs=1."},
+        {"name": "--max_episode_steps", "type": int, "default": None,
+         "help": "Truncate episodes to this many steps (task_config.episode_len_steps). "
+                 "With --play --plot-encoding, this is what stops the encoder trace from "
+                 "being dominated by hover dwell."},
+        {"name": "--max_episodes", "type": int, "default": None,
+         "help": "Stop playback after this many episodes (player.games_num). --play only."},
         {"name": "--recompute_bounds", "action": "store_true",
          "help": "Force re-collection of PopSAN encoder observation_bounds even if a "
                  "cache exists (student/PopSAN --train runs only)."},
@@ -130,21 +136,53 @@ def apply_args(config_dict, args):
 
     # Task-config overrides. These reach the task through the config class itself, which
     # the task reads at construction — so they must be set before the env is built.
-    if args.get("curriculum_level") is not None:
+    #
+    # They are also recorded into `task_config_overrides`, OUTSIDE params/ so rl_games never
+    # sees them, because dump_run_config freezes the rl_games config and these live nowhere
+    # in it. Without this a run trained at --curriculum_level 5 leaves no trace of it, which
+    # is the same silent-provenance hole that num_steps has on the deploy side.
+    overrides = {}
+
+    def task_config_for(flag, attribute):
         task_config = task_registry.get_task_config(args["task"])
-        if not hasattr(task_config, "curriculum"):
+        if not hasattr(task_config, attribute):
             raise ValueError(
-                f"--curriculum_level was passed but task {args['task']!r} has no curriculum."
+                f"{flag} was passed but task {args['task']!r} has no {attribute}."
             )
+        return task_config
+
+    if args.get("curriculum_level") is not None:
+        task_config = task_config_for("--curriculum_level", "curriculum")
         task_config.curriculum.min_level = args["curriculum_level"]
         task_config.curriculum.max_level = args["curriculum_level"]
+        overrides["curriculum_level"] = args["curriculum_level"]
     if args.get("exceed_margin") is not None:
-        task_config = task_registry.get_task_config(args["task"])
-        if not hasattr(task_config, "exceed_bounds_margin"):
-            raise ValueError(
-                f"--exceed_margin was passed but task {args['task']!r} does not read it."
-            )
+        task_config = task_config_for("--exceed_margin", "exceed_bounds_margin")
         task_config.exceed_bounds_margin = args["exceed_margin"]
+        overrides["exceed_bounds_margin"] = args["exceed_margin"]
+    if args.get("max_episode_steps") is not None:
+        task_config = task_config_for("--max_episode_steps", "episode_len_steps")
+        logger.warning(
+            f"--max_episode_steps: episode_len_steps "
+            f"{task_config.episode_len_steps} -> {args['max_episode_steps']}. The hover "
+            "reward is the integral of proximity over a full episode, so returns from this "
+            "run are NOT comparable to ones at the default length."
+        )
+        task_config.episode_len_steps = args["max_episode_steps"]
+        overrides["episode_len_steps"] = args["max_episode_steps"]
+
+    if overrides:
+        config_dict["task_config_overrides"] = overrides
+
+    # player.games_num is read by rl_games' BasePlayer only, so this would be an unnoticed
+    # no-op on a training run rather than an error.
+    if args.get("max_episodes") is not None:
+        if args.get("train"):
+            raise ValueError(
+                "--max_episodes sets player.games_num, which only the playback path reads. "
+                "Use --max_epochs in the YAML to bound a training run."
+            )
+        cfg.setdefault("player", {})["games_num"] = args["max_episodes"]
 
     if args.get("checkpoint"):
         config_dict["params"]["load_checkpoint"] = True
@@ -219,6 +257,30 @@ def load_config(args):
     bind_encoder_bounds(config_dict)
 
     return config_dict
+
+
+def dump_run_config(config_dict):
+    """Freeze the resolved config into the run directory, beside nn/ and summaries/.
+
+    Not a convenience. Some hyperparameters are not recoverable from the checkpoint at
+    all, and `num_steps` is the one that matters: every PopSAN weight shape is independent
+    of it, so a checkpoint exported with the wrong number of spiking timesteps loads with
+    strict=True, raises nothing, and produces actions that correlate 0.99 with the real
+    policy while being wrong by ~16% of full scale on every actuator. The exporter
+    (deploy/snn_checkpoint.py) reads THIS file rather than whatever cfg/*.yaml happens to
+    say today, because the YAML drifts and the run does not.
+
+    Written after resolve_encoder_bounds/bind_encoder_bounds, so it records the encoder
+    bounds actually used rather than the ones the source YAML asked for.
+    """
+    cfg = config_dict["params"]["config"]
+    run_dir = os.path.join(cfg["train_dir"], cfg["full_experiment_name"])
+    os.makedirs(run_dir, exist_ok=True)
+    path = os.path.join(run_dir, "config.yaml")
+    with open(path, "w") as f:
+        yaml.safe_dump(config_dict, f, default_flow_style=False, sort_keys=False)
+    logger.info(f"[run-config] froze resolved config at {path}")
+    return path
 
 
 # =============================================================================
@@ -305,6 +367,10 @@ def main():
     except yaml.YAMLError as exc:
         logger.error(f"Error loading config: {exc}")
         sys.exit(1)
+
+    # Only on --train: a playback run must not overwrite the config the weights came from.
+    if args.get("train"):
+        dump_run_config(config_dict)
 
     runner = Runner(algo_observer=IsaacAlgoObserver())
     register_algos(runner)

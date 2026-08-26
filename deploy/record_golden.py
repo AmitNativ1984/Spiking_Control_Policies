@@ -21,6 +21,18 @@ USAGE
         --checkpoint /workspaces/aerial_gym_docker/runs/f450_hover/.../last_....pth \
         --output <sail-uav-core>/libs/control-policy-api/policies/hover/hover_golden.npz
 
+    python -m deploy.record_golden --arch snn \
+        --checkpoint runs/f450_hover_snn/<run>/nn/last_....pth \
+        --config    runs/f450_hover_snn/<run>/config.yaml \
+        --output <sail-uav-core>/libs/control-policy-api/policies/hover_snn/hover_golden.npz
+
+For a spiking policy the recording also carries the SHA-256 of the --config it used, and the
+flight suite requires it to match the graph's. That is what makes the two commands provably
+one policy: `num_steps` lives only in that file, so exporting the graph from one config and
+recording the golden from another would otherwise compare two different networks and report
+it as numerical drift. (Neither file can tell you the config is TRUE for this checkpoint --
+snn_checkpoint.verify_config_against_weights is what establishes that, at load time.)
+
 Re-record whenever the checkpoint changes, and re-export the graph from the SAME .pth --
 both files carry the checkpoint's SHA-256, and test_artifacts_share_one_checkpoint fails on
 a mismatched pair rather than letting the parity test report it as numerical drift.
@@ -34,7 +46,7 @@ from pathlib import Path
 import numpy as np
 
 from control_policy_api.base import DroneState
-from .hover import HoverPolicy
+from .hover import HoverPolicy, SnnHoverPolicy
 
 NUM_SAMPLES = 256
 
@@ -71,17 +83,31 @@ def sample_states(rng, count):
     return states, targets
 
 
-def main() -> None:
+def main(argv=None) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--arch", choices=("ann", "snn"), default="ann",
+                        help="dense actor (default) or PopSAN spiking actor")
+    parser.add_argument("--config", type=Path, default=None,
+                        help="--arch snn: the run's frozen config.yaml, beside nn/")
     parser.add_argument("--samples", type=int, default=NUM_SAMPLES)
     parser.add_argument("--seed", type=int, default=20260816)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     import torch  # imported late so the module docstring is readable without it
 
-    policy = HoverPolicy(str(args.checkpoint))
+    if args.arch == "ann":
+        if args.config is not None:
+            raise SystemExit("--config applies to --arch snn only")
+        policy = HoverPolicy(str(args.checkpoint))
+    else:
+        if args.config is None:
+            raise SystemExit(
+                "--arch snn requires --config: num_steps is not recoverable from the "
+                "checkpoint. Pass the config.yaml in the checkpoint's own run directory."
+            )
+        policy = SnnHoverPolicy(str(args.checkpoint), args.config)
     rng = np.random.default_rng(args.seed)
     states, targets = sample_states(rng, args.samples)
 
@@ -106,12 +132,15 @@ def main() -> None:
         observations=np.array(observations),
         actions=np.array(actions),
         checkpoint_sha256=checkpoint_digest(args.checkpoint),
+        arch=args.arch,
+        **({"config_sha256": checkpoint_digest(args.config)} if args.arch == "snn" else {}),
         recorded_with=(
             f"python {platform.python_version()} torch {torch.__version__} "
             f"numpy {np.__version__}"
         ),
     )
     print(f"wrote {args.output} ({args.samples} samples)")
+    print(f"  arch {args.arch}", f"num_steps {policy.num_steps}" if args.arch == "snn" else "")
     print(f"  torch {torch.__version__}, numpy {np.__version__}")
     print(f"  action range [{np.min(actions):.4f}, {np.max(actions):.4f}]")
 

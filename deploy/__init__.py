@@ -12,10 +12,19 @@ of the arithmetic and raises no such question.
 
 WHAT TO RUN
 -----------
-    python -m deploy.export_onnx   --checkpoint runs/.../last_....pth --output <flight>/hover.onnx
-    python -m deploy.record_golden --checkpoint runs/.../last_....pth --output <flight>/hover_golden.npz
+See README.md. In short:
 
-which produce the three artifacts sail-uav-core consumes:
+    python -m deploy.publish --arch snn \
+        --checkpoint runs/f450_hover_snn/<run>/nn/last_....pth \
+        --policy-dir <sail-uav-core>/libs/control-policy-api/policies/hover_snn
+
+`publish` runs export_onnx and record_golden against one checkpoint, and for --arch snn
+derives the run's config.yaml from the checkpoint path -- the number of spiking timesteps is
+not recoverable from the weights, and a wrong one is invisible (see snn_checkpoint.py). The
+two scripts still work standalone; publish exists so the pair cannot be run with different
+inputs, which produces two internally-consistent artifacts describing different policies.
+
+The three artifacts sail-uav-core consumes:
 
     hover.onnx         the network graph
     hover.npz          its frozen input-normalization statistics (written beside the graph)
