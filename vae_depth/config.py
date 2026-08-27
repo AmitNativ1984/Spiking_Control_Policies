@@ -6,10 +6,21 @@ from dataclasses import dataclass, field
 @dataclass
 class VAEConfig:
     # Data
-    data_dir: str = os.path.expanduser("~/DATA/depth-images/")
+    # data_dir and collision_cache_dir TRAVEL TOGETHER. cache_path_for() keys the cache on
+    # the image BASENAME alone, and cache_signature() encodes only geometry -- neither
+    # carries any dataset identity. Two datasets whose files are both named depth_000000.png
+    # therefore resolve to the same cache path, and the stale entry loads without error,
+    # training the decoder against targets belonging to a different image. Repointing
+    # data_dir without repointing the cache root is silently wrong, not merely stale.
+    data_dir: str = os.path.expanduser("~/DATA/depth-images-forest/")
     image_format: str = "png"
-    source_height: int = 720
-    source_width: int = 1280
+    # Frames are ray-cast natively at 320x180 by RealSenseD435CamConfig -- the same sensor
+    # config the RL task reads through -- so source == target and dataset.py's resize is a
+    # no-op. The old 1280x720 came from a separate data-gen camera that no longer exists;
+    # training on a nearest-downsample of it while running on a native 320x180 render meant
+    # the encoder saw different ray directions per pixel at train and inference time.
+    source_height: int = 180
+    source_width: int = 320
 
     target_height: int = 180
     target_width: int = 320
@@ -38,7 +49,11 @@ class VAEConfig:
                                         # just above it, 1/sqrt(d^2-R^2) explodes.
     collision_buckets: int = 16         # depth buckets; radius comes from each bucket's near edge
     collision_shells: int = 8           # flat shells approximating the hemispherical element
-    collision_cache_dir: str = ""       # "" -> <data_dir>/../depth-collision/<signature>
+    # Set EXPLICITLY, per dataset. The "" default resolves to
+    # <data_dir>/../depth-collision/<signature>, which puts every dataset under ~/DATA/ into
+    # ONE cache root; the signature is pure geometry, so depth-images/ and
+    # depth-images-forest/ would collide entry for entry. See the note on data_dir.
+    collision_cache_dir: str = os.path.expanduser("~/DATA/depth-collision-forest/")
     collision_algo_version: int = 1     # bump to invalidate every cached target
 
     # --- Legacy min-pool dilation (collision_target_mode == "legacy" only) ---------------

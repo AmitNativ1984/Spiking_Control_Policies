@@ -130,6 +130,7 @@ def main():
     paths = [p for p in paths if os.path.getsize(p) > 0]
     if not paths:
         raise FileNotFoundError(f"no images in {config.data_dir}")
+    total_images = len(paths)
     if args.limit:
         paths = paths[:args.limit]
 
@@ -186,8 +187,12 @@ def main():
                   f"eta {(len(todo)-written)/max(rate,1e-6)/60:.1f} min")
 
     elapsed = time.time() - t0
-    size_mb = sum(os.path.getsize(os.path.join(cache_dir, f))
-                  for f in os.listdir(cache_dir) if f.endswith(".png")) / 1e6
+    cached_files = [f for f in os.listdir(cache_dir) if f.endswith(".png")]
+    size_mb = sum(os.path.getsize(os.path.join(cache_dir, f)) for f in cached_files) / 1e6
+    # Per-target size must divide by what is ON DISK, not by what this run happened to
+    # write: on a resume those differ, and dividing by `written` inflated the projection
+    # by the resume ratio (11.5 GB against a true 2.3 GB after a 256-image trial).
+    mb_per_target = size_mb / max(len(cached_files), 1)
 
     manifest = {
         "created": datetime.now().isoformat(timespec="seconds"),
@@ -221,10 +226,12 @@ def main():
     print(f"\nwrote {written} targets in {elapsed:.1f} s "
           f"({written/max(elapsed,1e-6):.0f} img/s), cache {size_mb:.0f} MB")
     print(f"manifest: {os.path.join(cache_dir, 'manifest.json')}")
-    if len(paths) < 43087:
-        full = 43087 * elapsed / max(written, 1) / 60
-        print(f"extrapolated to the full 43,087-image dataset: "
-              f"{full:.0f} min, {43087 * size_mb / max(written,1) / 1000:.1f} GB")
+    # Counted, not hardcoded: this said "43,087" long after the dataset moved to 85k, and
+    # a --limit trial run is exactly when someone is deciding whether to start the full one.
+    if len(paths) < total_images:
+        full = total_images * elapsed / max(written, 1) / 60
+        print(f"extrapolated to the full {total_images:,}-image dataset: "
+              f"{full:.0f} min, {total_images * mb_per_target / 1000:.1f} GB")
 
 
 if __name__ == "__main__":
