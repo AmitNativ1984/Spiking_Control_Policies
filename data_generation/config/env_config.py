@@ -1,87 +1,39 @@
-from aerial_gym.config.asset_config.env_object_config import (
-    panel_asset_params,
-    thin_asset_params,
-    tree_asset_params,
-    object_asset_params,
-)
+"""Environment for depth-dataset collection: the navigation env, not flying.
 
-import numpy as np
+Everything that determines what the camera SEES -- obstacle mix and pool sizes, Poisson
+placement, env bounds, the floor slab, the cullable perimeter walls -- is INHERITED from
+ForestEnvCfg rather than restated here. That is the entire point of this file.
 
+The previous version of it declared its own obstacle set (panels/thin/trees/objects in
+per-asset ratio boxes, no floor) and then drifted: by the time the navigation env had
+grown spheres, cylinders, perimeter walls and a ground plane, the VAE was still being
+trained on a world containing none of them. Anything restated here is something that can
+drift again, so only collection-specific env FLAGS are overridden below.
+"""
 
-# Panels with full rotation randomization (replaces fixed walls)
-class dense_panel_params(panel_asset_params):
-    num_assets = 15
-    keep_in_env = False  # allow density randomization to cull some
-
-    # Full position range across the environment
-    min_state_ratio = [
-        0.05, 0.05, 0.05,
-        -np.pi, -np.pi / 2, -np.pi,
-        1.0,
-        0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0,
-    ]
-    max_state_ratio = [
-        0.95, 0.95, 0.95,
-        np.pi, np.pi / 2, np.pi,
-        1.0,
-        0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0,
-    ]
+from config.env_config.env_forest_with_obstacles import ForestEnvCfg
 
 
-class dense_thin_params(thin_asset_params):
-    num_assets = 8
-    keep_in_env = False
+class DataGenEnvCfg(ForestEnvCfg):
+    class env(ForestEnvCfg.env):
+        # num_envs comes from the CLI, as it does for ForestEnvCfg.
 
+        # The camera is teleported into the obstacle field and will sometimes land inside
+        # something. That is a frame to reject (generate_dataset's valid-pixel filter),
+        # not an episode to terminate -- and a reset here would throw away the other
+        # envs' poses too.
+        reset_on_collision = False
 
-class dense_tree_params(tree_asset_params):
-    num_assets = 4
-    keep_in_env = False
-
-
-class dense_object_params(object_asset_params):
-    num_assets = 50
-
-
-class DataGenEnvCfg:
-    class env:
-        num_envs = 16  # default, overridden by CLI
-        num_env_actions = 4
-        env_spacing = 5.0
-
-        num_physics_steps_per_env_step_mean = 1  # minimal physics needed
+        # Nothing is being simulated. One substep per capture is enough to push the reset
+        # state into the sim before the render; the nav env's 3 +/- 1 only exists to set
+        # the control rate.
+        num_physics_steps_per_env_step_mean = 1
         num_physics_steps_per_env_step_std = 0
 
-        render_viewer_every_n_steps = 1000  # effectively never
-        reset_on_collision = False  # don't reset when camera is inside obstacle
-        collision_force_threshold = 1000.0
-        create_ground_plane = False
-        sample_timestep_for_latency = False
+        # Both are policy-training devices, and both would put noise into the geometry the
+        # VAE is supposed to learn. The camera's OWN noise/mount randomization stays on --
+        # that lives in RealSenseD435CamConfig and is part of the sensor model.
         perturb_observations = False
-        keep_same_env_for_num_episodes = 1
-        write_to_sim_at_every_timestep = False
+        sample_timestep_for_latency = False
 
-        use_warp = True
-
-        # Environment bounds (randomized per-env on each reset)
-        # Resulting volume: ~18-25m (X) x 14-20m (Y) x 8-14m (Z)
-        lower_bound_min = [-5.0, -10.0, -7.0]
-        lower_bound_max = [-3.0, -7.0, -4.0]
-        upper_bound_min = [15.0, 7.0, 4.0]
-        upper_bound_max = [20.0, 10.0, 7.0]
-
-    class env_config:
-        include_asset_type = {
-            "panels": True,
-            "thin": True,
-            "trees": True,
-            "objects": True,
-        }
-
-        asset_type_to_dict_map = {
-            "panels": dense_panel_params,
-            "thin": dense_thin_params,
-            "trees": dense_tree_params,
-            "objects": dense_object_params,
-        }
+        render_viewer_every_n_steps = 1000000  # headless collection; effectively never

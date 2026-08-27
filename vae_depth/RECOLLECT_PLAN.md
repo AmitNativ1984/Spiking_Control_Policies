@@ -1,5 +1,24 @@
 # Re-collecting the depth dataset for the new obstacle environment
 
+> **Status: phases 1-3 implemented and smoke-tested.** `data_generation/` now imports the
+> nav env, the Poisson manager and the RL camera instead of restating them, and
+> `vae_depth/config.py` points at the new dataset and its own cache root. Phases 4-6
+> (build the cache, retrain, validate) are still to run.
+>
+> Two things below were changed by measurement rather than argument:
+>
+> - **Phase 2 stratification is OFF by default.** The premise — that a big box yields
+>   mostly far/empty views — is wrong here, because the floor slab is in frame in nearly
+>   every view. Measured over 1024 frames: 21.9% under 1 m, 31.2% 1-2 m, 39.6% 2-4 m,
+>   6.8% 4-7 m, 0.6% beyond. The natural mix is already near-heavy, and with only ~7.4%
+>   of far frames to redistribute into, any cap at or below 0.31 is arithmetically
+>   unsatisfiable. The flag is kept for deliberate reshaping.
+> - **`--num_envs` is not a throughput knob.** Reset and render are both linear in env
+>   count, so per-image cost is flat (~205-229 ms across 8/32/64 envs). The lever that
+>   does work is `--poses_per_layout`, which amortizes the 3.4 s obstacle reset over K
+>   camera poses: 3.9 -> 6.3 img/s at K=4.
+
+
 The 43k images in `~/DATA/depth-images/` were generated from `data_generation/config/env_config.py`,
 which predates the navigation env rewrite. The VAE trained on them has never seen a ground
 plane, a sphere, a cylinder or a perimeter wall — and a ground plane is in the lower third of

@@ -1,45 +1,23 @@
-import trimesh
-from urdfpy import Cylinder, Box, Sphere
+"""Registers the depth-collection env and camera carrier with aerial_gym.
 
-# Monkey-patch urdfpy primitive geometry classes.
-# Bug: _meshes is initialized to None, so len(self._meshes) raises TypeError.
-# Cylinder also has a typo: returns self._mesh instead of self._meshes.
+Both are thin subclasses of what the navigation task itself uses, so importing this
+package also imports `config`, which registers "forest_with_obstacles_env" and "f450".
+That is intentional -- the whole design is that the dataset is rendered in the env the
+policy flies in, so the two must be loaded from the same place.
 
+The urdfpy Cylinder/Box/Sphere monkey-patch that used to live here is gone. urdfpy 0.0.22
+is abandoned and its Cylinder.meshes is broken, but that is now fixed at the import layer
+by the urchin shim (Dockerfile.base, plus user site-packages) rather than per-caller --
+which is why task/attitude_navigation_task.py loads the same cylinder-based tree URDFs
+with no patch of its own.
+"""
 
-@property
-def _cylinder_meshes(self):
-    if self._meshes is None or len(self._meshes) == 0:
-        self._meshes = [trimesh.creation.cylinder(
-            radius=self.radius, height=self.length
-        )]
-    return self._meshes
-
-
-@property
-def _box_meshes(self):
-    if self._meshes is None or len(self._meshes) == 0:
-        self._meshes = [trimesh.creation.box(extents=self.size)]
-    return self._meshes
-
-
-@property
-def _sphere_meshes(self):
-    if self._meshes is None or len(self._meshes) == 0:
-        self._meshes = [trimesh.creation.icosphere(radius=self.radius)]
-    return self._meshes
-
-
-Cylinder.meshes = _cylinder_meshes
-Box.meshes = _box_meshes
-Sphere.meshes = _sphere_meshes
-
-# Register custom configs with aerial_gym registries
 from aerial_gym.registry.env_registry import env_config_registry
 from aerial_gym.registry.robot_registry import robot_registry
 from aerial_gym.robots.base_multirotor import BaseMultirotor
 
 from data_generation.config.env_config import DataGenEnvCfg
-from data_generation.config.robot_config import DataGenQuadCfg
+from data_generation.config.robot_config import DataGenF450Cfg
 
 env_config_registry.register("data_gen_env", DataGenEnvCfg)
-robot_registry.register("data_gen_quad", BaseMultirotor, DataGenQuadCfg)
+robot_registry.register("data_gen_quad", BaseMultirotor, DataGenF450Cfg)

@@ -1,118 +1,130 @@
 # Depth Image Dataset Generation for VAE Training
 
-Generates a dataset of 85,000 depth images for supervised training of a Variational Autoencoder (VAE), following the approach in [Reinforcement Learning for Collision-free Flight Exploiting Deep Collision Encoding](https://arxiv.org/abs/2402.03947).
+Renders the depth images that `vae_depth` trains on, following
+[Reinforcement Learning for Collision-free Flight Exploiting Deep Collision Encoding](https://arxiv.org/abs/2402.03947).
 
-## Overview
+## The one rule
 
-A simulated Intel RealSense D435 depth camera is randomly positioned inside environments filled with diverse obstacles. The aerial gym simulator (built on NVIDIA Isaac Gym) renders depth images using GPU-accelerated Warp ray-casting across multiple parallel environments.
+**The dataset is rendered in the environment the policy flies in, through the camera the
+policy reads from.** Nothing about the world or the sensor is declared here; it is
+imported:
 
-Each capture randomizes:
-- **Camera pose**: random position (10-90% of env bounds) and orientation (roll/pitch +/-60 deg, yaw full 360 deg)
-- **Obstacle layout**: all obstacle positions and orientations re-randomized every step
-- **Obstacle density**: number of active obstacles varies randomly per step (from sparse to dense)
-- **Environment bounds**: volume dimensions randomized per-environment (~18-25m x 14-20m x 8-14m)
+| what | where it comes from | what this package adds |
+|---|---|---|
+| obstacles, bounds, floor, walls | `config/env_config/env_forest_with_obstacles.py` | collection flags only (no collision reset, 1 substep) |
+| obstacle placement | `env_manager/poisson_asset_manager.py` | injected exactly as the nav task injects it |
+| obstacle density | `config/task_config/…_navigation_task_config.py` | a curriculum level drawn per layout |
+| camera | `config/sensor_config/realsense_d435_cam_config.py` | nothing — used as-is |
+| airframe | `config/robot_config/f450_config.py` | wide pose roam, gravity off |
 
-## Camera Parameters
+The previous version of this package declared its own obstacle set and its own 1280x720
+camera. Both drifted. By the time the navigation env had grown spheres, cylinders,
+perimeter walls and a ground plane, the VAE was still being trained on a world containing
+none of them — and on downsampled 1280x720 frames while inference ran on native 320x180
+renders. Anything restated here is something that can drift again.
 
-Simulates the Intel RealSense D435 depth camera:
+## What varies per frame
 
-| Parameter       | Value       |
-|-----------------|-------------|
-| Resolution      | 1280 x 720  |
-| Horizontal FOV  | 87 deg      |
-| Vertical FOV    | ~58 deg (derived from aspect ratio) |
-| Min range       | 0.105 m     |
-| Max range       | 10.0 m      |
+- **Obstacle layout** — a homogeneous Poisson point process over the env box, thinned by
+  a keep-out ellipsoid around the policy's spawn box.
+- **Obstacle density** — a curriculum level is drawn per layout (0-25) and converted to a
+  Poisson intensity by the same formula the task uses, so the dataset is spread over the
+  clutter the policy actually meets. Levels 0-2 are near-empty and drawn only 5% of the
+  time (`--empty_level_prob`).
+- **Camera pose** — position anywhere in the env (z clear of the floor slab and the
+  ceiling), yaw uniform, roll/pitch up to the task's `max_inclination_angle_rad` (±45°).
+  Not ±60°, which is outside anything the drone can command.
+- **Camera mount** — ±5° and a few cm, from the sensor config, re-drawn every pose.
 
-## Obstacle Types
+Frames with fewer than 5% valid pixels (camera inside an obstacle) are dropped.
 
-| Type     | Count per env | Source URDFs | Description |
-|----------|---------------|--------------|-------------|
-| Panels   | 15            | 51 varied URDFs | Flat surfaces with random width (0.5-5.0m), height (1.0-6.0m), and thickness (0.05-0.15m). Full rotation randomization. |
-| Thin     | 8             | 1000 URDFs   | Procedurally generated thin obstacles with varied shapes. |
-| Trees    | 4             | 100 URDFs    | Procedurally generated tree structures made of cylinder branches. Always present in scene. |
-| Objects  | 50            | 4 URDFs      | Small cubes, cuboidal rods, and wall segments (0.4-2.0m). Full rotation randomization. |
+## Poses per layout
 
-The asset loader randomly selects URDFs from each type's folder at simulation creation. On each reset, all non-tree obstacle positions and orientations are re-randomized, and a random subset may be culled (moved off-screen) to vary scene density.
+Re-placing the obstacles costs ~3.4 s at 32 envs — the Poisson draw over ~200 assets plus
+the warp BVH refit — while re-randomizing the camera pose costs 1.5 ms. `--poses_per_layout`
+(default 4) renders K viewpoints per layout and cuts the per-image cost ~1.6x.
 
-## Output Format
+The cost is correlation: K frames share an obstacle field. Measured at K=4, frames sharing
+a layout differ by as much mean depth as frames from different envs (3.48 m vs 3.55 m),
+and 85k images still means ~21k independent layouts.
 
-- **16-bit grayscale PNG** (default): Normalized depth values scaled to 0-65535. To recover depth in meters: `depth_m = (pixel_value / 65535.0) * 10.0`.
-- **NumPy float32** (optional): Raw normalized depth values in [0, 1]. Use `--format npy`.
+`--num_envs` is a **memory** knob, not a throughput one. Reset and render are both linear
+in env count:
 
-Images with fewer than 5% valid pixels (camera inside obstacle or pointing into empty space) are automatically skipped.
+| envs | reset | render | per image (K=1) | per image (K=4) |
+|---|---|---|---|---|
+| 8 | 832 ms | 788 ms | 229 ms | 151 ms |
+| 32 | 3399 ms | 3152 ms | 209 ms | 130 ms |
+| 64 | 6640 ms | 6275 ms | 205 ms | 127 ms |
 
-## Prerequisites
-
-- NVIDIA GPU with CUDA support
-- Docker container running with the aerial gym simulator (see main repo README)
-- Panels must be generated first (see below)
+Raising it buys nothing but VRAM pressure.
 
 ## Usage
 
-### 1. Generate varied panel URDFs (one-time setup)
-
 ```bash
-python data_generation/generate_panels.py
+cd /workspaces/aerial_gym_docker
+python -m data_generation.generate_dataset                                # 85k, defaults
+python -m data_generation.generate_dataset --num_images 128 --num_envs 4  # smoke test
 ```
 
-This creates 50 panel URDFs with randomized dimensions in the aerial gym assets folder.
+Measured: **6.3 img/s** at 32 envs with K=4, so 85k images take **~3.7 h** and **~1.8 GB**
+(20.8 KB/frame, 16-bit PNG at 320x180).
 
-### 2. Generate the dataset
+### Output format
 
-```bash
-# Full dataset (85,000 images, default settings)
-python -m data_generation.generate_dataset
+16-bit grayscale PNG, `depth_m = pixel / 65535 * 10.0`. Native 320x180 — the resize in
+`vae_depth/dataset.py` is a no-op on this data, which is the point. `--format npy` writes
+float32 in [0, 1] instead.
 
-# Custom settings
-python -m data_generation.generate_dataset \
-    --num_images 85000 \
-    --num_envs 16 \
-    --output_dir ~/DATA/depth-images \
-    --format png \
-    --seed 42
+The sensor's near-out-of-range sentinel (-1) is clipped to 0 on write. Not a loss: 0 and
+-1 both land on `min_depth_m` once `vae_depth.preprocessing.normalize_depth` clamps, on
+the training and the inference path alike.
 
-# Quick test run
-python -m data_generation.generate_dataset --num_images 32 --num_envs 4
+### After generating
+
+The collision-target cache and the dataset **travel together** — `cache_path_for()` keys
+on the image basename and `cache_signature()` encodes only geometry, so two datasets whose
+files are both named `depth_000000.png` resolve to the same cache entry and the stale one
+loads silently. `vae_depth/config.py` sets both:
+
+```python
+data_dir            = "~/DATA/depth-images-forest/"
+collision_cache_dir = "~/DATA/depth-collision-forest/"
 ```
 
-### CLI Arguments
+Then build the targets and train:
 
-| Argument            | Default                  | Description |
-|---------------------|--------------------------|-------------|
-| `--num_images`      | 85000                    | Total number of depth images to generate |
-| `--num_envs`        | 16                       | Number of parallel environments. Reduce if out of memory. |
-| `--output_dir`      | `~/DATA/depth-images`    | Output directory |
-| `--format`          | `png`                    | `png` (16-bit) or `npy` (float32) |
-| `--device`          | `cuda:0`                 | CUDA device |
-| `--seed`            | 42                       | Random seed for reproducibility |
-| `--min_valid_ratio` | 0.05                     | Min fraction of valid pixels to accept an image |
+```bash
+python -m vae_depth.precompute_collision --validate 16
+python -m vae_depth.train --num_epochs 100 --batch_size 64
+```
 
-### VRAM Guidelines
+## Known gap: the panel pool is one mesh
 
-| GPU VRAM | Recommended `--num_envs` |
-|----------|--------------------------|
-| 8 GB     | 4-8                      |
-| 16 GB    | 16-32                    |
-| 24 GB    | 32-64                    |
+`aerial_gym/resources/models/environment_assets/panels/` contains a single `panel.urdf`,
+so all 7 panel slots in every env draw the same mesh. `generate_panels.py` writes 50
+randomized panel URDFs there and fixes it.
 
-## File Structure
+It is **not** run by default, because that directory is shared with RL training: adding
+panels changes the world the policy flies in as well as the world the dataset is rendered
+in. Run it before collecting, or not at all — but do not run it *between* collecting the
+dataset and training the policy, or the two will disagree again.
+
+```bash
+python data_generation/generate_panels.py   # optional; changes the RL env too
+```
+
+## File structure
 
 ```
 data_generation/
-├── __init__.py              # urdfpy monkey-patch + registry registration
+├── __init__.py           # registry registration
 ├── config/
-│   ├── __init__.py
-│   ├── camera_config.py     # Intel RealSense D435 parameters
-│   ├── robot_config.py      # Camera carrier quadrotor with wide pose randomization
-│   └── env_config.py        # Environment with all obstacle types, no fixed walls
-├── generate_dataset.py      # Main data collection script
-├── generate_panels.py       # One-time panel URDF generation
-└── README.md
+│   ├── env_config.py     # ForestEnvCfg + collection flags
+│   └── robot_config.py   # F450Config + roaming pose, gravity off
+├── generate_dataset.py   # collection loop
+├── generate_panels.py    # optional panel URDF variety (see above)
+└── generate_objects.py
 ```
 
-## Technical Notes
-
-- **urdfpy monkey-patch**: The `__init__.py` patches a bug in `urdfpy` where `Cylinder`, `Box`, and `Sphere` geometry classes crash on `len(self._meshes)` when `_meshes` is `None`. This is required for loading tree URDFs (which use cylinder primitives).
-- **Warp renderer**: Uses `use_warp=True` for GPU-accelerated ray-casting, which is significantly faster than Isaac Gym's native camera sensors for large numbers of environments.
-- **No physics needed**: The quadrotor has gravity disabled and receives zero actions. A single physics step is run per capture only to update the simulation state after reset.
+`camera_config.py` is gone on purpose — the camera is `RealSenseD435CamConfig`.

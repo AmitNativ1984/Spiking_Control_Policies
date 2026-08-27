@@ -59,7 +59,10 @@ Required before training in the default `collision` mode:
 python -m vae_depth.precompute_collision --validate 16
 ```
 
-~12 min and ~0.9 GB for the 43k-image dataset. The cache directory name encodes every
+~12 min and ~0.9 GB per 43k images, so roughly twice that for the 85k default. The cache
+directory name encodes every geometric parameter but NOT the dataset, which is why
+`collision_cache_dir` is set explicitly per dataset — see "Cache pairing" below. Within a
+dataset the name encodes every
 geometric parameter, so a stale cache cannot be picked up silently, and the script refuses
 to write if the fast builder disagrees with a brute-force sphere-sweep by more than
 `--max_unsafe` (default 0.15 m) in the optimistic direction.
@@ -96,15 +99,33 @@ loss = weighted_MSE(predicted, dilated_target) + beta * KL_divergence
 
 ## Dataset Generation
 
-Depth images are generated using the Aerial Gym Simulator (Isaac Gym):
+Depth images are rendered in the environment the policy flies in
+(`config/env_config/env_forest_with_obstacles.py`), through the camera the policy reads
+from (`config/sensor_config/realsense_d435_cam_config.py`). See `data_generation/README.md`.
 
 ```bash
-python -m data_generation.generate_dataset --num_images 85000 --num_envs 16
+python -m data_generation.generate_dataset          # 85k images, ~3.7 h, ~1.8 GB
 ```
 
-This creates randomized environments with panels, thin structures, trees, and objects, then captures depth images from random drone poses. Output: 16-bit PNG files in `~/DATA/depth-images/`.
+Output: 16-bit PNG in `~/DATA/depth-images-forest/`, **native 320x180** — so the resize in
+`dataset.py` is a no-op and the encoder sees the same ray-cast at train and inference time.
+`depth_m = pixel / 65535 * 10.0`. RealSense D435 parameters: 87 deg HFOV, 0.1-10 m.
 
-Camera specs match Intel RealSense D435: 1280x720, 87 degrees HFOV, 0.1-10m range.
+Obstacle layouts are a Poisson process over spheres, cylinders, objects, panels, trees and
+cullable perimeter walls, above a ground plane, at a density drawn per layout from the
+task's curriculum.
+
+> The dataset in `~/DATA/depth-images/` predates this and was collected in an environment
+> with no ground plane, no spheres, no cylinders and no walls. It is not a valid training
+> set for the current task.
+
+### Cache pairing
+
+`data_dir` and `collision_cache_dir` must be repointed **together**. `cache_path_for()`
+keys the cache on the image basename and `cache_signature()` encodes only geometry, so two
+datasets whose files are both named `depth_000000.png` resolve to the same cache entry.
+The stale target then loads without error and trains the decoder against a different
+image. Repointing one without the other is silently wrong, not merely stale.
 
 ## Training
 
