@@ -59,13 +59,16 @@ Required before training in the default `collision` mode:
 python -m vae_depth.precompute_collision --validate 16
 ```
 
-~12 min and ~0.9 GB per 43k images, so roughly twice that for the 85k default. The cache
-directory name encodes every geometric parameter but NOT the dataset, which is why
-`collision_cache_dir` is set explicitly per dataset — see "Cache pairing" below. Within a
-dataset the name encodes every
-geometric parameter, so a stale cache cannot be picked up silently, and the script refuses
-to write if the fast builder disagrees with a brute-force sphere-sweep by more than
-`--max_unsafe` (default 0.15 m) in the optimistic direction.
+~21 min and ~2.3 GB for the 85k dataset, measured. The script prints its own projection
+from a `--limit` trial run.
+
+The cache directory name encodes every geometric parameter, so within one dataset a stale
+cache cannot be picked up silently. It does **not** encode the dataset, which is why
+`collision_cache_dir` is set explicitly per dataset — see "Cache pairing" below.
+
+The script refuses to write if the fast builder disagrees with a brute-force sphere-sweep
+by more than `--max_unsafe` (default 0.15 m) in the optimistic direction. On the 85k forest
+dataset it passes at +0.108 m, 98.2 % of pixels conservative.
 
 Caching is valid because the dilation commutes with the crop/flip augmentation — verified
 in `tests/test_collision.py`, which also shows the cached path is never *less* conservative
