@@ -408,7 +408,16 @@ def _start_wandb(config_dict, args):
     # see load_config), so recombine them here: W&B has no folder nesting and a run called
     # "2026-08-11_10-52-30" would be unidentifiable in a project listing.
     cfg = config_dict["params"]["config"]
+
+    # W&B's local run files (output.log, debug logs, the mirrored tfevents, artifact
+    # staging) default to <cwd>/wandb/, which scatters them across a repo-root folder with
+    # no link back to the run that made them. Point them at the run directory instead, so
+    # nn/, summaries/, config.yaml and wandb/ all live under runs/<experiment>/<timestamp>.
+    run_dir = os.path.join(cfg["train_dir"], cfg["full_experiment_name"])
+    os.makedirs(run_dir, exist_ok=True)  # dump_run_config makes it too, but only on --train
+
     wandb.init(
+        dir=run_dir,
         project=args["wandb_project_name"],
         entity=args["wandb_entity"],
         name=f"{cfg['name']}_{cfg['full_experiment_name']}",
