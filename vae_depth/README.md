@@ -18,16 +18,64 @@ At RL inference time, the encoder receives raw depth from the simulator and outp
 3. Resize to 320x180 (nearest-neighbor)
 4. Linear normalization: `normalized = 1 - depth / max_depth` (near=1, far=0)
 
-**Decoder target** (dilated depth):
+**Decoder target** (collision depth):
 1. Same as above, but after step 3:
-2. Min-pool dilation with kernel derived from drone geometry (expands obstacles)
+2. Collision dilation (`collision.py`), precomputed and cached
 3. Then normalize
 
-The dilation kernel size is auto-computed from:
-- Drone radius: 0.25m (half widest dimension including propellers)
-- Safety margin: 50% of drone radius
-- Reference distance: 3m
-- Camera HFOV: 87 degrees
+The target is the Minkowski sum of the obstacle set with the drone's collision sphere,
+re-rendered as *the depth at which the drone's centre first collides along each ray*:
+
+```
+t_contact(u) = u.p - sqrt(R^2 - |p|^2 + (u.p)^2)      rays passing within R of p
+target(u,v)  = min over obstacle points p of  t_contact * u_z
+```
+
+with `R = collision_radius_m + safety_margin_m` = 0.357 + 0.125 = **0.482 m**. The drone
+radius is the F450's own swept circle, taken from `resources/robots/f450/model.urdf`: prop
+hubs 0.230 m out, prop discs 0.127 m — so 0.357 m, and 0.579 m tip to tip. (Do not use half
+the 450 mm wheelbase: that is measured motor-to-motor and excludes the props.)
+
+Depth is clamped to `[near_floor_m, max_depth_m]` = `[0.75, 7.0]`. The far end matches the
+encoder input's clamp so both sides agree on what "far" means; the near end is *higher* than
+the input's `min_depth_m`, because below `R` the drone's sphere already contains the point
+and no finite dilation radius exists — those pixels are pinned to the floor rather than
+given an unbounded kernel.
+
+Consequently the dilation radius is **range-dependent**, roughly as `1/d`:
+
+| range | radius | margin encoded |
+|---|---|---|
+| 0.75 m | 149 px | 0.482 m |
+| 1 m | 112 px | 0.482 m |
+| 3 m | 37 px | 0.482 m |
+| 7 m | 16 px | 0.482 m |
+
+### Building the target cache
+
+Required before training in the default `collision` mode:
+
+```bash
+python -m vae_depth.precompute_collision --validate 16
+```
+
+~12 min and ~0.9 GB for the 43k-image dataset. The cache directory name encodes every
+geometric parameter, so a stale cache cannot be picked up silently, and the script refuses
+to write if the fast builder disagrees with a brute-force sphere-sweep by more than
+`--max_unsafe` (default 0.15 m) in the optimistic direction.
+
+Caching is valid because the dilation commutes with the crop/flip augmentation — verified
+in `tests/test_collision.py`, which also shows the cached path is never *less* conservative
+than dilating after the crop.
+
+### Legacy target (A/B only)
+
+`--collision_target_mode legacy` restores the original single-range min-pool: a fixed 17 px
+kernel calibrated at 3 m, inflating by `0.5 × 0.25 m` = 0.125 m — half of a drone radius
+that was itself wrong. Against the F450's real 0.482 m sphere that is **3.9× too small even
+at the reference range**. It needs no cache.
+Kept only to compare the two encodings; it under-inflates at close range (0.047 m of margin
+at 1 m, 38 % of intended) and never applies the longitudinal pull-in.
 
 ### Loss Function
 
