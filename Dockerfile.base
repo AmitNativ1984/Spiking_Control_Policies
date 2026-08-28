@@ -73,6 +73,14 @@ WORKDIR /app/aerial_gym/aerial_gym_simulator
 
 RUN pip install -e .
 
+# Pin rl-games: aerial_gym_simulator's setup.py leaves it unversioned, so a
+# rebuild can silently pick up a newer release. 1.6.5 turns on torch.compile
+# by default (no opt-out in our yaml configs), which tanks training throughput
+# (observed: ~18-20 fps vs. the expected thousands, and 30-65+ min with no
+# epoch output at num_envs=512/1024). All runs before the 2026-08-28 rebuild
+# used 1.6.1, which has no torch.compile at all -- pin back to that.
+RUN pip install --no-cache-dir rl-games==1.6.1
+
 # Fix OpenCV version incompatibility (cv2.dnn.DictValue issue)
 RUN pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python || true && \
     pip install --no-cache-dir opencv-python==4.5.5.64
