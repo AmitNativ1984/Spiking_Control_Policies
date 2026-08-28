@@ -110,6 +110,13 @@ def log_final_weights(runs_dir: str, full_experiment_name: str, experiment_name:
 # emit one W&B row per epoch with `step=frame`. The x-axis then reads environment steps,
 # and `epoch`/`elapsed_s` ride along as columns so either can be picked as the x-axis in
 # the UI. TensorBoard output is untouched.
+#
+# write_stats supplies the epoch's (frame, epoch, elapsed); update_epoch commits the row.
+# The two are separate because a row can only be committed once the epoch is fully
+# written, and rl_games writes `rewards/*` and `episode_lengths/*` after write_stats
+# returns. update_epoch is the first call of the next iteration, so the commit lands
+# within milliseconds of the epoch ending -- flushing from write_stats instead would hold
+# every row back by a whole epoch, which on a slow env means hours of blind training.
 
 _DUPLICATE_SUFFIXES = ("/iter", "/time")
 _FRAME_SUFFIXES = ("/frame", "/step")
@@ -193,11 +200,9 @@ def enable_frame_axis_logging() -> None:
     signature = inspect.signature(original_write_stats)
 
     def write_stats_with_wandb(self, *args, **kwargs):
-        # write_stats is the first TensorBoard write of an epoch, so on entry the buffer
-        # holds the *previous* epoch in full (its losses, its observer metrics and its
-        # rewards, which rl_games writes after write_stats returns).
+        # Only records which epoch the scalars about to be written belong to; the commit
+        # happens in update_epoch, once the epoch is complete.
         if wandb.run is not None:
-            _EPOCH_METRICS.flush()
             try:
                 bound = signature.bind(self, *args, **kwargs)
                 bound.apply_defaults()
@@ -211,6 +216,19 @@ def enable_frame_axis_logging() -> None:
         return original_write_stats(self, *args, **kwargs)
 
     A2CBase.write_stats = write_stats_with_wandb
+
+    # A2CBase.update_epoch is a bare `pass` -- A2CAgent overrides it without calling super,
+    # so patching the base would silently never run. Patch the class that defines the
+    # implementation the agent actually resolves to.
+    original_update_epoch = A2CAgent.update_epoch
+
+    def update_epoch_with_wandb(self, *args, **kwargs):
+        # First call of the next iteration: the epoch that just ended is fully written.
+        if wandb.run is not None:
+            _EPOCH_METRICS.flush()
+        return original_update_epoch(self, *args, **kwargs)
+
+    A2CAgent.update_epoch = update_epoch_with_wandb
 
 
 def flush_final_metrics() -> None:
