@@ -10,8 +10,6 @@ FROM amitnativ/aerial-gym:latest
 # Python 3.8 wheel tag). Do NOT `pip install snntorch` here unpinned — on 3.8
 # that can downgrade it back to the buggy 0.9.1. Keep this layer for any
 # dev-only extras instead.
-RUN pip install \
-    loguru
 
 # Create non-root user matching host UID/GID
 ARG USERNAME=devuser
