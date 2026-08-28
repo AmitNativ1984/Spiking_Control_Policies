@@ -76,7 +76,7 @@ class VAEConfig:
     # Training
     batch_size: int = 64
     num_epochs: int = 100
-    learning_rate: float = 1e-4
+    learning_rate: float = 1e-3
     weight_decay: float = 0.0
     grad_clip_norm: float = 1.0
     val_split: float = 0.1
