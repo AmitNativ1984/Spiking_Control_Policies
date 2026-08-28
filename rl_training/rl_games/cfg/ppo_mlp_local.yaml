@@ -22,10 +22,10 @@ params:
           val: 0
         fixed_sigma: True
     actor:
-      hidden_dims: [256, 256, 256]
+      hidden_dims: [256, 256]
       activation: elu
     critic: 
-      hidden_dims: [256, 256, 256]
+      hidden_dims: [256, 256]
       activation: elu
 
   config:
@@ -47,9 +47,9 @@ params:
 
     # Learning rate
     learning_rate: 1e-4
-    lr_schedule: adaptive
-    kl_threshold: 0.016
-    min_lr: 1e-6
+    lr_schedule: constant #adaptive
+    # kl_threshold: 0.016
+    # min_lr: 1e-6
 
     # Training params
     save_best_after: 10

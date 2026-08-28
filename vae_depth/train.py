@@ -44,17 +44,23 @@ def prepare_input(batch_depth_m, config):
     return normalize_depth(batch_depth_m, config.max_depth_m, config.min_depth_m)
 
 
-def prepare_target(batch_depth_m, config):
-    """Prepare decoder target: dilate + normalize.
+def prepare_target(batch_target_m, config):
+    """Prepare decoder target: normalize the collision target.
+
+    In "collision" mode the dataset already supplies the precomputed collision-encoding
+    target, so there is nothing to dilate here. In "legacy" mode it supplies raw depth and
+    the old single-range min-pool runs on it, for A/B comparison only.
 
     Args:
-        batch_depth_m: [B, 1, H, W] raw depth in meters (on GPU).
+        batch_target_m: [B, 1, H, W] target depth in meters (on GPU).
         config: VAEConfig.
 
     Returns:
-        [B, 1, H, W] dilated + normalized depth in [0, 1].
+        [B, 1, H, W] normalized target in [0, 1].
     """
-    x = min_pool_dilation(batch_depth_m, config.dilation_kernel_size)
+    x = batch_target_m
+    if config.collision_target_mode == "legacy":
+        x = min_pool_dilation(x, config.dilation_kernel_size)
     return normalize_depth(x, config.max_depth_m, config.min_depth_m)
 
 
@@ -69,6 +75,14 @@ def parse_args():
     parser.add_argument("--beta_warmup_epochs", type=int, default=None)
     parser.add_argument("--obstacle_weight", type=float, default=None)
     parser.add_argument("--range_weight_power", type=float, default=None)
+    parser.add_argument("--collision_target_mode", type=str, default=None,
+                        choices=["collision", "legacy"],
+                        help="'collision' uses the precomputed per-range target; "
+                             "'legacy' is the old single-range min-pool, for A/B only")
+    parser.add_argument("--collision_radius_m", type=float, default=None)
+    parser.add_argument("--safety_margin_m", type=float, default=None)
+    parser.add_argument("--near_floor_m", type=float, default=None)
+    parser.add_argument("--collision_cache_dir", type=str, default=None)
     parser.add_argument("--dilation_kernel_size", type=int, default=None)
     parser.add_argument("--drone_radius_m", type=float, default=None)
     parser.add_argument("--safety_margin_fraction", type=float, default=None)
@@ -141,19 +155,21 @@ def select_diverse_samples(val_loader, device, config, num_images=8):
     """Pick validation images spanning a range of obstacle content."""
     candidates = []
     with torch.no_grad():
-        for batch_depth_m in val_loader:
+        for batch_depth_m, batch_target_m in val_loader:
             batch_depth_m = batch_depth_m.to(device)
-            batch_target = prepare_target(batch_depth_m, config)
+            batch_target_m = batch_target_m.to(device)
+            batch_target = prepare_target(batch_target_m, config)
             for i in range(batch_target.size(0)):
                 obstacle_frac = (batch_target[i] > config.obstacle_threshold).float().mean().item()
-                candidates.append((obstacle_frac, batch_depth_m[i:i+1]))
+                candidates.append((obstacle_frac, batch_depth_m[i:i+1], batch_target_m[i:i+1]))
             if len(candidates) >= 500:
                 break
     # Sort by obstacle fraction, pick evenly spaced samples
     candidates.sort(key=lambda x: x[0])
     step = max(1, len(candidates) // num_images)
-    selected = [candidates[i * step][1] for i in range(num_images)]
-    return torch.cat(selected, dim=0)
+    selected = [candidates[i * step] for i in range(num_images)]
+    return (torch.cat([s[1] for s in selected], dim=0),
+            torch.cat([s[2] for s in selected], dim=0))
 
 
 def log_reconstruction_images(writer, model, val_loader, device, epoch, config, num_images=8,
@@ -165,9 +181,9 @@ def log_reconstruction_images(writer, model, val_loader, device, epoch, config, 
         if _cached_samples[0] is None:
             _cached_samples[0] = select_diverse_samples(val_loader, device, config, num_images)
 
-        batch_depth_m = _cached_samples[0].to(device)
+        batch_depth_m = _cached_samples[0][0].to(device)
         batch_input = prepare_input(batch_depth_m, config)
-        batch_target = prepare_target(batch_depth_m, config)
+        batch_target = prepare_target(_cached_samples[0][1].to(device), config)
         x_recon, _, _, _ = model(batch_input)
 
         # Apply turbo colormap with shared [0,1] scale (no per-image normalization)
@@ -193,10 +209,10 @@ def train_one_epoch(model, train_loader, optimizer, device, beta, config):
     num_batches = 0
 
     pbar = tqdm(train_loader, desc="  Train", leave=False)
-    for batch_depth_m in pbar:
+    for batch_depth_m, batch_target_m in pbar:
         batch_depth_m = batch_depth_m.to(device)
         batch_input = prepare_input(batch_depth_m, config)
-        batch_target = prepare_target(batch_depth_m, config)
+        batch_target = prepare_target(batch_target_m.to(device), config)
 
         x_recon, mu, logvar, z = model(batch_input)
         loss, recon_loss, kl_loss = vae_loss(
@@ -236,10 +252,10 @@ def validate(model, val_loader, device, beta, config):
     all_logvar = []
 
     pbar = tqdm(val_loader, desc="  Val  ", leave=False)
-    for batch_depth_m in pbar:
+    for batch_depth_m, batch_target_m in pbar:
         batch_depth_m = batch_depth_m.to(device)
         batch_input = prepare_input(batch_depth_m, config)
-        batch_target = prepare_target(batch_depth_m, config)
+        batch_target = prepare_target(batch_target_m.to(device), config)
 
         x_recon, mu, logvar, z = model(batch_input)
         loss, recon_loss, kl_loss = vae_loss(

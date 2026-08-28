@@ -18,16 +18,70 @@ At RL inference time, the encoder receives raw depth from the simulator and outp
 3. Resize to 320x180 (nearest-neighbor)
 4. Linear normalization: `normalized = 1 - depth / max_depth` (near=1, far=0)
 
-**Decoder target** (dilated depth):
+**Decoder target** (collision depth):
 1. Same as above, but after step 3:
-2. Min-pool dilation with kernel derived from drone geometry (expands obstacles)
+2. Collision dilation (`collision.py`), precomputed and cached
 3. Then normalize
 
-The dilation kernel size is auto-computed from:
-- Drone radius: 0.25m (half widest dimension including propellers)
-- Safety margin: 50% of drone radius
-- Reference distance: 3m
-- Camera HFOV: 87 degrees
+The target is the Minkowski sum of the obstacle set with the drone's collision sphere,
+re-rendered as *the depth at which the drone's centre first collides along each ray*:
+
+```
+t_contact(u) = u.p - sqrt(R^2 - |p|^2 + (u.p)^2)      rays passing within R of p
+target(u,v)  = min over obstacle points p of  t_contact * u_z
+```
+
+with `R = collision_radius_m + safety_margin_m` = 0.357 + 0.125 = **0.482 m**. The drone
+radius is the F450's own swept circle, taken from `resources/robots/f450/model.urdf`: prop
+hubs 0.230 m out, prop discs 0.127 m — so 0.357 m, and 0.579 m tip to tip. (Do not use half
+the 450 mm wheelbase: that is measured motor-to-motor and excludes the props.)
+
+Depth is clamped to `[near_floor_m, max_depth_m]` = `[0.75, 7.0]`. The far end matches the
+encoder input's clamp so both sides agree on what "far" means; the near end is *higher* than
+the input's `min_depth_m`, because below `R` the drone's sphere already contains the point
+and no finite dilation radius exists — those pixels are pinned to the floor rather than
+given an unbounded kernel.
+
+Consequently the dilation radius is **range-dependent**, roughly as `1/d`:
+
+| range | radius | margin encoded |
+|---|---|---|
+| 0.75 m | 149 px | 0.482 m |
+| 1 m | 112 px | 0.482 m |
+| 3 m | 37 px | 0.482 m |
+| 7 m | 16 px | 0.482 m |
+
+### Building the target cache
+
+Required before training in the default `collision` mode:
+
+```bash
+python -m vae_depth.precompute_collision --validate 16
+```
+
+~21 min and ~2.3 GB for the 85k dataset, measured. The script prints its own projection
+from a `--limit` trial run.
+
+The cache directory name encodes every geometric parameter, so within one dataset a stale
+cache cannot be picked up silently. It does **not** encode the dataset, which is why
+`collision_cache_dir` is set explicitly per dataset — see "Cache pairing" below.
+
+The script refuses to write if the fast builder disagrees with a brute-force sphere-sweep
+by more than `--max_unsafe` (default 0.15 m) in the optimistic direction. On the 85k forest
+dataset it passes at +0.108 m, 98.2 % of pixels conservative.
+
+Caching is valid because the dilation commutes with the crop/flip augmentation — verified
+in `tests/test_collision.py`, which also shows the cached path is never *less* conservative
+than dilating after the crop.
+
+### Legacy target (A/B only)
+
+`--collision_target_mode legacy` restores the original single-range min-pool: a fixed 17 px
+kernel calibrated at 3 m, inflating by `0.5 × 0.25 m` = 0.125 m — half of a drone radius
+that was itself wrong. Against the F450's real 0.482 m sphere that is **3.9× too small even
+at the reference range**. It needs no cache.
+Kept only to compare the two encodings; it under-inflates at close range (0.047 m of margin
+at 1 m, 38 % of intended) and never applies the longitudinal pull-in.
 
 ### Loss Function
 
@@ -48,15 +102,33 @@ loss = weighted_MSE(predicted, dilated_target) + beta * KL_divergence
 
 ## Dataset Generation
 
-Depth images are generated using the Aerial Gym Simulator (Isaac Gym):
+Depth images are rendered in the environment the policy flies in
+(`config/env_config/env_forest_with_obstacles.py`), through the camera the policy reads
+from (`config/sensor_config/realsense_d435_cam_config.py`). See `data_generation/README.md`.
 
 ```bash
-python -m data_generation.generate_dataset --num_images 85000 --num_envs 16
+python -m data_generation.generate_dataset          # 85k images, ~3.7 h, ~1.8 GB
 ```
 
-This creates randomized environments with panels, thin structures, trees, and objects, then captures depth images from random drone poses. Output: 16-bit PNG files in `~/DATA/depth-images/`.
+Output: 16-bit PNG in `~/DATA/depth-images-forest/`, **native 320x180** — so the resize in
+`dataset.py` is a no-op and the encoder sees the same ray-cast at train and inference time.
+`depth_m = pixel / 65535 * 10.0`. RealSense D435 parameters: 87 deg HFOV, 0.1-10 m.
 
-Camera specs match Intel RealSense D435: 1280x720, 87 degrees HFOV, 0.1-10m range.
+Obstacle layouts are a Poisson process over spheres, cylinders, objects, panels, trees and
+cullable perimeter walls, above a ground plane, at a density drawn per layout from the
+task's curriculum.
+
+> The dataset in `~/DATA/depth-images/` predates this and was collected in an environment
+> with no ground plane, no spheres, no cylinders and no walls. It is not a valid training
+> set for the current task.
+
+### Cache pairing
+
+`data_dir` and `collision_cache_dir` must be repointed **together**. `cache_path_for()`
+keys the cache on the image basename and `cache_signature()` encodes only geometry, so two
+datasets whose files are both named `depth_000000.png` resolve to the same cache entry.
+The stale target then loads without error and trains the decoder against a different
+image. Repointing one without the other is silently wrong, not merely stale.
 
 ## Training
 

@@ -6,10 +6,21 @@ from dataclasses import dataclass, field
 @dataclass
 class VAEConfig:
     # Data
-    data_dir: str = os.path.expanduser("~/DATA/depth-images/")
+    # data_dir and collision_cache_dir TRAVEL TOGETHER. cache_path_for() keys the cache on
+    # the image BASENAME alone, and cache_signature() encodes only geometry -- neither
+    # carries any dataset identity. Two datasets whose files are both named depth_000000.png
+    # therefore resolve to the same cache path, and the stale entry loads without error,
+    # training the decoder against targets belonging to a different image. Repointing
+    # data_dir without repointing the cache root is silently wrong, not merely stale.
+    data_dir: str = os.path.expanduser("~/DATA/depth-images-forest/")
     image_format: str = "png"
-    source_height: int = 720
-    source_width: int = 1280
+    # Frames are ray-cast natively at 320x180 by RealSenseD435CamConfig -- the same sensor
+    # config the RL task reads through -- so source == target and dataset.py's resize is a
+    # no-op. The old 1280x720 came from a separate data-gen camera that no longer exists;
+    # training on a nearest-downsample of it while running on a native 320x180 render meant
+    # the encoder saw different ray directions per pixel at train and inference time.
+    source_height: int = 180
+    source_width: int = 320
 
     target_height: int = 180
     target_width: int = 320
@@ -19,11 +30,36 @@ class VAEConfig:
     min_depth_m: float = 0.1
     depth_scale: float = 10.0  # pixel_value / 65535 * depth_scale = meters
 
-    # Min-pool dilation (derived from drone geometry)
+    hfov_deg: float = 87.0
+
+    # --- Collision target (Deep Collision Encoding) -------------------------------------
+    # "collision": per-range Minkowski dilation, precomputed and cached (vae_depth/collision.py)
+    # "legacy":    the original single-range min-pool, kept for A/B comparison only
+    collision_target_mode: str = "collision"
+    # F450 swept radius, derived from resources/robots/f450/model.urdf: the prop hubs sit at
+    # (+-0.162635, +-0.162635) from base_link, i.e. 0.230 m out, and each prop is a 0.127 m
+    # radius disc -- so a yawing F450 sweeps a circle of 0.230 + 0.127 = 0.357 m and spans
+    # 0.579 m tip to tip. (0.25 m, the previous value, is roughly half the 450 mm WHEELBASE,
+    # which is measured motor-to-motor and ignores the propellers entirely.)
+    collision_radius_m: float = 0.357
+    safety_margin_m: float = 0.125      # added to it; the sphere is the SUM, see collision_radius()
+    near_floor_m: float = 0.75          # depths below this are pinned: the drone's sphere
+                                        # already contains the point, so no finite radius
+                                        # exists. Must clear the 0.482 m sphere with room --
+                                        # just above it, 1/sqrt(d^2-R^2) explodes.
+    collision_buckets: int = 16         # depth buckets; radius comes from each bucket's near edge
+    collision_shells: int = 8           # flat shells approximating the hemispherical element
+    # Set EXPLICITLY, per dataset. The "" default resolves to
+    # <data_dir>/../depth-collision/<signature>, which puts every dataset under ~/DATA/ into
+    # ONE cache root; the signature is pure geometry, so depth-images/ and
+    # depth-images-forest/ would collide entry for entry. See the note on data_dir.
+    collision_cache_dir: str = os.path.expanduser("~/DATA/depth-collision-forest/")
+    collision_algo_version: int = 1     # bump to invalidate every cached target
+
+    # --- Legacy min-pool dilation (collision_target_mode == "legacy" only) ---------------
     drone_radius_m: float = 0.25
     safety_margin_fraction: float = 0.5
     reference_distance_m: float = 3.0
-    hfov_deg: float = 87.0
     dilation_kernel_size: int = 0  # 0 = auto-compute from drone params
 
     # Augmentation
@@ -40,7 +76,7 @@ class VAEConfig:
     # Training
     batch_size: int = 64
     num_epochs: int = 100
-    learning_rate: float = 1e-4
+    learning_rate: float = 1e-3
     weight_decay: float = 0.0
     grad_clip_norm: float = 1.0
     val_split: float = 0.1
@@ -73,6 +109,18 @@ class VAEConfig:
     seed: int = 42
 
     def __post_init__(self):
+        if self.collision_target_mode not in ("collision", "legacy"):
+            raise ValueError(
+                f"collision_target_mode must be 'collision' or 'legacy', "
+                f"got {self.collision_target_mode!r}")
+        # reach_px divides by sqrt(d^2 - R^2): a floor at or below the sphere radius makes
+        # the radius infinite rather than merely large.
+        if self.near_floor_m <= self.collision_radius_m + self.safety_margin_m:
+            raise ValueError(
+                f"near_floor_m ({self.near_floor_m}) must exceed the collision sphere "
+                f"radius ({self.collision_radius_m + self.safety_margin_m}); at or below it "
+                "the drone already contains the point and no dilation radius is finite.")
+
         if self.dilation_kernel_size == 0:
             self.dilation_kernel_size = compute_dilation_kernel(
                 drone_radius_m=self.drone_radius_m,
