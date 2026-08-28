@@ -13,9 +13,11 @@ import torch
 
 wandb = pytest.importorskip("wandb")
 
-from rl_games.common.a2c_common import A2CBase  # noqa: E402
+# SummaryWriter must come from a2c_common: rl_games writes through tensorboardX's class,
+# not torch.utils.tensorboard's. Importing the wrong one makes these tests pass against a
+# hook that captures nothing in a real run.
+from rl_games.common.a2c_common import A2CBase, SummaryWriter  # noqa: E402
 from rl_games.common.diagnostics import PpoDiagnostics  # noqa: E402
-from torch.utils.tensorboard import SummaryWriter  # noqa: E402
 
 from rl_training.rl_games import wandb_utils  # noqa: E402
 
@@ -44,6 +46,14 @@ EPOCHS = 3
 ])
 def test_tag_mapping(tag, expected):
     assert wandb_utils._wandb_key(tag) == expected
+
+
+def test_hook_targets_the_writer_rl_games_uses():
+    """The failure this guards against is silent: patching torch.utils.tensorboard's
+    SummaryWriter raises nothing, captures nothing, and loses a whole run's metrics."""
+    import rl_games.common.a2c_common as a2c_common
+
+    assert wandb_utils.SummaryWriter is a2c_common.SummaryWriter
 
 
 class _Observer:

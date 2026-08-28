@@ -8,7 +8,10 @@ import traceback
 import wandb
 from loguru import logger
 from rl_games.algos_torch.a2c_continuous import A2CAgent
-from rl_games.common.a2c_common import A2CBase
+# The writer class rl_games actually instantiates: tensorboardX's, NOT
+# torch.utils.tensorboard's. Import it from a2c_common so the patch below can never
+# target a different SummaryWriter than the one the agent writes through.
+from rl_games.common.a2c_common import A2CBase, SummaryWriter
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -129,6 +132,7 @@ class _EpochMetrics:
         self.buffer = {}
         self.pending = None  # (frame, epoch, elapsed) the buffered scalars belong to
         self.last_step = None
+        self.warned_empty = False
 
     def record(self, tag, value):
         key = _wandb_key(tag)
@@ -140,7 +144,16 @@ class _EpochMetrics:
             pass  # non-scalar (histogram, image); TensorBoard still gets it
 
     def flush(self):
-        if self.pending is None or not self.buffer:
+        if not self.buffer:
+            # Past the first epoch an empty buffer means add_scalar is not being seen --
+            # a silent failure that costs a whole run's metrics, so say so loudly.
+            if self.pending is not None and not self.warned_empty:
+                logger.warning("[wandb] no scalars captured for epoch "
+                               f"{self.pending[1]}; the frame-axis hook is not seeing "
+                               "rl_games' SummaryWriter -- metrics will be empty")
+                self.warned_empty = True
+            return
+        if self.pending is None:
             self.buffer.clear()
             return
         frame, epoch, elapsed = self.pending
@@ -162,8 +175,6 @@ _EPOCH_METRICS = _EpochMetrics()
 def enable_frame_axis_logging() -> None:
     """Mirror rl_games' TensorBoard scalars into W&B keyed on `frame` instead of letting
     `sync_tensorboard` plot them against W&B's row counter."""
-    from torch.utils.tensorboard import SummaryWriter
-
     if getattr(SummaryWriter.add_scalar, "_aerial_gym_wandb", False):
         return
 
