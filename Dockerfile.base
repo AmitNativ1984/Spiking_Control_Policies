@@ -59,7 +59,7 @@ RUN python -m pip install --no-cache-dir -U pip setuptools wheel && \
     python -m pip install --no-cache-dir -e /opt/isaacgym/python
 
 
-FROM isaacgym as aerial_gym
+FROM isaacgym AS aerial_gym
 
 ARG AERIAL_GYM_REPO=https://github.com/ntnu-arl/aerial_gym_simulator.git
 ARG AERIAL_GYM_REF=main
