@@ -123,7 +123,7 @@ class task_config:
 
         # Path to trained DepthVAE checkpoint. No F450-specific VAE has been trained yet,
         # so this points at the same checkpoint navigation_with_obstacles uses.
-        model_file = "/workspaces/aerial_gym_docker/vae_depth/runs/20260218_204641/checkpoints/epoch_150.pth"
+        model_file = "/workspaces/aerial_gym_docker/vae_depth/runs/20260828_060313/checkpoints/epoch_200.pth"
 
         # DepthVAE input resolution
         target_height = 180
