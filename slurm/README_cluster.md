@@ -1,6 +1,7 @@
 # Cluster Training Setup
 
-Run navigation VAE training on a SLURM cluster with Pyxis (DGX A100).
+Run F450 navigation training (`rl_training.rl_games.runner`) on a SLURM cluster
+with Pyxis (DGX A100).
 
 ## 1. Build & prepare the Docker image
 
@@ -67,37 +68,41 @@ cd aerial_gym_docker
 sbatch slurm/train_navigation.sbatch
 ```
 
-Override defaults:
+Submit from the repo root: `SLURM_SUBMIT_DIR` is what the job bind-mounts into the container.
+
+Override defaults (env count and epoch budget live in the YAML — pick a `_cluster` config
+rather than passing them here):
 
 ```bash
-NUM_ENVS=4096 MAX_EPOCHS=1000 sbatch slurm/train_navigation.sbatch
+CONFIG_FILE=rl_training/rl_games/cfg/popsan_cluster.yaml \
+EXPERIMENT=f450_nav_snn \
+CURRICULUM_LEVEL=25 \
+sbatch slurm/train_navigation.sbatch
 ```
+
+Full list of variables: `CONFIG_FILE`, `TASK`, `EXPERIMENT`, `WANDB_PROJECT`, `CHECKPOINT`,
+`NUM_ENVS`, `SEED`, `CURRICULUM_LEVEL`, `CONTAINER_IMAGE`, `EXTRA_ARGS`. Config matrix and
+runner flags: `rl_training/README.md`.
+
+The legacy `navigation_with_obstacles` tree has its own scripts under
+`navigation_with_obstacles/slurm/`; both read `slurm/.env`.
 
 ## 5. Monitor
 
-**W&B dashboard:** Real-time metrics at https://wandb.ai (project: `aerial_gym`)
+**W&B dashboard:** Real-time metrics at https://wandb.ai (project: `f450_navigation_task`,
+or whatever `WANDB_PROJECT` is set to)
 
 **SLURM logs:**
 
 ```bash
-tail -f slurm_logs/nav-vae_<JOBID>.out
+tail -f slurm_logs/f450-nav_<JOBID>.out
 ```
 
 **Checkpoints:**
 
 ```bash
-ls navigation_with_obstacles/runs/*/nn/*.pth
+ls runs/<EXPERIMENT>/*/nn/*.pth
 ```
 
-## Cluster config vs laptop config
-
-| Parameter | Laptop (`ppo_navigation.yaml`) | Cluster (`ppo_navigation_cluster.yaml`) |
-|-----------|------|---------|
-| num_envs | 1024 | 8192 |
-| horizon_length | 64 | 128 |
-| minibatch_size | 4096 | 32768 |
-| learning_rate | 1e-4 | 3e-4 |
-| max_epochs | 1000 | 2000 |
-| save_frequency | 50 | 100 |
-
-Physics/simulation parameters are identical between both configs.
+Each run directory also holds `config.yaml`, the resolved config the run actually used —
+play it back with that file, not with `cfg/`.

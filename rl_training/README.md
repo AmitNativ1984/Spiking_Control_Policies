@@ -388,19 +388,27 @@ tensorboard --logdir runs/
 
 ## Cluster / SLURM
 
-See `slurm/README_cluster.md` for building the enroot image and setting `slurm/.env`
-(`WANDB_API_KEY`). Submit with:
+`slurm/train_navigation.sbatch` runs **this** tree (`rl_training.rl_games.runner`); the legacy
+scripts under `navigation_with_obstacles/slurm/` run that one. See `slurm/README_cluster.md`
+for building the enroot image and setting `slurm/.env` (`WANDB_API_KEY`). Submit from the repo
+root — `SLURM_SUBMIT_DIR` is what gets bind-mounted into the container:
 
 ```bash
+sbatch slurm/train_navigation.sbatch                       # ANN MLP, ppo_mlp_cluster.yaml
+
 CONFIG_FILE=rl_training/rl_games/cfg/popsan_teacher_student_cluster.yaml \
 EXPERIMENT=f450_popsan_ts \
 sbatch slurm/train_navigation.sbatch
 ```
 
-> `slurm/train_navigation.sbatch` still defaults to the **legacy** entry point
-> (`python -m navigation_with_obstacles.training.runner`) and a legacy `CONFIG_FILE`. Update the
-> module path to `rl_training.rl_games.runner` before using it for this tree — passing only
-> `CONFIG_FILE` is not enough.
+Every knob is an environment variable: `CONFIG_FILE`, `TASK` (default `f450_navigation_task`),
+`EXPERIMENT`, `WANDB_PROJECT`, `CHECKPOINT` (resume), `NUM_ENVS` (VRAM escape hatch — otherwise
+the YAML's `num_actors` decides), `SEED`, `CURRICULUM_LEVEL`, `CONTAINER_IMAGE`, and
+`EXTRA_ARGS` for any other runner flag verbatim.
+
+The job refuses to start if the task config has `use_vae = True` and the checkpoint it names is
+not on the cluster — that failure otherwise surfaces only after the simulator has finished
+building.
 
 ---
 
