@@ -78,6 +78,10 @@ class GRUActorCriticNetwork(nn.Module):
         """Required by rl_games - indicates this IS an RNN network."""
         return True
 
+    def get_aux_loss(self):
+        """Required by rl_games >= 1.6.5, which calls this on every a2c_network."""
+        return None
+
     def get_default_rnn_state(self):
         # Tuple, even with one element - rl_games unpacks it as states[0].
         # Shape: (num_layers, num_seqs, hidden_size).
