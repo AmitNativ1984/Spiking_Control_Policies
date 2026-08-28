@@ -394,7 +394,8 @@ def main():
 def _start_wandb(config_dict, args):
     import wandb
 
-    from .wandb_utils import enable_checkpoint_upload, git_info
+    from .wandb_utils import (enable_checkpoint_upload, enable_frame_axis_logging,
+                              git_info)
 
     info = git_info()
     logger.info(f"[wandb] git commit {info['git_commit_short']} "
@@ -409,9 +410,9 @@ def _start_wandb(config_dict, args):
     # "2026-08-11_10-52-30" would be unidentifiable in a project listing.
     cfg = config_dict["params"]["config"]
 
-    # W&B's local run files (output.log, debug logs, the mirrored tfevents, artifact
-    # staging) default to <cwd>/wandb/, which scatters them across a repo-root folder with
-    # no link back to the run that made them. Point them at the run directory instead, so
+    # W&B's local run files (output.log, debug logs, artifact staging) default to
+    # <cwd>/wandb/, which scatters them across a repo-root folder with no link back to the
+    # run that made them. Point them at the run directory instead, so
     # nn/, summaries/, config.yaml and wandb/ all live under runs/<experiment>/<timestamp>.
     run_dir = os.path.join(cfg["train_dir"], cfg["full_experiment_name"])
     os.makedirs(run_dir, exist_ok=True)  # dump_run_config makes it too, but only on --train
@@ -421,19 +422,21 @@ def _start_wandb(config_dict, args):
         project=args["wandb_project_name"],
         entity=args["wandb_entity"],
         name=f"{cfg['name']}_{cfg['full_experiment_name']}",
-        sync_tensorboard=True,
         config={**config_dict, "git": info},
         monitor_gym=True,
         save_code=True,
     )
     enable_checkpoint_upload()
+    enable_frame_axis_logging()
     return info
 
 
 def _finish_wandb(config_dict, args, info):
     import wandb
 
-    from .wandb_utils import log_final_weights
+    from .wandb_utils import flush_final_metrics, log_final_weights
+
+    flush_final_metrics()
 
     if args.get("train"):
         cfg = config_dict["params"]["config"]
