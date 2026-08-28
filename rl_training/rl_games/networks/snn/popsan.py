@@ -50,6 +50,10 @@ class POPSANNetwork(nn.Module):
         """Required by rl_games - indicates this is not an RNN network."""
         return False
 
+    def get_aux_loss(self):
+        """Required by rl_games >= 1.6.5, which calls this on every a2c_network."""
+        return None
+
     def forward(self, obs_dict) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]:
         """Returns (mu, log_std, value, states); states is None for a feed-forward net."""
         action_mu, action_log_std = self.spiking_actor(obs_dict)
