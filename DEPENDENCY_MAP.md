@@ -22,7 +22,7 @@ The project has **two architecturally distinct phases**:
 |---|---|---|
 | **x86_64 workstation/server** | Runs Docker image, Isaac Gym sim, VAE + SNN training | Isaac Gym bindings are `linux-x86_64` only — **no ARM/Apple Silicon** |
 | **NVIDIA CUDA GPU** (render-capable, ≥8 GB, Pascal+) | GPU physics (PhysX), depth rendering, NN training | VRAM caps parallel envs: 8 GB → `num_envs≈256`; needs `graphics,display` + `/dev/dri` (Vulkan/EGL) |
-| **Intel RealSense D435/D435i** | Collect *real* depth images to supplement the simulated VAE dataset | USB 3.0; specs already mirrored in `data_generation/config/camera_config.py` (1280×720, 87° HFOV, 0.105–10 m) |
+| **Intel RealSense D435/D435i** | Collect *real* depth images to supplement the simulated VAE dataset | USB 3.0; specs already mirrored in `vae_depth/data_generation/config/camera_config.py` (1280×720, 87° HFOV, 0.105–10 m) |
 | **Prophesee event camera** (EVK4 / IMX636) | Collect/validate event streams for the spiking front-end | USB 3.0; output is CD events (x, y, polarity, µs timestamp), not frames |
 | **Intel Loihi 2** *(optional in Phase A)* | Hardware-in-the-loop SNN validation before flight | Via **INRC cloud** or a **Kapoho Point** board; access gated by Intel INRC |
 
@@ -127,6 +127,6 @@ FleX, Carbonite) stay on the training host.
 | `opencv-python` | `==4.5.5.64` | Avoids `cv2.dnn.DictValue` crash |
 | `wandb`, `loguru` | unpinned | Tracking / logging |
 
-Repo modules: `data_generation/` (depth dataset) → `vae_depth/` (Depth VAE) →
+Repo modules: `vae_depth/data_generation/` (depth dataset) → `vae_depth/` (Depth VAE) →
 `navigation_with_obstacles/` (PopSAN + VAE, active branch). Cluster training via
 `slurm/` (Pyxis/enroot `.sqsh`, 1 GPU + 8 CPU).

@@ -6,8 +6,8 @@ Renders depth from the SAME environment the navigation policy flies in
 random poses inside the obstacle field.
 
 Usage:
-    python -m data_generation.generate_dataset                                # 85k, defaults
-    python -m data_generation.generate_dataset --num_images 128 --num_envs 4  # smoke test
+    python -m vae_depth.data_generation.generate_dataset                                # 85k, defaults
+    python -m vae_depth.data_generation.generate_dataset --num_images 128 --num_envs 4  # smoke test
 """
 
 import isaacgym  # noqa: F401  -- MUST precede torch; see aerial_gym/__init__.py
@@ -87,7 +87,7 @@ def setup_environment(args):
 
     # Registers data_gen_env / data_gen_quad, and by import chain the whole `config`
     # package (forest env, f450, the attitude controller, the nav task).
-    import data_generation  # noqa: F401
+    import vae_depth.data_generation  # noqa: F401
 
     from aerial_gym.sim.sim_builder import SimBuilder
     from config.robot_config.f450_config import F450Config

@@ -104,10 +104,10 @@ loss = weighted_MSE(predicted, dilated_target) + beta * KL_divergence
 
 Depth images are rendered in the environment the policy flies in
 (`config/env_config/env_forest_with_obstacles.py`), through the camera the policy reads
-from (`config/sensor_config/realsense_d435_cam_config.py`). See `data_generation/README.md`.
+from (`config/sensor_config/realsense_d435_cam_config.py`). See [`data_generation/`](data_generation/README.md).
 
 ```bash
-python -m data_generation.generate_dataset          # 85k images, ~3.7 h, ~1.8 GB
+python -m vae_depth.data_generation.generate_dataset          # 85k images, ~3.7 h, ~1.8 GB
 ```
 
 Output: 16-bit PNG in `~/DATA/depth-images-forest/`, **native 320x180** — so the resize in

@@ -29,7 +29,7 @@ increasing difficulty.
 | Component | Folder | Purpose |
 |-----------|--------|---------|
 | **Depth VAE (DCE)** | [`vae_depth/`](vae_depth/) | Variational autoencoder that compresses depth images into a 32-D latent with implicit collision encoding, used by the navigation task. |
-| **Dataset Generation** | [`data_generation/`](data_generation/) | Generates the depth-image dataset (Intel RealSense D435 simulation) used to train the Depth VAE. |
+| **Dataset Generation** | [`vae_depth/data_generation/`](vae_depth/data_generation/) | Generates the depth-image dataset (Intel RealSense D435 simulation) used to train the Depth VAE. |
 
 > All tasks use [`rl_games`](https://github.com/Denys88/rl_games) PPO and the Aerial Gym
 > physics/rendering stack. Each task folder's README documents its observation/action spaces,

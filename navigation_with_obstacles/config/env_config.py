@@ -11,7 +11,7 @@ from aerial_gym.config.asset_config.env_object_config import (
     front_wall,
     top_wall,
 )
-from data_generation.config.env_config import (
+from vae_depth.data_generation.config.env_config import (
     dense_panel_params,
     dense_object_params,
     dense_thin_params,
