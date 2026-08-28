@@ -109,9 +109,13 @@ RUN pip uninstall -y urdfpy && \
 
 FROM aerial_gym AS dev
 
+# wandb pulls typing_extensions>=4.8 but bounds pydantic only as <3, so pip leaves
+# the base image's pydantic 1.10.2 behind — a pair that cannot import wandb at all.
+# spacy/confection cap pydantic <1.11, so this window is the only one that resolves.
 RUN pip install \
     loguru \
-    wandb
+    wandb \
+    "pydantic>=1.10.8,<1.11"
 
 # snntorch 0.9.4 fixes the Synaptic.forward bug (self.syn was assigned from mem
 # instead of syn in <=0.9.1, corrupting 2nd-order CUBA-LIF dynamics). 0.9.4 tags
