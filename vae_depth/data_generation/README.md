@@ -63,8 +63,8 @@ Raising it buys nothing but VRAM pressure.
 
 ```bash
 cd /workspaces/aerial_gym_docker
-python -m data_generation.generate_dataset                                # 85k, defaults
-python -m data_generation.generate_dataset --num_images 128 --num_envs 4  # smoke test
+python -m vae_depth.data_generation.generate_dataset                                # 85k, defaults
+python -m vae_depth.data_generation.generate_dataset --num_images 128 --num_envs 4  # smoke test
 ```
 
 Measured: **6.3 img/s** at 32 envs with K=4, so 85k images take **~3.7 h** and **~1.8 GB**
@@ -111,13 +111,13 @@ in. Run it before collecting, or not at all — but do not run it *between* coll
 dataset and training the policy, or the two will disagree again.
 
 ```bash
-python data_generation/generate_panels.py   # optional; changes the RL env too
+python vae_depth/data_generation/generate_panels.py   # optional; changes the RL env too
 ```
 
 ## File structure
 
 ```
-data_generation/
+vae_depth/data_generation/
 ├── __init__.py           # registry registration
 ├── config/
 │   ├── env_config.py     # ForestEnvCfg + collection flags

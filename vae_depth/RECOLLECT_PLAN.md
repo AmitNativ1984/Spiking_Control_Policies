@@ -1,6 +1,6 @@
 # Re-collecting the depth dataset for the new obstacle environment
 
-> **Status: phases 1-3 implemented and smoke-tested.** `data_generation/` now imports the
+> **Status: phases 1-3 implemented and smoke-tested.** `vae_depth/data_generation/` now imports the
 > nav env, the Poisson manager and the RL camera instead of restating them, and
 > `vae_depth/config.py` points at the new dataset and its own cache root. Phases 4-6
 > (build the cache, retrain, validate) are still to run.
@@ -19,14 +19,14 @@
 >   camera poses: 3.9 -> 6.3 img/s at K=4.
 
 
-The 43k images in `~/DATA/depth-images/` were generated from `data_generation/config/env_config.py`,
+The 43k images in `~/DATA/depth-images/` were generated from `vae_depth/data_generation/config/env_config.py`,
 which predates the navigation env rewrite. The VAE trained on them has never seen a ground
 plane, a sphere, a cylinder or a perimeter wall — and a ground plane is in the lower third of
 essentially every frame the policy now receives. Re-collect.
 
 ## 1. What actually diverged
 
-`data_generation/config/env_config.py` (`DataGenEnvCfg`) vs `config/env_config/env_forest_with_obstacles.py`
+`vae_depth/data_generation/config/env_config.py` (`DataGenEnvCfg`) vs `config/env_config/env_forest_with_obstacles.py`
 (`ForestEnvCfg`, what the RL task builds):
 
 | | data-gen (old) | nav env (now) |
@@ -100,7 +100,7 @@ band. Note the rollout variant as the upgrade if reconstruction quality on live 
    that the floor guarantees non-empty images.
 
 4. **Camera**: use `config/sensor_config/realsense_d435_cam_config.py` (the RL one) in place of
-   `data_generation/config/camera_config.py`. That brings 320×180, `min_range=0.1`, mount
+   `vae_depth/data_generation/config/camera_config.py`. That brings 320×180, `min_range=0.1`, mount
    randomization and the noise block along with it. Delete the data-gen camera config so it
    cannot be picked up again.
 
@@ -120,8 +120,8 @@ the difference between a VAE that resolves close obstacles and one that averages
 ### Phase 3 — generate
 
 ```bash
-python data_generation/generate_panels.py           # only if the panel URDFs are missing
-python -m data_generation.generate_dataset \
+python vae_depth/data_generation/generate_panels.py           # only if the panel URDFs are missing
+python -m vae_depth.data_generation.generate_dataset \
     --num_images 85000 --num_envs 64 \
     --output_dir ~/DATA/depth-images-forest
 ```
@@ -177,7 +177,7 @@ d. **Downstream** — short PPO run at a pinned curriculum level, old VAE vs new
 - `VAEConfig.data_dir`, `source_height/width`, `collision_cache_dir`.
 - `max_depth_m = 7.0` against the sensor's `max_range = 10.0` is intentional and unchanged —
   both the encoder input clamp and the collision target's far edge use 7.0.
-- Update `data_generation/README.md`'s obstacle table; it currently documents the old mix.
+- Update `vae_depth/data_generation/README.md`'s obstacle table; it currently documents the old mix.
 - Keep the old dataset until Phase 5a/5d are done, then delete.
 
 ## 4. Order of work

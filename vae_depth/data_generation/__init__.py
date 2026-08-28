@@ -16,8 +16,8 @@ from aerial_gym.registry.env_registry import env_config_registry
 from aerial_gym.registry.robot_registry import robot_registry
 from aerial_gym.robots.base_multirotor import BaseMultirotor
 
-from data_generation.config.env_config import DataGenEnvCfg
-from data_generation.config.robot_config import DataGenF450Cfg
+from vae_depth.data_generation.config.env_config import DataGenEnvCfg
+from vae_depth.data_generation.config.robot_config import DataGenF450Cfg
 
 env_config_registry.register("data_gen_env", DataGenEnvCfg)
 robot_registry.register("data_gen_quad", BaseMultirotor, DataGenF450Cfg)

@@ -268,5 +268,5 @@ navigation_with_obstacles/
 
 - [`agents/TEACHER_STUDENT.md`](agents/TEACHER_STUDENT.md) — distill a PopSAN (SNN) policy from a trained ANN teacher: BC warm-up → PPO fine-tune with an annealed KL distillation tail (steps, commands, loss math, design rationale).
 - [`../vae_depth/`](../vae_depth/) — the Depth VAE (DCE) used for the 32-D depth latents.
-- [`../data_generation/`](../data_generation/) — generates the depth dataset for the VAE.
+- [`../vae_depth/data_generation/`](../vae_depth/data_generation/) — generates the depth dataset for the VAE.
 - [`../simple_obstacle_avoidance/`](../simple_obstacle_avoidance/) — the simplified, no-curriculum precursor to this task.
