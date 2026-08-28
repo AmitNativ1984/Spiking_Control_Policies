@@ -16,6 +16,7 @@ wandb = pytest.importorskip("wandb")
 # SummaryWriter must come from a2c_common: rl_games writes through tensorboardX's class,
 # not torch.utils.tensorboard's. Importing the wrong one makes these tests pass against a
 # hook that captures nothing in a real run.
+from rl_games.algos_torch.a2c_continuous import A2CAgent  # noqa: E402
 from rl_games.common.a2c_common import A2CBase, SummaryWriter  # noqa: E402
 from rl_games.common.diagnostics import PpoDiagnostics  # noqa: E402
 
@@ -56,6 +57,16 @@ def test_hook_targets_the_writer_rl_games_uses():
     assert wandb_utils.SummaryWriter is a2c_common.SummaryWriter
 
 
+def test_update_epoch_is_defined_on_a2c_agent_not_the_base():
+    """A2CBase.update_epoch is a bare `pass` and A2CAgent overrides it without calling
+    super, so the row-commit hook has to go on A2CAgent -- on the base it would never
+    run, and would fail exactly as silently as the SummaryWriter mixup."""
+    from rl_training.rl_games.agents import A2CTeacherAgent
+
+    assert A2CBase.update_epoch is not A2CAgent.update_epoch
+    assert A2CTeacherAgent.update_epoch is A2CAgent.update_epoch
+
+
 class _Observer:
     """Stands in for IsaacAlgoObserver.after_print_stats, which write_stats calls."""
 
@@ -78,19 +89,21 @@ class _StubAgent:
 
     def __init__(self, writer):
         self.writer = writer
+        self.epoch_num = 0
         self.diagnostics = PpoDiagnostics()
         self.algo_observer = _Observer(writer)
 
 
 @pytest.fixture
-def logged_rows(tmp_path, monkeypatch):
-    """Run EPOCHS of rl_games' write pattern and return what reached wandb.log."""
+def run_trace(tmp_path, monkeypatch):
+    """Run EPOCHS of rl_games' loop and return (rows, rows_seen_at_each_update_epoch)."""
     monkeypatch.setenv("WANDB_MODE", "offline")
     monkeypatch.setenv("WANDB_SILENT", "true")
     monkeypatch.setattr(wandb_utils, "_EPOCH_METRICS", wandb_utils._EpochMetrics())
 
     original_add_scalar = SummaryWriter.add_scalar
     original_write_stats = A2CBase.write_stats
+    original_update_epoch = A2CAgent.update_epoch
 
     wandb.init(dir=str(tmp_path), project="axis-test")
     rows = []
@@ -106,8 +119,13 @@ def logged_rows(tmp_path, monkeypatch):
     writer = SummaryWriter(os.path.join(str(tmp_path), "summaries"))
     agent = _StubAgent(writer)
     total_time = 0.0
+    rows_at_update = []
     try:
         for epoch in range(1, EPOCHS + 1):
+            # rl_games' iteration order: update_epoch, then the rollout, then the writes.
+            epoch_num = A2CAgent.update_epoch(agent)
+            rows_at_update.append(len(rows))
+            assert epoch_num == epoch
             frame = (epoch - 1) * BATCH  # rl_games reads frame before incrementing it
             total_time += 100.0 * epoch
             agent.diagnostics.current_epoch = epoch
@@ -127,11 +145,26 @@ def logged_rows(tmp_path, monkeypatch):
         wandb.finish()
         SummaryWriter.add_scalar = original_add_scalar
         A2CBase.write_stats = original_write_stats
-    return rows
+        A2CAgent.update_epoch = original_update_epoch
+    return rows, rows_at_update
+
+
+@pytest.fixture
+def logged_rows(run_trace):
+    return run_trace[0]
 
 
 def test_one_row_per_epoch(logged_rows):
     assert len(logged_rows) == EPOCHS
+
+
+def test_row_is_committed_as_soon_as_the_epoch_ends(run_trace):
+    """The commit must happen at the next update_epoch, not the next write_stats. Both
+    orders produce identical rows; only the timing differs, and flushing from write_stats
+    holds every row back by a full epoch -- an hour of blind training on a slow env."""
+    rows, rows_at_update = run_trace
+    # entering iteration i, epochs 1..i-1 are already committed
+    assert rows_at_update == list(range(EPOCHS))
 
 
 def test_x_axis_is_frame(logged_rows):
