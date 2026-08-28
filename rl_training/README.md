@@ -81,7 +81,7 @@ The task loads a trained DepthVAE checkpoint. Its path is hard-coded in the task
 (`vae_config.model_file`) and must exist, or set `use_vae = False`:
 
 ```
-vae_depth/runs/20260218_204641/checkpoints/epoch_150.pth
+vae_depth/runs/20260828_060313/checkpoints/epoch_200.pth
 ```
 
 For W&B tracking (`--track`), export `WANDB_API_KEY` first.
