@@ -27,6 +27,7 @@ from aerial_gym.registry.robot_registry import robot_registry
 from env_manager.poisson_asset_manager import PoissonAssetManager
 from env_manager import warp_bvh_patch
 from env_manager import asset_placement_patch
+from env_manager import warp_bvh_rebuild_patch
 from vae_depth.vae_image_encoder import DepthVAEImageEncoder
 
 # Upstream builds every warp BVH over a zero-filled vertex buffer, leaving each tree
@@ -42,6 +43,13 @@ warp_bvh_patch.apply()
 # success rate is pinned at exactly 0.000, which deadlocks the curriculum (increases
 # gate on the worst face). See env_manager/asset_placement_patch.py.
 asset_placement_patch.apply()
+
+# refit() updates BVH bounds but never topology, so once obstacles are placed at random
+# positions each reset the tree stops pruning and render cost goes LINEAR in obstacle
+# count (measured: 914 ms at ~5 obstacles, 5127 ms at ~27, vs 5.3/15.0 ms rebuilt).
+# Installed here; bind() is called after the sim is built. See
+# env_manager/warp_bvh_rebuild_patch.py.
+warp_bvh_rebuild_patch.apply()
 
 import os
 import math
@@ -151,6 +159,12 @@ class NavigationWithObstaclesTask(BaseTask):
             use_warp=self.task_config.use_warp,
             headless=self.task_config.headless,
         )
+
+        # The BVH-rebuild patch publishes new mesh ids into the sensor's mesh_ids_array,
+        # which only exists once the sim (and its camera) is built -- hence here rather
+        # than at import time with the other patches. Without this it falls back to
+        # refit() and logs an error, rather than rendering meshes nothing points at.
+        warp_bvh_rebuild_patch.bind(self.sim_env)
 
         # Target position for each environment
         self.target_position = torch.zeros(
