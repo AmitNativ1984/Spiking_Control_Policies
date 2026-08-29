@@ -25,7 +25,14 @@ from aerial_gym.utils.logging import CustomLogger
 from aerial_gym.registry.robot_registry import robot_registry
 
 from env_manager.poisson_asset_manager import PoissonAssetManager
+from env_manager import warp_bvh_patch
 from vae_depth.vae_image_encoder import DepthVAEImageEncoder
+
+# Upstream builds every warp BVH over a zero-filled vertex buffer, leaving each tree
+# permanently degenerate -- correct depth images, but ~95x slower stepping (render 197x,
+# reset 133x). Must be installed before SimBuilder builds the sim, hence at import time.
+# See env_manager/warp_bvh_patch.py for the defect, the measurements, and the one-line fix.
+warp_bvh_patch.apply()
 
 import os
 import math
