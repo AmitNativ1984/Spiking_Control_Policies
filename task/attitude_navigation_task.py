@@ -26,6 +26,7 @@ from aerial_gym.registry.robot_registry import robot_registry
 
 from env_manager.poisson_asset_manager import PoissonAssetManager
 from env_manager import warp_bvh_patch
+from env_manager import asset_placement_patch
 from vae_depth.vae_image_encoder import DepthVAEImageEncoder
 
 # Upstream builds every warp BVH over a zero-filled vertex buffer, leaving each tree
@@ -33,6 +34,14 @@ from vae_depth.vae_image_encoder import DepthVAEImageEncoder
 # reset 133x). Must be installed before SimBuilder builds the sim, hence at import time.
 # See env_manager/warp_bvh_patch.py for the defect, the measurements, and the one-line fix.
 warp_bvh_patch.apply()
+
+# Upstream skips asset placement entirely when the curriculum asks for zero obstacles,
+# which also skips PARKING the unused ones at -1000 -- leaving all 201 preallocated
+# assets stacked at the world origin. 99% of the scene geometry then sits in x in
+# [-2, 2] while the robot spawns at x in [3, 5], so the -x wall is unreachable and its
+# success rate is pinned at exactly 0.000, which deadlocks the curriculum (increases
+# gate on the worst face). See env_manager/asset_placement_patch.py.
+asset_placement_patch.apply()
 
 import os
 import math
