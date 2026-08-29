@@ -91,6 +91,12 @@ def fixed_reset_idx(self, env_ids=None):
         self.warp_env.reset_idx(env_ids)
     self.robot_manager.reset_idx(env_ids)
     self.IGE_env.write_to_sim()
+    # MUST stay: upstream's last line. Without it sim_steps never returns to zero, so
+    # once an env passes episode_len_steps it is permanently timed out and resets every
+    # single step -- rl_games then sees 1-step episodes and nothing can be learned.
+    # (Previously masked: envs crashed constantly and reset via the collision path
+    # instead of ever reaching the timeout branch.)
+    self.sim_steps[env_ids] = 0
 
 
 def apply():
