@@ -46,12 +46,21 @@ params:
     ppo: True
 
     # Learning rate
-    learning_rate: 1e-4
-    lr_schedule: constant
-    # learning_rate: 1e-4
-    # lr_schedule: adaptive
-    # kl_threshold: 0.016
-    # min_lr: 1e-6
+    #
+    # Adaptive, not constant. Measured at epoch 389 of the constant-1e-4 run: KL was
+    # 0.0058 with clip_frac 0.07-0.11 and exp_var 0.94 -- the value function was fitting
+    # well and the policy updates were far smaller than the trust region allows, so the
+    # run was leaving learning speed on the table.
+    #
+    # AdaptiveScheduler halves/grows the LR to hold KL near kl_threshold: below
+    # 0.5*threshold it multiplies by 1.5, above 2*threshold it divides by 1.5. At the
+    # observed 0.0058 against a 0.016 threshold it will ramp up until KL catches up.
+    # NOTE: rl-games 1.6.1 hardcodes min_lr=1e-6 / max_lr=1e-2 inside AdaptiveScheduler
+    # and reads ONLY kl_threshold from this config, so listing min_lr/max_lr here would
+    # be inert -- do not add them expecting them to bind.
+    learning_rate: 1e-4          # starting point; the scheduler moves it from here
+    lr_schedule: adaptive
+    kl_threshold: 0.016
 
     # Training params
     save_best_after: 10

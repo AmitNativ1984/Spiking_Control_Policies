@@ -283,6 +283,22 @@ class NavigationWithObstaclesTask(BaseTask):
         # ones still fail. Curriculum increases gate on the WORST wall instead.
         self._face_attempts = torch.zeros(4, device=self.device)
         self._face_successes = torch.zeros(4, device=self.device)
+        # Per-face termination REASONS. Success-by-face alone cannot say WHY a face
+        # fails, and -x has sat at exactly 0.000 while the other three climb -- which
+        # is not "hard", it is structural. These separate crash / exceed / timeout so
+        # the failure mode per direction is visible. Same lifecycle as the two above:
+        # accumulated in step(), read and zeroed at each curriculum check.
+        self._face_crashes = torch.zeros(4, device=self.device)
+        self._face_exceeds = torch.zeros(4, device=self.device)
+        self._face_timeouts = torch.zeros(4, device=self.device)
+        # Mean distance-to-target at episode end, per face: separates "flew the wrong
+        # way" from "got close and then died".
+        self._face_end_dist = torch.zeros(4, device=self.device)
+        self.logged_face_attempts = [0.0] * 4
+        self.logged_face_crash = [0.0] * 4
+        self.logged_face_exceed = [0.0] * 4
+        self.logged_face_timeout = [0.0] * 4
+        self.logged_face_end_dist = [0.0] * 4
 
         # Logged metrics for tensorboard (updated each curriculum check)
         self.logged_success_rate = 0.0
@@ -793,6 +809,16 @@ class NavigationWithObstaclesTask(BaseTask):
         face_onehot = torch.nn.functional.one_hot(self.target_face, 4).float()
         self._face_attempts += (ended.float().unsqueeze(1) * face_onehot).sum(0)
         self._face_successes += (successes.unsqueeze(1) * face_onehot).sum(0)
+        # Why each face fails, not just that it does.
+        self._face_crashes += (crashes.unsqueeze(1) * face_onehot).sum(0)
+        self._face_exceeds += (exceeds.unsqueeze(1) * face_onehot).sum(0)
+        self._face_timeouts += (timeouts.unsqueeze(1) * face_onehot).sum(0)
+        # Distance to target at the moment the episode ended, summed per face (divided
+        # by attempts at the curriculum check). Uses the pre-reset distance, so it is
+        # the real end-of-episode value.
+        self._face_end_dist += (
+            (self._get_dist_to_target() * ended.float()).unsqueeze(1) * face_onehot
+        ).sum(0)
 
         self._update_infos(successes, timeout_mask, ended)
 
@@ -877,6 +903,13 @@ class NavigationWithObstaclesTask(BaseTask):
         # (via the obstacle field or the distance asymmetry). Flat == generalized.
         for face_idx, face_name in enumerate(("px", "nx", "py", "ny")):
             self.infos[f"metrics/success_face_{face_name}"] = self.logged_face_success[face_idx]
+            # Failure breakdown per wall: success alone cannot distinguish "never gets
+            # there" from "gets there and dies", which is what a face stuck at exactly
+            # 0.000 requires in order to be diagnosed.
+            self.infos[f"metrics/crash_face_{face_name}"] = self.logged_face_crash[face_idx]
+            self.infos[f"metrics/exceed_face_{face_name}"] = self.logged_face_exceed[face_idx]
+            self.infos[f"metrics/timeout_face_{face_name}"] = self.logged_face_timeout[face_idx]
+            self.infos[f"metrics/end_dist_face_{face_name}"] = self.logged_face_end_dist[face_idx]
         self.infos["metrics/obstacle_intensity"] = float(self.obs_dict["obstacle_intensity"])
 
         # Reward components (EMA across steps, horizon-independent)
@@ -1063,6 +1096,26 @@ class NavigationWithObstaclesTask(BaseTask):
             )
             worst_face_rate = float(face_rates.min())
 
+            # Per-wall FAILURE breakdown, same denominator as face_rates.
+            denom = self._face_attempts.clamp(min=1.0)
+            face_crash_rates = torch.where(
+                self._face_attempts > 0, self._face_crashes / denom, torch.zeros_like(denom)
+            )
+            face_exceed_rates = torch.where(
+                self._face_attempts > 0, self._face_exceeds / denom, torch.zeros_like(denom)
+            )
+            face_timeout_rates = torch.where(
+                self._face_attempts > 0, self._face_timeouts / denom, torch.zeros_like(denom)
+            )
+            face_end_dists = torch.where(
+                self._face_attempts > 0, self._face_end_dist / denom, torch.zeros_like(denom)
+            )
+            self.logged_face_crash = [float(r) for r in face_crash_rates]
+            self.logged_face_exceed = [float(r) for r in face_exceed_rates]
+            self.logged_face_timeout = [float(r) for r in face_timeout_rates]
+            self.logged_face_end_dist = [float(r) for r in face_end_dists]
+            self.logged_face_attempts = [float(r) for r in self._face_attempts]
+
             # Update logged metrics for tensorboard
             self.logged_success_rate = float(success_rate)
             self.logged_crash_rate = float(crash_rate)
@@ -1105,6 +1158,15 @@ class NavigationWithObstaclesTask(BaseTask):
                 + ", ".join(f"{r:.3f}" for r in self.logged_face_success)
                 + f" | worst={worst_face_rate:.3f} (gates curriculum increases)"
             )
+            for i, nm in enumerate(("+x", "-x", "+y", "-y")):
+                logger.warning(
+                    f"  wall {nm}: n={self.logged_face_attempts[i]:.0f} "
+                    f"arrive={self.logged_face_success[i]:.3f} "
+                    f"crash={self.logged_face_crash[i]:.3f} "
+                    f"exceed={self.logged_face_exceed[i]:.3f} "
+                    f"timeout={self.logged_face_timeout[i]:.3f} "
+                    f"end_dist={self.logged_face_end_dist[i]:.2f}m"
+                )
             logger.warning(
                 f"Successes: {self.success_aggregate}, "
                 f"Crashes: {self.crashes_aggregate}, "
@@ -1119,6 +1181,10 @@ class NavigationWithObstaclesTask(BaseTask):
             self.exceeds_aggregate = 0
             self._face_attempts.zero_()
             self._face_successes.zero_()
+            self._face_crashes.zero_()
+            self._face_exceeds.zero_()
+            self._face_timeouts.zero_()
+            self._face_end_dist.zero_()
 
     def compute_rewards(self, obs_dict, current_action):
         """
