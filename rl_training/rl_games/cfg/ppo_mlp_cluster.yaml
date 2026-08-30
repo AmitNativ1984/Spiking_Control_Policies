@@ -47,27 +47,41 @@ params:
 
     # Learning rate
     #
-    # Adaptive, not constant. Measured at epoch 389 of the constant-1e-4 run: KL was
-    # 0.0058 with clip_frac 0.07-0.11 and exp_var 0.94 -- the value function was fitting
-    # well and the policy updates were far smaller than the trust region allows, so the
-    # run was leaving learning speed on the table.
+    # Adaptive, not constant: a fixed LR left learning speed on the table.
     #
     # AdaptiveScheduler halves/grows the LR to hold KL near kl_threshold: below
-    # 0.5*threshold it multiplies by 1.5, above 2*threshold it divides by 1.5. At the
-    # observed 0.0058 against a 0.016 threshold it will ramp up until KL catches up.
+    # 0.5*threshold it multiplies by 1.5, above 2*threshold it divides by 1.5, and leaves
+    # it alone in between.
     # NOTE: rl-games 1.6.1 hardcodes min_lr=1e-6 / max_lr=1e-2 inside AdaptiveScheduler
     # and reads ONLY kl_threshold from this config, so listing min_lr/max_lr here would
     # be inert -- do not add them expecting them to bind.
     learning_rate: 1e-4          # starting point; the scheduler moves it from here
     lr_schedule: adaptive
-    kl_threshold: 0.016
+    # 0.03, not the 0.016 used in the 1000-epoch run. That 0.016 was picked from a KL of
+    # 0.0058 measured in a run we later found was broken (every obstacle piled at the
+    # world origin, so the task was trivial). On the real task KL averages ~0.025 with a
+    # range of 0.012-0.052, i.e. it sits at the top of the scheduler's no-change band
+    # [0.5x, 2x] = [0.008, 0.032] and breaks above it constantly. The scheduler spent the
+    # whole run fighting that: lr swung between 1.5e-6 and 2.2e-3, three orders of
+    # magnitude, and clip_frac peaked at 0.75 (healthy PPO is 0.1-0.2). Centring the band
+    # on the observed KL should stop the thrash.
+    kl_threshold: 0.03
 
     # Training params
     save_best_after: 10
     save_frequency: 50
     score_to_win: 100000
     grad_norm: 1.0
-    entropy_coef: 0.001
+    # 0.0002, down from 0.001. Entropy climbed monotonically 3.14 -> 5.17 over the last
+    # 850 epochs (sigma 0.53 -> 0.90 with fixed_sigma, i.e. one global scalar), meaning the
+    # policy grew LESS decisive as it trained. Checked whether that was the curriculum
+    # demanding more exploration: it is not. Mean d_entropy at level-ups was +0.0022 (n=14)
+    # versus -0.0005 between them (n=984), and entropy rose just as fast during 154 epochs
+    # pinned at level 11 with difficulty constant. A steady climb indifferent to difficulty
+    # is a constant pressure, and the entropy bonus is the obvious one. Reduced rather than
+    # zeroed: if the cause were instead a degrading critic (exp_var did fall 0.96 -> 0.62),
+    # zeroing it would sharpen a policy that has not learned the task yet.
+    entropy_coef: 0.0002
     truncate_grads: True
     e_clip: 0.2
     clip_value: False
@@ -89,7 +103,10 @@ params:
 
     # Other settings
     bounds_loss_coef: 0.0001
-    max_epochs: 1000
+    # 5000, up from 1000. The previous run was still gaining curriculum levels when it hit
+    # the 1000-epoch ceiling (reached level 14 at epoch 984), so it stopped for want of
+    # budget rather than progress. At ~31 s/epoch, 5000 epochs is ~43 h.
+    max_epochs: 5000
     use_diagnostics: True
 
     # Player settings (for inference/testing)

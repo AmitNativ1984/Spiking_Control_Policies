@@ -194,7 +194,13 @@ class task_config:
         Levels 0-5: large panels
         Levels 6-30: cumulative panels + small objects
         """
-        min_level = 0
+        # WARNING: min_level is the level a run STARTS at (curriculum_level is initialised
+        # from it), so it is 12 only to resume the epoch-1000 checkpoint of run 261071,
+        # which had reached level 14 and held 12 comfortably for ~2 h. It saves ~4 h of
+        # re-climbing ground the policy already covered.
+        # SET THIS BACK TO 0 FOR ANY FROM-SCRATCH RUN -- starting an untrained policy at
+        # level 12 drops it into 0.032 obstacles/m^3 with no chance of clearing the gate.
+        min_level = 12
         max_level = 25
 
         # The level at which obstacle density reaches obstacle_density_max. Deliberately
