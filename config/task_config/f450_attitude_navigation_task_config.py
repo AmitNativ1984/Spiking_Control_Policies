@@ -58,7 +58,13 @@ class task_config:
     # The count is a Poisson draw per env, mean = density * free_volume (free_volume is the
     # box minus the spawn keep-out ellipsoid), so it varies env to env by ~sqrt(mean).
     # To target a count N at level 25: density = N / ~1900 (e.g. 24 obstacles -> 0.0126).
-    obstacle_density_max = 0.067  # obstacles / m^3 at curriculum max_level
+    # 0.0804, rescaled from 0.067 when max_level/density_at_level went 25 -> 30.
+    # density = obstacle_density_max * min(level / density_at_level, 1.0), so scaling
+    # BOTH by 30/25 leaves the density at every level 0-25 bit-identical (level 24 is
+    # still 0.06432, level 25 still 0.067) while levels 26-30 extend into new ground up
+    # to 0.0804. Raising max_level alone would NOT have worked: the fraction clamps at
+    # 1.0, so 26-30 would have had exactly the same density as 25.
+    obstacle_density_max = 0.0804  # obstacles / m^3 at curriculum density_at_level
     obstacle_spawn_clearance = 0.95  # m added to the spawn-box half-extents to form the
                                      # keep-out ellipsoid: max sphere radius 0.6 + F450 ~0.35
 
@@ -195,13 +201,13 @@ class task_config:
         Levels 6-30: cumulative panels + small objects
         """
         # WARNING: min_level is the level a run STARTS at (curriculum_level is initialised
-        # from it), so it is 12 only to resume the epoch-1000 checkpoint of run 261071,
-        # which had reached level 14 and held 12 comfortably for ~2 h. It saves ~4 h of
+        # from it), so it is 23 only to resume run 261745's epoch-2550 checkpoint, which
+        # was working at level 24 and held 23 at 0.708 success. It saves ~13 h of
         # re-climbing ground the policy already covered.
         # SET THIS BACK TO 0 FOR ANY FROM-SCRATCH RUN -- starting an untrained policy at
-        # level 12 drops it into 0.032 obstacles/m^3 with no chance of clearing the gate.
-        min_level = 12
-        max_level = 25
+        # level 23 drops it into 0.062 obstacles/m^3 with no chance of clearing the gate.
+        min_level = 23
+        max_level = 30
 
         # The level at which obstacle density reaches obstacle_density_max. Deliberately
         # NOT derived from min_level/max_level: pinning the curriculum (--curriculum_level
@@ -209,7 +215,7 @@ class task_config:
         # (level - min) / (max - min) ramp to 0/1 and silently empty the world at EVERY
         # pinned level. Density is a function of the absolute level, so it keys off this
         # fixed reference instead. Equals max_level, so the un-pinned ramp is unchanged.
-        density_at_level = 25
+        density_at_level = 30
         check_after_num_rollouts = 16  # curriculum check every N rollouts (instances = num_rollouts * num_envs)
         increase_step = 1                  # slower progression, no double-jumps (was 2)
         decrease_step = 1

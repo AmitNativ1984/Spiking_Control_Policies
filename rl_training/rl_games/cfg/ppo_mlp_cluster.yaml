@@ -108,7 +108,7 @@ params:
     # 5000, up from 1000. The previous run was still gaining curriculum levels when it hit
     # the 1000-epoch ceiling (reached level 14 at epoch 984), so it stopped for want of
     # budget rather than progress. At ~31 s/epoch, 5000 epochs is ~43 h.
-    max_epochs: 5000
+    max_epochs: 8000
     use_diagnostics: True
 
     # Player settings (for inference/testing)
