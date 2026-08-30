@@ -57,31 +57,33 @@ params:
     # be inert -- do not add them expecting them to bind.
     learning_rate: 1e-4          # starting point; the scheduler moves it from here
     lr_schedule: adaptive
-    # 0.03, not the 0.016 used in the 1000-epoch run. That 0.016 was picked from a KL of
-    # 0.0058 measured in a run we later found was broken (every obstacle piled at the
-    # world origin, so the task was trivial). On the real task KL averages ~0.025 with a
-    # range of 0.012-0.052, i.e. it sits at the top of the scheduler's no-change band
-    # [0.5x, 2x] = [0.008, 0.032] and breaks above it constantly. The scheduler spent the
-    # whole run fighting that: lr swung between 1.5e-6 and 2.2e-3, three orders of
-    # magnitude, and clip_frac peaked at 0.75 (healthy PPO is 0.1-0.2). Centring the band
-    # on the observed KL should stop the thrash.
-    kl_threshold: 0.03
+    # 0.016. Raising this to 0.03 (run 261653) was a mistake and is reverted here.
+    # The reasoning was that measured KL (~0.025) sat at the top of the no-change band
+    # [0.5x, 2x] = [0.008, 0.032], so the scheduler kept cutting lr. Widening the band to
+    # [0.015, 0.060] did stop the thrash -- and made everything else worse. Over 219
+    # epochs at a CONSTANT curriculum level 14: success 0.706 -> 0.633, crash 0.278 ->
+    # 0.342, exp_var 0.617 -> 0.557, with lr running up to 8.8e-4 and clip_frac ~0.42.
+    #
+    # Mechanism: with fixed_sigma, widening sigma reduces how much logp moves when mu
+    # moves, so a policy taking large steps is REWARDED by the surrogate for inflating
+    # sigma to keep the PPO ratio inside the clip range. Entropy duly accelerated from
+    # +0.0024/epoch (original run) to +0.0045 and then +0.0081, reaching sigma ~1.28 --
+    # wider than an untrained policy. Large updates were feeding the entropy problem.
+    kl_threshold: 0.016
 
     # Training params
     save_best_after: 10
     save_frequency: 50
     score_to_win: 100000
     grad_norm: 1.0
-    # 0.0002, down from 0.001. Entropy climbed monotonically 3.14 -> 5.17 over the last
-    # 850 epochs (sigma 0.53 -> 0.90 with fixed_sigma, i.e. one global scalar), meaning the
-    # policy grew LESS decisive as it trained. Checked whether that was the curriculum
-    # demanding more exploration: it is not. Mean d_entropy at level-ups was +0.0022 (n=14)
-    # versus -0.0005 between them (n=984), and entropy rose just as fast during 154 epochs
-    # pinned at level 11 with difficulty constant. A steady climb indifferent to difficulty
-    # is a constant pressure, and the entropy bonus is the obvious one. Reduced rather than
-    # zeroed: if the cause were instead a degrading critic (exp_var did fall 0.96 -> 0.62),
-    # zeroing it would sharpen a policy that has not learned the task yet.
-    entropy_coef: 0.0002
+    # 0.001. Lowering this to 0.0002 (run 261653) was tested and FALSIFIED: with one fifth
+    # the entropy bonus, entropy rose ~2-3x FASTER (+0.0081/epoch vs +0.0024). The bonus is
+    # a constant push of magnitude entropy_coef on log_std and was never the dominant term;
+    # the clipped surrogate is. Reverted, since the change removed exploration for no
+    # demonstrated benefit. If entropy still climbs at kl_threshold 0.016, the direct lever
+    # is a NEGATIVE entropy_coef -- the loss term is `- entropy * entropy_coef`, so a
+    # negative value penalises entropy and shrinks sigma outright.
+    entropy_coef: 0.001
     truncate_grads: True
     e_clip: 0.2
     clip_value: False
