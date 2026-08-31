@@ -55,6 +55,12 @@ class AerialRLGPUEnv(vecenv.IVecEnv):
     def get_number_of_agents(self):
         return self.env.get_number_of_agents()
 
+    def render(self, mode="human"):
+        # rl_games' player calls this when player.render is True. The viewer is already
+        # drawn inside step(); the task's own render() would trigger a full-batch sensor
+        # capture instead of a viewer draw, so forwarding it would be wrong, not just slow.
+        return None
+
     def get_env_info(self):
         """Observation and action spaces, taken from the task config.
 

@@ -4,3 +4,4 @@ isaacgym/
 __pycache__/
 slurm/.env
 slurm_logs/
+*.sqsh
