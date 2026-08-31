@@ -61,8 +61,24 @@ RUN python -m pip install --no-cache-dir -U pip setuptools wheel && \
 
 FROM isaacgym AS aerial_gym
 
-ARG AERIAL_GYM_REPO=https://github.com/ntnu-arl/aerial_gym_simulator.git
-ARG AERIAL_GYM_REF=main
+# Our fork of ntnu-arl/aerial_gym_simulator, carrying three fixes that the upstream
+# main branch does not have yet (see the branch's single commit for measurements):
+#
+#   1. warp BVHs were built over a ZERO-FILLED vertex buffer, so every acceleration
+#      structure was degenerate for the whole run  (~95x on a 64-env step)
+#   2. reset_idx refit() the BVH where a rebuild is needed, making render cost LINEAR
+#      in obstacle count  (173x at ~5 obstacles/env, 342x at ~27)
+#   3. asset placement was skipped entirely at num_obstacles == 0, which also skipped
+#      PARKING unused assets -- leaving the whole pool stacked at the world origin,
+#      inside the arena, making one goal direction unreachable
+#
+# Depth output is unchanged: refit vs rebuild renders are identical to 0.0 max abs
+# difference over 3,686,400 pixels.
+#
+# Once these land upstream, point this back at ntnu-arl and drop the corresponding
+# monkeypatches in env_manager/*_patch.py.
+ARG AERIAL_GYM_REPO=https://github.com/AmitNativ1984/aerial_gym_simulator.git
+ARG AERIAL_GYM_REF=fix/warp-bvh-and-asset-placement
 
 WORKDIR /app/aerial_gym
 RUN git clone --recursive ${AERIAL_GYM_REPO} aerial_gym_simulator && \
