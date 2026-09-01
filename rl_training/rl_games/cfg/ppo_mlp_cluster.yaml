@@ -69,7 +69,21 @@ params:
     # sigma to keep the PPO ratio inside the clip range. Entropy duly accelerated from
     # +0.0024/epoch (original run) to +0.0045 and then +0.0081, reaching sigma ~1.28 --
     # wider than an untrained policy. Large updates were feeding the entropy problem.
-    kl_threshold: 0.016
+    # 0.008, halved from 0.016. Measured on run of4veb49 (2026-08-30_11-18-55): epoch-mean
+    # KL sat at a MEDIAN of 0.0225 -- inside the no-change band [0.5x, 2x] = [0.008, 0.032]
+    # but in its upper half -- and exceeded the band on 8.3% of iterations, against 2.0% in
+    # breezy-thunder-6, the run that behaved. So the policy was persistently taking large
+    # steps that the scheduler tolerated.
+    #
+    # That matters because of the mechanism documented under entropy_coef below: with
+    # fixed_sigma, a policy taking large mu steps is REWARDED by the clipped surrogate for
+    # inflating sigma, since a wider sigma shrinks how much logp moves for a given mu move
+    # and keeps the PPO ratio inside e_clip. Sigma inflation is trust-region evasion, not
+    # exploration. Tightening the trust region removes the payoff.
+    #
+    # Note this is the OPPOSITE direction to run 261653, which raised it to 0.03 and made
+    # everything worse -- that run is the evidence this lever is real and signed.
+    kl_threshold: 0.008
 
     # Training params
     save_best_after: 10
@@ -89,9 +103,33 @@ params:
     clip_value: False
 
     # Batch settings
+    #
+    # horizon_length 128, up from 64, and minibatch_size 8192, up from 4096. THE TWO MUST
+    # MOVE TOGETHER -- see below.
+    #
+    # WHY 128. The rollout has to be long enough to contain a complete episode, or the
+    # terminal reward reaches the policy only through the bootstrapped value function
+    # (whose explained variance is 0.68, not 0.95). Measured on run of4veb49: mean episode
+    # 81 steps, p99 91, worst 103, and episode length grows only +0.43 steps per curriculum
+    # level (extrapolating to 85 at level 30). At horizon_length 64, ZERO of 2349
+    # iterations had a mean episode shorter than the rollout. breezy-thunder-6, the run that
+    # behaved, had a rollout/episode ratio of 1.60; this run had 0.79.
+    #
+    # WHY NOT MORE. Every horizon worth covering lands at ~100 steps: the GAE blend
+    # 1/(1-tau) = 20 with weights decayed to 0.006 by step 100, the discount 1/(1-gamma) =
+    # 100, and the p99 episode at 91. Past 128 the extra steps are already discounted away
+    # and GAE resets at episode boundaries anyway, so it buys nothing but a bigger batch --
+    # and batch size is not the constraint here with 1024 envs.
+    #
+    # WHY minibatch_size HAD TO FOLLOW. Gradient steps per update are
+    # (horizon_length * num_actors / minibatch_size) * mini_epochs. Raising the horizon
+    # alone would have taken that from 64 to 128 -- twice as many gradient steps on one
+    # batch of data, so the policy drifts further from the behaviour policy within a single
+    # update, KL rises, clipping rises. That is exactly the pressure that inflates sigma, so
+    # it would have fed the failure this change exists to fix. 8192 holds it at 64.
     num_actors: 1024
-    horizon_length: 64
-    minibatch_size: 4096
+    horizon_length: 128
+    minibatch_size: 8192
     mini_epochs: 4
     seq_length: 8
 
@@ -104,7 +142,21 @@ params:
     normalize_input: True
 
     # Other settings
-    bounds_loss_coef: 0.0001
+    # 0.001, raised 10x from 0.0001. This is the ONLY term in the loss that acts on mu
+    # directly, and on run of4veb49 it lost: bounds_loss climbed 2.8 -> 42.4 over 2349
+    # iterations while contributing at most 4.2e-3 to the total loss, and mean |mu| reached
+    # 3.97 against an action box of +/-1. 95% of the deployed policy's outputs were clamped,
+    # and a 0.1-sigma change in any input moved the resulting command by 0.0000 -- a relay,
+    # not a controller.
+    #
+    # The clamp is what makes this self-reinforcing: past |mu| = 1 the environment executes
+    # an identical action for mu = 1.1 and mu = 14, so nothing on the reward side
+    # distinguishes them and mu is free to run. bounds_loss is the only thing that objects.
+    #
+    # For scale, breezy-thunder-6 finished with bounds_loss 0.18 and mean |mu| 0.84 -- a
+    # 180x difference in the same quantity, same coefficient. The coefficient was never
+    # wrong on its own; it became too weak when the task changed underneath it.
+    bounds_loss_coef: 0.001
     # 5000, up from 1000. The previous run was still gaining curriculum levels when it hit
     # the 1000-epoch ceiling (reached level 14 at epoch 984), so it stopped for want of
     # budget rather than progress. At ~31 s/epoch, 5000 epochs is ~43 h.

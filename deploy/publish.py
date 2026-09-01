@@ -29,6 +29,16 @@ USAGE
         --checkpoint runs/f450_hover/<run>/nn/f450_hover.pth \
         --policy-dir <sail-uav-core>/libs/control-policy-api/policies/hover
 
+    python -m deploy.publish --task navigation \
+        --checkpoint runs/f450_nav_ann/<run>/nn/last_....pth \
+        --policy-dir <sail-uav-core>/libs/control-policy-api/policies/navigation
+
+The navigation policy is THREE artifacts, not two -- the actor graph, the DepthVAE encoder
+graph and the golden -- which makes running the steps separately correspondingly easier to
+get wrong. The --vae-checkpoint is resolved once here and handed to both commands that need
+it, so the encoder that gets exported is always the encoder the latents were recorded
+through.
+
 Then, in the FLIGHT container: `pytest libs/control-policy-api`. Verifying here proves
 almost nothing -- it is the deployment environment's arithmetic that is in question.
 """
@@ -37,11 +47,19 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import export_onnx, record_golden
+from . import export_onnx, export_vae_onnx, record_golden
 
-# The names OnnxHoverPolicy and the flight test expect inside a policy directory.
-GRAPH_NAME = "hover.onnx"
-GOLDEN_NAME = "hover_golden.npz"
+# The filenames each policy class and its flight test expect inside a policy directory.
+# Fixed names rather than arguments: the flight side looks the .npz of statistics up beside
+# the graph, and the encoder up beside the actor, so these are an interface.
+ARTIFACT_NAMES = {
+    "hover": {"graph": "hover.onnx", "golden": "hover_golden.npz"},
+    "navigation": {
+        "graph": "navigation.onnx",
+        "golden": "navigation_golden.npz",
+        "encoder": "depth_vae.onnx",
+    },
+}
 
 
 def derive_config(checkpoint: Path) -> Path:
@@ -72,12 +90,20 @@ def main(argv=None) -> None:
     parser.add_argument("--policy-dir", required=True, type=Path,
                         help="destination directory, e.g. "
                              "<sail-uav-core>/libs/control-policy-api/policies/hover_snn")
+    parser.add_argument("--task", choices=("hover", "navigation"), default="hover",
+                        help="which policy this checkpoint is (16-D hover or 49-D navigation)")
     parser.add_argument("--arch", choices=("ann", "snn"), default="ann",
                         help="dense actor (default) or PopSAN spiking actor")
     parser.add_argument("--config", type=Path, default=None,
                         help="--arch snn: override the derived <run>/config.yaml. "
                              "Rarely correct; the derived path cannot be stale.")
-    parser.add_argument("--samples", type=int, default=256)
+    parser.add_argument("--vae-checkpoint", type=Path, default=None,
+                        help="--task navigation: the DepthVAE .pth. Defaults to the one the "
+                             "navigation task config names, which is the one the policy was "
+                             "trained against.")
+    parser.add_argument("--samples", type=int, default=None,
+                        help="default 256, or 32 for navigation (each sample carries a "
+                             "180x320 depth image)")
     parser.add_argument("--seed", type=int, default=20260816)
     args = parser.parse_args(argv)
 
@@ -85,8 +111,14 @@ def main(argv=None) -> None:
         raise SystemExit(f"no checkpoint at {args.checkpoint}")
     if args.arch == "ann" and args.config is not None:
         raise SystemExit("--config applies to --arch snn only")
+    if args.task == "navigation" and args.arch != "ann":
+        raise SystemExit("the navigation policy has no spiking variant yet")
+    if args.samples is None:
+        args.samples = 32 if args.task == "navigation" else 256
 
-    shared = ["--arch", args.arch,
+    names = ARTIFACT_NAMES[args.task]
+    shared = ["--task", args.task,
+              "--arch", args.arch,
               "--checkpoint", str(args.checkpoint),
               "--samples", str(args.samples),
               "--seed", str(args.seed)]
@@ -97,16 +129,41 @@ def main(argv=None) -> None:
         shared += ["--config", str(config)]
         print(f"[publish] config: {config}")
 
-    graph = args.policy_dir / GRAPH_NAME
-    golden = args.policy_dir / GOLDEN_NAME
+    # Resolved ONCE, here, and passed to both commands that need it. Defaulting it
+    # separately inside each would reintroduce exactly the mismatch this script exists to
+    # prevent -- and a VAE mismatch is the worst of the three, because a different encoder
+    # produces a perfectly well-formed latent that simply means something else.
+    if args.task == "navigation":
+        from .navigation import nav_task_config
 
-    # Export first: it verifies the graph against torch and deletes its own output on
-    # disagreement, so a failure here leaves no half-published policy behind.
-    print(f"\n[publish] 1/2 exporting graph -> {graph}")
+        vae = args.vae_checkpoint or Path(nav_task_config().vae_config.model_file)
+        if not vae.is_file():
+            raise SystemExit(f"no VAE checkpoint at {vae}")
+        # NOT in `shared`: export_onnx exports the actor alone and has no VAE argument.
+        golden_only = ["--vae-checkpoint", str(vae)]
+        print(f"[publish] DepthVAE: {vae}")
+
+    golden_only = golden_only if args.task == "navigation" else []
+
+    graph = args.policy_dir / names["graph"]
+    golden = args.policy_dir / names["golden"]
+    total = 3 if args.task == "navigation" else 2
+
+    # Export first: each exporter verifies its graph against torch and deletes its own
+    # output on disagreement, so a failure leaves no half-published policy behind.
+    print(f"\n[publish] 1/{total} exporting actor graph -> {graph}")
     export_onnx.main(shared + ["--output", str(graph)])
 
-    print(f"\n[publish] 2/2 recording golden -> {golden}")
-    record_golden.main(shared + ["--output", str(golden)])
+    if args.task == "navigation":
+        encoder = args.policy_dir / names["encoder"]
+        print(f"\n[publish] 2/{total} exporting DepthVAE encoder -> {encoder}")
+        export_vae_onnx.main(
+            ["--vae-checkpoint", str(vae), "--output", str(encoder),
+             "--seed", str(args.seed)]
+        )
+
+    print(f"\n[publish] {total}/{total} recording golden -> {golden}")
+    record_golden.main(shared + golden_only + ["--output", str(golden)])
 
     print(f"\n[publish] {args.policy_dir} is complete.")
     print("[publish] Now run `pytest libs/control-policy-api` IN THE FLIGHT CONTAINER.")
