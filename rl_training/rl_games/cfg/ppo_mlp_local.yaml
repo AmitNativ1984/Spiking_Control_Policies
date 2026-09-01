@@ -48,7 +48,11 @@ params:
     # Learning rate
     learning_rate: 1e-4
     lr_schedule: constant #adaptive
-    # kl_threshold: 0.016
+    # 0.008, halved -- inert while lr_schedule is constant, kept in step with
+    # ppo_mlp_cluster.yaml so uncommenting it does not resurrect the old value. See that
+    # file for the measurement: epoch-mean KL ran at a median of 0.0225 and a policy taking
+    # large clipped steps is rewarded for inflating sigma.
+    # kl_threshold: 0.008
     # min_lr: 1e-6
 
     # Training params
@@ -66,9 +70,16 @@ params:
     # Was 256 here against env_config.num_envs: 128, which crashed on a tensor-shape
     # mismatch; 128 is the value the env was actually written for, and keeps a camera-
     # equipped run inside 8 GB of VRAM.
+    #
+    # horizon_length 128 and minibatch_size 1024, both doubled, mirroring
+    # ppo_mlp_cluster.yaml. The rollout has to contain a complete episode (measured mean 81
+    # steps, p99 91) or the terminal reward only reaches the policy through the value
+    # function; and the minibatch has to scale with it, or gradient steps per update double
+    # and feed the sigma inflation the change exists to fix. Ratio held at 16 minibatches
+    # x 4 mini_epochs = 64 gradient steps per update, the same as the cluster config.
     num_actors: 128
-    horizon_length: 64
-    minibatch_size: 512
+    horizon_length: 128
+    minibatch_size: 1024
     mini_epochs: 4
     seq_length: 8
 
@@ -81,7 +92,10 @@ params:
     normalize_input: True
 
     # Other settings
-    bounds_loss_coef: 0.0001
+    # 0.001, raised 10x. See ppo_mlp_cluster.yaml for the measurement -- bounds_loss reached
+    # 42 while contributing 4.2e-3 to the loss, and mean |mu| reached 3.97 against an action
+    # box of +/-1. This is the only term acting on mu directly.
+    bounds_loss_coef: 0.001
     max_epochs: 1000
     use_diagnostics: True
 
