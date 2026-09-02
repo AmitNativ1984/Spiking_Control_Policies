@@ -200,13 +200,20 @@ class task_config:
         Levels 0-5: large panels
         Levels 6-30: cumulative panels + small objects
         """
-        # WARNING: min_level is the level a run STARTS at (curriculum_level is initialised
-        # from it), so it is 23 only to resume run 261745's epoch-2550 checkpoint, which
-        # was working at level 24 and held 23 at 0.708 success. It saves ~13 h of
-        # re-climbing ground the policy already covered.
-        # SET THIS BACK TO 0 FOR ANY FROM-SCRATCH RUN -- starting an untrained policy at
-        # level 23 drops it into 0.062 obstacles/m^3 with no chance of clearing the gate.
-        min_level = 23
+        # 0. Back to a from-scratch start, per the warning this comment used to carry:
+        # min_level is the level a run STARTS at, and 23 existed only to resume run
+        # 261745's epoch-2550 checkpoint. An untrained policy started at 23 lands in
+        # 0.062 obstacles/m^3 with no chance of clearing the gate.
+        #
+        # It has to be 0 for the retune in rl_training/rl_games/cfg/ppo_mlp_*.yaml
+        # (bounds_loss_coef, kl_threshold, horizon_length/minibatch_size) to mean anything:
+        # resuming loads the previous run's action_log_std, and every post-refactor
+        # checkpoint carries an already-inflated sigma -- run of4veb49 resumed at 0.894 and
+        # went to 2.30. Starting from a saved policy would import the failure the retune is
+        # meant to prevent.
+        #
+        # Set it back to a level only to resume a specific checkpoint, and say which.
+        min_level = 0
         max_level = 30
 
         # The level at which obstacle density reaches obstacle_density_max. Deliberately

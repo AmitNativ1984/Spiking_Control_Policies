@@ -26,6 +26,11 @@ python -m deploy.publish --arch snn \
 python -m deploy.publish \
     --checkpoint runs/f450_hover/<run>/nn/f450_hover.pth \
     --policy-dir <sail-uav-core>/libs/control-policy-api/policies/hover
+
+# navigation policy — 49-D observation, two graphs
+python -m deploy.publish --task navigation \
+    --checkpoint runs/f450_nav_ann/<run>/nn/last_....pth \
+    --policy-dir <sail-uav-core>/libs/control-policy-api/policies/navigation
 ```
 
 Then, **in the flight container**:
@@ -50,6 +55,38 @@ regenerated, never committed.
 
 Normalization and the `[-1, 1]` action clamp stay *outside* the graph, in numpy on both
 sides. Freezing them in would buy nothing and make the statistics harder to inspect.
+
+### The navigation policy is four
+
+Its observation is 17 state channels plus a 32-D DepthVAE latent, so there is a second
+network in front of the actor — and it stays a **separate graph**:
+
+| file | written by | what it is |
+|---|---|---|
+| `navigation.onnx` | `export_onnx --task navigation` | the actor — 49-D normalized observation in, raw action out |
+| `navigation.npz` | `export_onnx --task navigation` | frozen input-normalization statistics, plus provenance |
+| `depth_vae.onnx` | `export_vae_onnx` | the DepthVAE encoder — normalized 180×320 depth in, 32-D `mu` out |
+| `navigation_golden.npz` | `record_golden --task navigation` | 32 (depth, state, target) → action samples, **including the depth images** |
+
+Two graphs rather than one fused graph, because they run at different rates and cost wildly
+different amounts: the encoder is a few hundred MFLOPs consumed once per camera frame, the
+actor is ~35k MACs consumed once per decision. Fusing would weld the actor to the camera's
+rate and put a GPU round trip in front of arithmetic that takes microseconds on a CPU core.
+
+Two things are settled inside the encoder graph rather than left to the caller:
+
+- **the `mu` slice.** The encoder emits `[B, 64]` — `mu` concatenated with `logvar`. Taking
+  the wrong half gives a well-formed 32-vector and a policy steering on noise variance.
+- **the input resolution.** 180×320 is structural, not a preference: the FC head is
+  `Linear(fc_channel_dim * 6 * 10, 512)`, so the convolution stack lands correctly on that
+  shape and no other.
+
+The **preprocessing** (resize → clamp to [0.1, 7] m → `1 - d/7`) stays in numpy on the flight
+side, and the golden carries the depth images so that reimplementation is checked rather than
+assumed. It is the one part of the chain with two independent implementations.
+
+The golden records 32 samples rather than 256 because each carries a 180×320 float32 image —
+230 kB against 100 bytes for a hover sample.
 
 ## Why publish is one command
 
@@ -164,11 +201,25 @@ path.
 | `checkpoint.py` | `RlGamesPolicy` (architecture-agnostic: `.pth`, normalizer, forward) and `MlpActorPolicy` |
 | `snn_checkpoint.py` | `PopSANPolicy` — the spiking loader, and the config fingerprint |
 | `hover.py` | `HoverPolicy` / `SnnHoverPolicy` — same observation, different network |
+| `export_vae_onnx.py` | writes `depth_vae.onnx` — the DepthVAE encoder with the `mu` slice welded on |
+| `navigation.py` | `NavigationPolicy` — the 49-D actor with the DepthVAE in front of it |
 
 `checkpoint.py` rebuilds the MLP by hand from weight shapes. `snn_checkpoint.py` deliberately
 does not: it imports the trained `PopulationSpikingActorNetwork`. Re-deriving snntorch's
 `Synaptic` semantics — including the `reset_delay=False` same-step reset — is exactly the
 transcription risk this whole boundary exists to remove.
+
+`navigation.py` follows the same rule for depth: it wraps `vae_depth`'s own
+`DepthVAEImageEncoder` rather than restating the preprocessing, feeding it metres by setting
+`sensor_max_range = 1.0` so the simulator's normalization multiply becomes the identity. The
+flight side reimplements it because it must; this side must not, or the two would agree with
+each other and neither with training.
+
+It also imports **no aerial_gym**. Reaching the task config would pull in isaacgym, which
+must precede torch and wants a GPU — in front of what is otherwise checkpoint arithmetic. The
+encoder's geometry and clamp window come from `control_policy_api.depth` instead, and
+`tests/test_deploy_nav_obs_parity.py` asserts those equal the task's `vae_config`. Pinned by
+test rather than by import.
 
 ## Prerequisites
 

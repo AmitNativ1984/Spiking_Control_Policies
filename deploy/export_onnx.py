@@ -52,6 +52,15 @@ USAGE
         --checkpoint runs/f450_hover_snn/<run>/nn/last_....pth \
         --config    runs/f450_hover_snn/<run>/config.yaml \
         --output <sail-uav-core>/libs/control-policy-api/policies/hover_snn/hover.onnx
+
+    python -m deploy.export_onnx --task navigation \
+        --checkpoint runs/f450_nav_ann/<run>/nn/last_....pth \
+        --output <sail-uav-core>/libs/control-policy-api/policies/navigation/navigation.onnx
+
+The navigation actor is only HALF of that policy: it consumes a 49-D observation whose last
+32 channels come from the DepthVAE, which is a second graph with its own exporter
+(deploy/export_vae_onnx.py). Both must land in the same directory, and record_golden ties
+them together by recording depth frames through one into the other.
 """
 
 import argparse
@@ -62,8 +71,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from control_policy_api.observations import HOVER_OBS_DIM
 from .hover import HoverPolicy, SnnHoverPolicy
+from .navigation import NavigationPolicy
 from .checkpoint import _NORM_CLAMP
 
 # ONNX opset 13 is old enough for any onnxruntime you will meet on a companion computer and
@@ -111,7 +120,20 @@ checkpoint_digest = file_digest
 
 
 def build_policy(args):
-    """The policy whose `_actor` gets exported."""
+    """The policy whose `_actor` gets exported.
+
+    The navigation policy is built WITHOUT its VAE. Only `_actor` is exported here, and
+    loading a half-gigabyte encoder to not use it would make this command need a GPU it has
+    no work for. The encoder is a separate graph with a separate exporter -- see
+    deploy/export_vae_onnx.py and the two-graph note in control_policy_api.onnx.
+    """
+    if args.task == "navigation":
+        if args.arch != "ann":
+            raise SystemExit("the navigation policy has no spiking variant yet")
+        if args.config is not None:
+            raise SystemExit("--config applies to --arch snn only")
+        return NavigationPolicy(str(args.checkpoint))
+
     if args.arch == "ann":
         if args.config is not None:
             raise SystemExit("--config applies to --arch snn only")
@@ -167,6 +189,8 @@ def main(argv=None) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--task", choices=("hover", "navigation"), default="hover",
+                        help="which observation layout the actor consumes (16-D or 49-D)")
     parser.add_argument("--arch", choices=("ann", "snn"), default="ann",
                         help="dense actor (default) or PopSAN spiking actor")
     parser.add_argument("--config", type=Path, default=None,
@@ -178,7 +202,7 @@ def main(argv=None) -> None:
     policy = build_policy(args)
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
-    provenance = {"arch": args.arch}
+    provenance = {"arch": args.arch, "task": args.task, "obs_dim": policy.obs_dim}
     if args.arch == "snn":
         provenance.update(
             num_steps=policy.num_steps,
@@ -193,7 +217,7 @@ def main(argv=None) -> None:
     # make the statistics harder to inspect.
     torch.onnx.export(
         policy._actor,
-        torch.zeros(1, HOVER_OBS_DIM, dtype=torch.float32),
+        torch.zeros(1, policy.obs_dim, dtype=torch.float32),
         str(args.output),
         input_names=["normalized_observation"],
         output_names=["action"],
@@ -239,7 +263,7 @@ def main(argv=None) -> None:
     rng = np.random.default_rng(args.seed)
     # Normalized-space inputs: that is what the graph actually consumes, and sampling it
     # directly exercises the whole clamped +/-5 sigma range the policy can ever see.
-    probes = rng.uniform(-_NORM_CLAMP, _NORM_CLAMP, size=(args.samples, HOVER_OBS_DIM))
+    probes = rng.uniform(-_NORM_CLAMP, _NORM_CLAMP, size=(args.samples, policy.obs_dim))
 
     with torch.no_grad():
         expected = policy._actor(torch.as_tensor(probes, dtype=torch.float32)).numpy()
@@ -257,7 +281,7 @@ def main(argv=None) -> None:
         )
 
     print(f"wrote {args.output} and {stats_path}")
-    print(f"  arch {args.arch}")
+    print(f"  task {args.task} (obs_dim {policy.obs_dim}), arch {args.arch}")
     print(f"  verified against torch {torch.__version__}")
     print(f"  clamped action worst diff {worst:.3e} (raw output {raw_worst:.3e})")
     if args.arch == "snn":
