@@ -1,0 +1,698 @@
+<!doctype html>
+<title>p_blind Autopsy</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #10131a;
+    --surface: #171c24;
+    --surface-2: #1d232c;
+    --border: #2a313c;
+    --text: #e7ebf1;
+    --text-dim: #98a1b0;
+    --text-faint: #5c6675;
+    --amber: #ff8f4d;
+    --amber-dim: #7a5233;
+    --teal: #55c9c9;
+    --teal-dim: #2f5c5c;
+    --c-tree: #6fae5c;
+    --c-panel: #9b8fe0;
+    --c-sphere: #4fa3d1;
+    --c-cylinder: #c99a52;
+    --c-wall: #97a1ab;
+    --c-object: #6b7480;
+    --up: #ff8f4d;
+    --down: #55c9c9;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    background: var(--bg);
+    color: var(--text);
+  }
+
+  body {
+    margin: 0;
+    font-family: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+    font-size: 15px;
+    line-height: 1.6;
+    padding-inline: 20px;
+    padding-block: max(28px, env(safe-area-inset-top, 0px)) max(48px, env(safe-area-inset-bottom, 0px));
+  }
+
+  .page {
+    max-width: 880px;
+    margin: 0 auto;
+  }
+
+  .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; }
+  .tnum { font-variant-numeric: tabular-nums; }
+
+  /* ---------- header ---------- */
+  header {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding-bottom: 28px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 28px;
+  }
+
+  .eyebrow {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 11.5px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--amber);
+  }
+
+  h1 {
+    font-family: "IBM Plex Mono", monospace;
+    font-weight: 700;
+    font-size: clamp(28px, 5vw, 40px);
+    line-height: 1.08;
+    margin: 0;
+    text-wrap: balance;
+    letter-spacing: -0.01em;
+  }
+
+  .dek {
+    color: var(--text-dim);
+    max-width: 62ch;
+    font-size: 15.5px;
+  }
+  .dek a { color: var(--teal); }
+
+  .runstrip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 18px;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 12px;
+    color: var(--text-faint);
+    margin-top: 4px;
+  }
+  .runstrip b { color: var(--text-dim); font-weight: 500; }
+
+  /* ---------- stat tiles ---------- */
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 40px;
+  }
+  @media (max-width: 620px) {
+    .tiles { grid-template-columns: repeat(2, 1fr); }
+  }
+
+  .tile {
+    background: var(--surface);
+    padding: 18px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .tile .label {
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+  }
+
+  .tile .value {
+    font-family: "IBM Plex Mono", monospace;
+    font-weight: 700;
+    font-size: 28px;
+    color: var(--text);
+  }
+  .tile .value small { font-size: 14px; color: var(--text-dim); font-weight: 500; }
+
+  .tile .sub { font-size: 12px; color: var(--text-dim); }
+  .tile .delta { font-size: 11.5px; font-family: "IBM Plex Mono", monospace; margin-top: 2px; }
+  .tile .delta.up { color: var(--up); }
+  .tile .delta.down { color: var(--down); }
+  .tile.hazard .value { color: var(--amber); }
+  .tile.view .value { color: var(--teal); }
+
+  /* ---------- sections ---------- */
+  section { margin-bottom: 52px; }
+
+  .sec-head {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    margin-bottom: 6px;
+  }
+
+  .sec-num {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 13px;
+    color: var(--text-faint);
+    letter-spacing: 0.04em;
+  }
+
+  h2 {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 19px;
+    font-weight: 600;
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  .finding {
+    color: var(--text-dim);
+    max-width: 68ch;
+    margin: 10px 0 20px;
+  }
+  .finding strong { color: var(--text); font-weight: 600; }
+  .finding .vs { color: var(--text-faint); }
+
+  .chart-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 18px 8px;
+    margin-bottom: 16px;
+  }
+  .chart-card .chart-title {
+    font-size: 12px;
+    color: var(--text-faint);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    margin-bottom: 12px;
+  }
+  .chart-wrap { position: relative; height: 260px; }
+  .chart-wrap.tall { height: 320px; }
+
+  .chart-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  @media (max-width: 700px) {
+    .chart-row { grid-template-columns: 1fr; }
+  }
+
+  /* ---------- table ---------- */
+  .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    min-width: 640px;
+  }
+  thead th {
+    text-align: left;
+    font-family: "IBM Plex Mono", monospace;
+    font-weight: 500;
+    font-size: 11px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    background: var(--surface-2);
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  tbody td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:nth-child(odd) { background: var(--surface); }
+  tbody tr:nth-child(even) { background: var(--surface-2); }
+  td.name { color: var(--text); font-weight: 500; }
+  td.num { font-family: "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums; }
+  .swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 7px; }
+  .ratio-up { color: var(--amber); }
+  .ratio-down { color: var(--teal); }
+
+  /* ---------- legend ---------- */
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 18px;
+    font-size: 12px;
+    color: var(--text-dim);
+    margin: 10px 2px 0;
+  }
+  .legend span { display: inline-flex; align-items: center; }
+
+  /* ---------- footer ---------- */
+  footer {
+    border-top: 1px solid var(--border);
+    padding-top: 24px;
+    margin-top: 8px;
+  }
+  footer h3 {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-faint);
+    margin: 0 0 12px;
+  }
+  footer ul {
+    margin: 0 0 22px;
+    padding-left: 18px;
+    color: var(--text-dim);
+    font-size: 13px;
+  }
+  footer li { margin-bottom: 8px; }
+  footer .kv {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 12px;
+    color: var(--text-faint);
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+    gap: 6px 20px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  footer .kv b { color: var(--text-dim); font-weight: 500; }
+
+  a { color: var(--teal); }
+</style>
+
+<div class="page">
+
+  <header>
+    <div class="eyebrow">F450 &middot; Navigation-with-Obstacles &middot; Crash Diagnostic &middot; Companion to <a href="https://claude.ai/artifact/1MFQ1KPtAwuP8fJzBCw85V">Collision Autopsy</a></div>
+    <h1>p_blind Autopsy</h1>
+    <p class="dek">Same protocol, different reward. The <span class="mono">p_blind</span> checkpoint
+      (commit <span class="mono">4cd8490</span>, "delete r_bearing, add p_blind: give yaw a purpose")
+      evaluated across 10,392 deterministic episodes at curriculum level 30, benchmarked throughout
+      against the <a href="https://claude.ai/artifact/1MFQ1KPtAwuP8fJzBCw85V">b4 baseline</a>.</p>
+    <div class="runstrip">
+      <span><b>checkpoint</b> last_f450_nav_p_blind_ep_2000_rew_11.54345.pth</span>
+      <span><b>epoch</b> 2000</span>
+      <span><b>level</b> 30 / 30</span>
+      <span><b>envs</b> 256</span>
+      <span><b>steps</b> 6,000</span>
+      <span><b>episodes</b> 10,392</span>
+    </div>
+  </header>
+
+  <div class="tiles">
+    <div class="tile hazard">
+      <div class="label">Crash rate</div>
+      <div class="value tnum">18.1<small>%</small></div>
+      <div class="sub">1,877 / 10,392 episodes</div>
+      <div class="delta up">&#9650; 1.7pp vs b4 (16.4%)</div>
+    </div>
+    <div class="tile">
+      <div class="label">Spawn traps</div>
+      <div class="value tnum">10.9<small>%</small></div>
+      <div class="sub">204 crashes before step 5</div>
+      <div class="delta down">&#9660; 1.6pp vs b4 (12.5%)</div>
+    </div>
+    <div class="tile view">
+      <div class="label">Never saw it coming</div>
+      <div class="value tnum">75.6<small>%</small></div>
+      <div class="sub">0-of-10 prior frames in view</div>
+      <div class="delta down">&#9660; 10.2pp vs b4 (85.8%)</div>
+    </div>
+    <div class="tile hazard">
+      <div class="label">Median impact speed</div>
+      <div class="value tnum">2.14<small> m/s</small></div>
+      <div class="sub">max 9.11 m/s</div>
+      <div class="delta up">&#9650; +0.94 m/s vs b4 (1.20)</div>
+    </div>
+  </div>
+
+  <section id="s1">
+    <div class="sec-head"><span class="sec-num">01</span><h2>Obstacle type</h2></div>
+    <p class="finding">
+      The ranking is unchanged from b4, and the standout offender got worse. <strong>Panels</strong>
+      are 3.5% of the obstacle pool but <strong>9.2%</strong> of crashes &mdash; a
+      <strong>2.63&times;</strong> over-rate, up from b4's already-disproportionate 2.34&times;.
+      Cylinders again run hot (1.17&times;). The one real shift: <strong>trees</strong> moved
+      from half their pool share under b4 (0.50&times;, 25 crashes) to <strong>0.85&times;</strong>
+      under p_blind (48 crashes) &mdash; still under-represented, but the absolute tree-crash count
+      nearly doubled on a comparable episode count, consistent with the higher impact speeds below
+      giving the policy less margin around large obstacles.
+    </p>
+    <div class="chart-card">
+      <div class="chart-title">Crash share vs. pool share, by type</div>
+      <div class="chart-wrap tall"><canvas id="chartType"></canvas></div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Type</th><th>Crashes</th><th>Crash share</th><th>Pool share</th><th>Rate ratio</th>
+            <th>Spawn trap</th><th>Never in view</th><th>Median step</th><th>Mean speed</th><th>Mean angle</th>
+          </tr>
+        </thead>
+        <tbody id="typeTableBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="s2">
+    <div class="sec-head"><span class="sec-num">02</span><h2>Spawn traps</h2></div>
+    <p class="finding">
+      Spawn traps overall are slightly less common than under b4 (10.9% vs 12.5%) &mdash; but they
+      have concentrated even harder on <strong>walls</strong>. Under b4, a quarter of wall crashes
+      (25.9%) happened before step 5; under p_blind it's <strong>half</strong> (50.0%), with a
+      median wall-crash step of just <strong>10</strong> (down from 25). Whatever p_blind changed
+      about early yaw/heading behavior, it made the first few steps riskier specifically around
+      walls, even as the rest of the spawn-trap picture improved slightly.
+    </p>
+    <div class="chart-card">
+      <div class="chart-title">Steps survived before impact (10-step bins) &mdash; amber marks step &lt; 5</div>
+      <div class="chart-wrap"><canvas id="chartStep"></canvas></div>
+    </div>
+  </section>
+
+  <section id="s3">
+    <div class="sec-head"><span class="sec-num">03</span><h2>Camera memory</h2></div>
+    <p class="finding">
+      Still the largest single factor, but measurably less dominant than under b4. <strong>75.6%</strong>
+      of crashes (down from 85.8%) hit an obstacle absent from all 10 prior frames, and the mean
+      visible-fraction rose from 0.102 to <strong>0.165</strong>. p_blind's reward term explicitly
+      targets "motion the camera cannot see" &mdash; this is consistent with it nudging the policy
+      to keep more obstacles in frame before it reaches them. It has not fixed the underlying issue:
+      four in five crashes are still functionally blind, which is still the strongest argument in
+      either run for adding real memory (a GRU or stacked-latent history) rather than more reward
+      shaping on top of a memoryless MLP.
+    </p>
+    <div class="chart-card">
+      <div class="chart-title">Fraction of the last 10 frames the impacted obstacle was actually visible</div>
+      <div class="chart-wrap"><canvas id="chartView"></canvas></div>
+    </div>
+    <div class="legend" id="viewLegend"></div>
+  </section>
+
+  <section id="s4">
+    <div class="sec-head"><span class="sec-num">04</span><h2>Motion vs. camera</h2></div>
+    <p class="finding">
+      This is where p_blind diverges most from b4. Median impact speed nearly <strong>doubled</strong>,
+      from 1.20 to <strong>2.14 m/s</strong> (max 9.11 m/s vs 5.47), while the angle off boresight
+      barely moved (57.9&deg; vs 58.9&deg; median). p_blind is not crashing into different things at
+      different angles &mdash; it is flying, and crashing, <strong>faster</strong>. That is the
+      simplest explanation for why the memory picture improved (a faster-moving camera keeps more
+      of the room passing through frame) while the overall crash rate still went up: the added speed
+      outweighs the added visibility.
+    </p>
+    <div class="chart-row">
+      <div class="chart-card">
+        <div class="chart-title">Impact angle off boresight</div>
+        <div class="chart-wrap"><canvas id="chartAngle"></canvas></div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Impact speed</div>
+        <div class="chart-wrap"><canvas id="chartSpeed"></canvas></div>
+      </div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Every collision: angle vs. speed, colored by obstacle type</div>
+      <div class="chart-wrap tall"><canvas id="chartScatter"></canvas></div>
+    </div>
+    <div class="legend" id="scatterLegend"></div>
+  </section>
+
+  <section id="s5">
+    <div class="sec-head"><span class="sec-num">05</span><h2>b4 vs. p_blind, side by side</h2></div>
+    <p class="finding">
+      Net read: p_blind trades a somewhat clearer camera memory for a faster, slightly more
+      crash-prone policy. Single seed on each side, so treat these as point estimates, not a
+      significance-tested result.
+    </p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Metric</th><th>b4</th><th>p_blind</th><th>&Delta;</th></tr></thead>
+        <tbody>
+          <tr><td class="name">Crash rate</td><td class="num">16.4%</td><td class="num">18.1%</td><td class="num ratio-up">+1.7pp</td></tr>
+          <tr><td class="name">Spawn traps (step &lt; 5)</td><td class="num">12.5%</td><td class="num">10.9%</td><td class="num ratio-down">&minus;1.6pp</td></tr>
+          <tr><td class="name">Wall spawn-trap rate</td><td class="num">25.9%</td><td class="num">50.0%</td><td class="num ratio-up">+24.1pp</td></tr>
+          <tr><td class="name">Never in view (last 10 frames)</td><td class="num">85.8%</td><td class="num">75.6%</td><td class="num ratio-down">&minus;10.2pp</td></tr>
+          <tr><td class="name">Median impact speed</td><td class="num">1.20 m/s</td><td class="num">2.14 m/s</td><td class="num ratio-up">+0.94 m/s</td></tr>
+          <tr><td class="name">Max impact speed</td><td class="num">5.47 m/s</td><td class="num">9.11 m/s</td><td class="num ratio-up">+3.64 m/s</td></tr>
+          <tr><td class="name">Median impact angle</td><td class="num">58.9&deg;</td><td class="num">57.9&deg;</td><td class="num">&minus;1.0&deg;</td></tr>
+          <tr><td class="name">Panel over-rate (crash share &divide; pool share)</td><td class="num">2.34&times;</td><td class="num">2.63&times;</td><td class="num ratio-up">+0.29&times;</td></tr>
+          <tr><td class="name">Tree over-rate</td><td class="num">0.50&times;</td><td class="num">0.85&times;</td><td class="num ratio-up">+0.35&times;</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>
+    <h3>Method</h3>
+    <ul>
+      <li>Identical protocol to the b4 report: the checkpoint's actor was rebuilt directly from its
+        saved weights and run deterministically (no exploration noise, no gradient updates) for
+        6,000 physics steps across 256 parallel environments, curriculum
+        <span class="mono">min_level = max_level = 30</span> pinned throughout.</li>
+      <li>Evaluated on the exact commit (<span class="mono">4cd8490</span>) the p_blind checkpoint
+        was trained at, rather than the current tip, since the checkpoint's observation layout has
+        to match the checked-out task code exactly. Verified unchanged from the b4-era code
+        (17+32 = 49-D observation) &mdash; p_blind only changed the reward function.</li>
+      <li>A crash is the task's own collision buffer (a contact-force threshold on the airframe)
+        firing outside an arrival or out-of-bounds event. 1,877 fired this way, for an 18.1% crash
+        rate &mdash; close to the ~18-19% seen in this run's own training-time logs at level 30.</li>
+      <li>The struck obstacle is the nearest live obstacle to the airframe at the moment of impact
+        (no contact-body id exists in this task, so two obstacles within a few tens of centimeters
+        of each other could be misattributed).</li>
+      <li>"In view" is a geometric frustum + range check (87&deg; horizontal / 56.1&deg; vertical FOV,
+        0.1&ndash;10&nbsp;m range, nominal un-jittered mount pose) against the struck obstacle's
+        static position at each of the last &le;10 physics steps ending at impact.</li>
+      <li>Single seed per checkpoint on both sides of this comparison &mdash; the deltas above are a
+        single training run each, not an average over a seed spread, so treat them as directional
+        rather than statistically confirmed.</li>
+    </ul>
+    <div class="kv">
+      <div><b>obstacle density</b> 0.0804 /m&sup3; (level 30, max)</div>
+      <div><b>env bounds</b> 20&times;20&times;[4&ndash;6] m</div>
+      <div><b>camera FOV</b> 87&deg; H / 56.1&deg; V, 0.1&ndash;10 m</div>
+      <div><b>spawn-trap threshold</b> step &lt; 5</div>
+      <div><b>history window</b> last 10 physics steps</div>
+      <div><b>eval commit</b> 4cd8490</div>
+    </div>
+  </footer>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var TYPE_COLOR = {
+    tree: "#6fae5c", panel: "#9b8fe0", sphere: "#4fa3d1",
+    cylinder: "#c99a52", wall: "#97a1ab", object: "#6b7480"
+  };
+  var TEXT_DIM = "#98a1b0";
+  var TEXT_FAINT = "#5c6675";
+  var BORDER = "#2a313c";
+  var AMBER = "#ff8f4d";
+  var TEAL = "#55c9c9";
+  var FONT = "'IBM Plex Mono', ui-monospace, monospace";
+
+  Chart.defaults.color = TEXT_DIM;
+  Chart.defaults.font.family = FONT;
+  Chart.defaults.font.size = 11;
+  Chart.defaults.borderColor = BORDER;
+
+  var byType = {
+    tree:     {count:48,  crash:2.6,  pool:3.0,  ratio:0.85, spawn:2.1,  neverView:56.3, step:107, speed:2.41, angle:65.3},
+    panel:    {count:173, crash:9.2,  pool:3.5,  ratio:2.63, spawn:12.7, neverView:67.6, step:89,  speed:1.84, angle:68.8},
+    sphere:   {count:340, crash:18.1, pool:22.0, ratio:0.82, spawn:9.4,  neverView:81.8, step:108, speed:2.14, angle:57.2},
+    cylinder: {count:482, crash:25.7, pool:22.0, ratio:1.17, spawn:10.2, neverView:78.8, step:98,  speed:2.19, angle:58.1},
+    wall:     {count:36,  crash:1.9,  pool:2.0,  ratio:0.96, spawn:50.0, neverView:94.4, step:10,  speed:1.00, angle:83.7},
+    object:   {count:798, crash:42.5, pool:47.5, ratio:0.90, spawn:10.3, neverView:73.1, step:104, speed:2.06, angle:57.6}
+  };
+  var TYPE_ORDER = ["tree", "panel", "sphere", "cylinder", "wall", "object"];
+
+  // ---- table ----
+  var tbody = document.getElementById("typeTableBody");
+  TYPE_ORDER.forEach(function (t) {
+    var d = byType[t];
+    var ratioClass = d.ratio >= 1.15 ? "ratio-up" : (d.ratio <= 0.85 ? "ratio-down" : "");
+    var tr = document.createElement("tr");
+    tr.innerHTML =
+      '<td class="name"><span class="swatch" style="background:' + TYPE_COLOR[t] + '"></span>' + t + '</td>' +
+      '<td class="num">' + d.count.toLocaleString() + '</td>' +
+      '<td class="num">' + d.crash.toFixed(1) + '%</td>' +
+      '<td class="num">' + d.pool.toFixed(1) + '%</td>' +
+      '<td class="num ' + ratioClass + '">' + d.ratio.toFixed(2) + '&times;</td>' +
+      '<td class="num">' + d.spawn.toFixed(1) + '%</td>' +
+      '<td class="num">' + d.neverView.toFixed(1) + '%</td>' +
+      '<td class="num">' + d.step + '</td>' +
+      '<td class="num">' + d.speed.toFixed(2) + ' m/s</td>' +
+      '<td class="num">' + d.angle.toFixed(1) + '&deg;</td>';
+    tbody.appendChild(tr);
+  });
+
+  function grid() {
+    return { color: "rgba(255,255,255,0.06)", drawTicks: false };
+  }
+  function axisLabel(text) {
+    return { display: true, text: text, color: TEXT_FAINT, font: { family: FONT, size: 11 } };
+  }
+
+  // ---- 01: crash share vs pool share ----
+  new Chart(document.getElementById("chartType"), {
+    type: "bar",
+    data: {
+      labels: TYPE_ORDER.map(function (t) { return t; }),
+      datasets: [
+        {
+          label: "Crash share",
+          data: TYPE_ORDER.map(function (t) { return byType[t].crash; }),
+          backgroundColor: TYPE_ORDER.map(function (t) { return TYPE_COLOR[t]; }),
+          borderRadius: 3,
+          barPercentage: 0.75, categoryPercentage: 0.7
+        },
+        {
+          label: "Pool share",
+          data: TYPE_ORDER.map(function (t) { return byType[t].pool; }),
+          backgroundColor: "rgba(255,255,255,0.14)",
+          borderRadius: 3,
+          barPercentage: 0.75, categoryPercentage: 0.7
+        }
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { position: "top", align: "end", labels: { boxWidth: 10, color: TEXT_DIM, font: { family: "'IBM Plex Sans'", size: 12 } } } },
+      scales: {
+        x: { grid: { display: false } },
+        y: { grid: grid(), title: axisLabel("% of total"), beginAtZero: true }
+      }
+    }
+  });
+
+  // ---- 02: step histogram ----
+  var stepEdges = [0,10,20,30,40,50,60,70,80,90,100,110,120,130,140,150,160,170,180,190,200,210,220,230,240,250,260,270,280,290,300];
+  var stepCounts = [229,69,46,38,56,60,87,91,111,109,135,142,98,104,104,66,77,54,33,28,34,36,18,13,12,4,7,6,4,1];
+  new Chart(document.getElementById("chartStep"), {
+    type: "bar",
+    data: {
+      labels: stepEdges.slice(0, -1).map(function (e) { return e + "-" + (e + 10); }),
+      datasets: [{
+        data: stepCounts,
+        backgroundColor: stepEdges.slice(0, -1).map(function (e) { return e === 0 ? AMBER : "rgba(255,255,255,0.16)"; }),
+        borderRadius: 2, barPercentage: 0.95, categoryPercentage: 0.95
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { grid: { display: false }, title: axisLabel("step at impact"), ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 10 } },
+        y: { grid: grid(), title: axisLabel("crashes"), beginAtZero: true }
+      }
+    }
+  });
+
+  // ---- 03: in-view histogram ----
+  var ivCounts = [1419,31,36,23,40,49,31,24,30,194];
+  new Chart(document.getElementById("chartView"), {
+    type: "bar",
+    data: {
+      labels: ["0", "0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9–1.0"],
+      datasets: [{
+        data: ivCounts,
+        backgroundColor: ivCounts.map(function (_, i) { return i === 0 ? AMBER : (i === ivCounts.length - 1 ? TEAL : "rgba(255,255,255,0.16)"); }),
+        borderRadius: 2, barPercentage: 0.85, categoryPercentage: 0.85
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { grid: { display: false }, title: axisLabel("fraction of last 10 frames in view") },
+        y: { grid: grid(), title: axisLabel("crashes"), type: "logarithmic",
+             ticks: { callback: function (v) { return [1,10,100,1000,10000].indexOf(v) >= 0 ? v : ""; } } }
+      }
+    }
+  });
+  document.getElementById("viewLegend").innerHTML =
+    '<span><span class="swatch" style="background:' + AMBER + '"></span>never in view (75.6% of all crashes, vs 85.8% for b4)</span>' +
+    '<span><span class="swatch" style="background:' + TEAL + '"></span>almost always in view, &ge;90% (10.3%, vs 6.8% for b4)</span>';
+
+  // ---- 04a: angle histogram ----
+  var angleEdges = [0,15,30,45,60,75,90,105,120,135,150,165,180];
+  var angleCounts = [168,291,186,370,349,184,128,73,59,40,20,9];
+  new Chart(document.getElementById("chartAngle"), {
+    type: "bar",
+    data: {
+      labels: angleEdges.slice(0, -1).map(function (e) { return e + "–" + (e + 15); }),
+      datasets: [{ data: angleCounts, backgroundColor: "rgba(255,143,77,0.55)", borderRadius: 2, barPercentage: 0.95, categoryPercentage: 0.95 }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { grid: { display: false }, title: axisLabel("degrees off boresight"), ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 7 } },
+        y: { grid: grid(), title: axisLabel("crashes"), beginAtZero: true }
+      }
+    }
+  });
+
+  // ---- 04b: speed histogram ----
+  var speedEdges = [0,0.5,1.0,1.5,2.0,2.5,3.0,3.5,4.0,4.5,5.0,5.5,6.0];
+  var speedCounts = [215,243,207,208,251,303,222,127,75,24,1,0];
+  new Chart(document.getElementById("chartSpeed"), {
+    type: "bar",
+    data: {
+      labels: speedEdges.slice(0, -1).map(function (e) { return e.toFixed(1); }),
+      datasets: [{ data: speedCounts, backgroundColor: "rgba(85,201,201,0.55)", borderRadius: 2, barPercentage: 0.95, categoryPercentage: 0.95 }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { grid: { display: false }, title: axisLabel("impact speed, m/s (truncated at 6; max observed 9.11)"), ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 7 } },
+        y: { grid: grid(), title: axisLabel("crashes"), beginAtZero: true }
+      }
+    }
+  });
+
+  // ---- 04c: scatter ----
+  fetch("crash_scatter_p_blind.json").then(function (r) { return r.json(); }).then(renderScatter).catch(function (err) {
+    console.error("could not load crash_scatter_p_blind.json", err);
+    renderScatter([]);
+  });
+
+  function renderScatter(points) {
+    var datasets = TYPE_ORDER.map(function (t) {
+      return {
+        label: t,
+        data: points.filter(function (p) { return p.t === t; }).map(function (p) { return { x: p.x, y: p.y }; }),
+        backgroundColor: TYPE_COLOR[t] + "cc",
+        pointRadius: 2.6, pointHoverRadius: 4
+      };
+    });
+    new Chart(document.getElementById("chartScatter"), {
+      type: "scatter",
+      data: { datasets: datasets },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { grid: grid(), min: 0, max: 180, title: axisLabel("angle to camera boresight, degrees") },
+          y: { grid: grid(), min: 0, title: axisLabel("impact speed, m/s") }
+        }
+      }
+    });
+    document.getElementById("scatterLegend").innerHTML = TYPE_ORDER.map(function (t) {
+      return '<span><span class="swatch" style="background:' + TYPE_COLOR[t] + '"></span>' + t + '</span>';
+    }).join("");
+  }
+})();
+</script>
