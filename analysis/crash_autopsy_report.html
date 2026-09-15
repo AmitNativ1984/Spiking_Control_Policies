@@ -1,0 +1,662 @@
+<!doctype html>
+<title>Collision Autopsy</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #10131a;
+    --surface: #171c24;
+    --surface-2: #1d232c;
+    --border: #2a313c;
+    --text: #e7ebf1;
+    --text-dim: #98a1b0;
+    --text-faint: #5c6675;
+    --amber: #ff8f4d;
+    --amber-dim: #7a5233;
+    --teal: #55c9c9;
+    --teal-dim: #2f5c5c;
+    --c-tree: #6fae5c;
+    --c-panel: #9b8fe0;
+    --c-sphere: #4fa3d1;
+    --c-cylinder: #c99a52;
+    --c-wall: #97a1ab;
+    --c-object: #6b7480;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    background: var(--bg);
+    color: var(--text);
+  }
+
+  body {
+    margin: 0;
+    font-family: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+    font-size: 15px;
+    line-height: 1.6;
+    padding-inline: 20px;
+    padding-block: max(28px, env(safe-area-inset-top, 0px)) max(48px, env(safe-area-inset-bottom, 0px));
+  }
+
+  .page {
+    max-width: 880px;
+    margin: 0 auto;
+  }
+
+  .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; }
+  .tnum { font-variant-numeric: tabular-nums; }
+
+  /* ---------- header ---------- */
+  header {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding-bottom: 28px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 28px;
+  }
+
+  .eyebrow {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 11.5px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--amber);
+  }
+
+  h1 {
+    font-family: "IBM Plex Mono", monospace;
+    font-weight: 700;
+    font-size: clamp(28px, 5vw, 40px);
+    line-height: 1.08;
+    margin: 0;
+    text-wrap: balance;
+    letter-spacing: -0.01em;
+  }
+
+  .dek {
+    color: var(--text-dim);
+    max-width: 62ch;
+    font-size: 15.5px;
+  }
+
+  .runstrip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 18px;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 12px;
+    color: var(--text-faint);
+    margin-top: 4px;
+  }
+  .runstrip b { color: var(--text-dim); font-weight: 500; }
+
+  /* ---------- stat tiles ---------- */
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 40px;
+  }
+  @media (max-width: 620px) {
+    .tiles { grid-template-columns: repeat(2, 1fr); }
+  }
+
+  .tile {
+    background: var(--surface);
+    padding: 18px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .tile .label {
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+  }
+
+  .tile .value {
+    font-family: "IBM Plex Mono", monospace;
+    font-weight: 700;
+    font-size: 28px;
+    color: var(--text);
+  }
+  .tile .value small { font-size: 14px; color: var(--text-dim); font-weight: 500; }
+
+  .tile .sub { font-size: 12px; color: var(--text-dim); }
+  .tile.hazard .value { color: var(--amber); }
+  .tile.view .value { color: var(--teal); }
+
+  /* ---------- sections ---------- */
+  section { margin-bottom: 52px; }
+
+  .sec-head {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    margin-bottom: 6px;
+  }
+
+  .sec-num {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 13px;
+    color: var(--text-faint);
+    letter-spacing: 0.04em;
+  }
+
+  h2 {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 19px;
+    font-weight: 600;
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  .finding {
+    color: var(--text-dim);
+    max-width: 68ch;
+    margin: 10px 0 20px;
+  }
+  .finding strong { color: var(--text); font-weight: 600; }
+
+  .chart-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 18px 8px;
+    margin-bottom: 16px;
+  }
+  .chart-card .chart-title {
+    font-size: 12px;
+    color: var(--text-faint);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    margin-bottom: 12px;
+  }
+  .chart-wrap { position: relative; height: 260px; }
+  .chart-wrap.tall { height: 320px; }
+
+  .chart-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  @media (max-width: 700px) {
+    .chart-row { grid-template-columns: 1fr; }
+  }
+
+  /* ---------- table ---------- */
+  .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    min-width: 640px;
+  }
+  thead th {
+    text-align: left;
+    font-family: "IBM Plex Mono", monospace;
+    font-weight: 500;
+    font-size: 11px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    background: var(--surface-2);
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  tbody td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:nth-child(odd) { background: var(--surface); }
+  tbody tr:nth-child(even) { background: var(--surface-2); }
+  td.name { color: var(--text); font-weight: 500; }
+  td.num { font-family: "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums; }
+  .swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 7px; }
+  .ratio-up { color: var(--amber); }
+  .ratio-down { color: var(--teal); }
+
+  /* ---------- legend ---------- */
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 18px;
+    font-size: 12px;
+    color: var(--text-dim);
+    margin: 10px 2px 0;
+  }
+  .legend span { display: inline-flex; align-items: center; }
+
+  /* ---------- footer ---------- */
+  footer {
+    border-top: 1px solid var(--border);
+    padding-top: 24px;
+    margin-top: 8px;
+  }
+  footer h3 {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-faint);
+    margin: 0 0 12px;
+  }
+  footer ul {
+    margin: 0 0 22px;
+    padding-left: 18px;
+    color: var(--text-dim);
+    font-size: 13px;
+  }
+  footer li { margin-bottom: 8px; }
+  footer .kv {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 12px;
+    color: var(--text-faint);
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+    gap: 6px 20px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  footer .kv b { color: var(--text-dim); font-weight: 500; }
+
+  a { color: var(--teal); }
+</style>
+
+<div class="page">
+
+  <header>
+    <div class="eyebrow">F450 &middot; Navigation-with-Obstacles &middot; Crash Diagnostic</div>
+    <h1>Collision Autopsy</h1>
+    <p class="dek">Every collision the <span class="mono">b4</span> checkpoint made across 10,047 deterministic
+      episodes at curriculum level 30 (max obstacle density) &mdash; logged by obstacle type, timing,
+      camera history and impact kinematics, before any training was touched.</p>
+    <div class="runstrip">
+      <span><b>checkpoint</b> last_f450_nav_b4_combined_ep_2000_rew_25.875937.pth</span>
+      <span><b>epoch</b> 2000</span>
+      <span><b>level</b> 30 / 30</span>
+      <span><b>envs</b> 256</span>
+      <span><b>steps</b> 6,000</span>
+      <span><b>episodes</b> 10,047</span>
+    </div>
+  </header>
+
+  <div class="tiles">
+    <div class="tile hazard">
+      <div class="label">Crash rate</div>
+      <div class="value tnum">16.4<small>%</small></div>
+      <div class="sub">1,651 / 10,047 episodes</div>
+    </div>
+    <div class="tile hazard">
+      <div class="label">Spawn traps</div>
+      <div class="value tnum">12.5<small>%</small></div>
+      <div class="sub">206 crashes before step 5</div>
+    </div>
+    <div class="tile view">
+      <div class="label">Never saw it coming</div>
+      <div class="value tnum">85.8<small>%</small></div>
+      <div class="sub">0-of-10 prior frames in view</div>
+    </div>
+    <div class="tile">
+      <div class="label">Median impact angle</div>
+      <div class="value tnum">58.9<small>&deg;</small></div>
+      <div class="sub">off the camera boresight</div>
+    </div>
+  </div>
+
+  <section id="s1">
+    <div class="sec-head"><span class="sec-num">01</span><h2>Obstacle type</h2></div>
+    <p class="finding">
+      <strong>Trees are not the problem.</strong> At 3% of the obstacle pool they cause only
+      <strong>1.5%</strong> of crashes &mdash; half their expected share. The disproportionate offender is
+      <strong>panels</strong>: 3.5% of the pool but <strong>8.2%</strong> of crashes, a 2.3&times; over-rate.
+      Cylinders run slightly hot (1.2&times;); spheres, walls and the generic-clutter
+      <span class="mono">object</span> class &mdash; upstream's largest single category at 47.5% of the pool,
+      outside the five types originally asked about &mdash; land close to their base rate.
+    </p>
+    <div class="chart-card">
+      <div class="chart-title">Crash share vs. pool share, by type</div>
+      <div class="chart-wrap tall"><canvas id="chartType"></canvas></div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Type</th><th>Crashes</th><th>Crash share</th><th>Pool share</th><th>Rate ratio</th>
+            <th>Spawn trap</th><th>Never in view</th><th>Median step</th><th>Mean speed</th><th>Mean angle</th>
+          </tr>
+        </thead>
+        <tbody id="typeTableBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="s2">
+    <div class="sec-head"><span class="sec-num">02</span><h2>Spawn traps</h2></div>
+    <p class="finding">
+      <strong>206 crashes (12.5%)</strong> happen before step 5 &mdash; before the policy has flown far
+      enough to see anything, let alone react. They cluster almost entirely on <strong>walls</strong>:
+      a quarter of every wall collision (25.9%) is a spawn trap, with a median impact at step 25 overall
+      for that type &mdash; roughly five times earlier than panels, spheres, cylinders or objects (median
+      step 86&ndash;92). Trees have zero spawn traps; a canopy that size is never close enough at spawn
+      to hit immediately.
+    </p>
+    <div class="chart-card">
+      <div class="chart-title">Steps survived before impact (10-step bins) &mdash; amber marks step &lt; 5</div>
+      <div class="chart-wrap"><canvas id="chartStep"></canvas></div>
+    </div>
+  </section>
+
+  <section id="s3">
+    <div class="sec-head"><span class="sec-num">03</span><h2>Camera memory</h2></div>
+    <p class="finding">
+      This is the clearest signal in the log. Across the last 10 physics frames before impact, the
+      obstacle that ended the episode was <strong>absent from every single frame</strong> in
+      <strong>85.8%</strong> of crashes &mdash; not partially occluded, not at the frame edge: fully out of
+      the 87&deg;&times;56&deg; frustum the whole lookback window. Only <strong>6.8%</strong> of crashes
+      (113) had the obstacle in view for &ge;90% of that window &mdash; those are genuine reactive-avoidance
+      failures; everything else is a blind-spot collision. A policy with no state carried between frames
+      cannot avoid what it stopped seeing several steps ago &mdash; the failure mode a GRU or a stacked-latent
+      history is built to fix.
+    </p>
+    <div class="chart-card">
+      <div class="chart-title">Fraction of the last 10 frames the impacted obstacle was actually visible</div>
+      <div class="chart-wrap"><canvas id="chartView"></canvas></div>
+    </div>
+    <div class="legend" id="viewLegend"></div>
+  </section>
+
+  <section id="s4">
+    <div class="sec-head"><span class="sec-num">04</span><h2>Motion vs. camera</h2></div>
+    <p class="finding">
+      Impact speed averages <strong>1.49 m/s</strong> (median 1.20, max 5.47) &mdash; the policy is
+      rarely at full tilt when it hits something. The angle between body-frame velocity and the camera
+      boresight spreads wide (median 58.9&deg;), with the single largest cluster at just 15&ndash;30&deg;
+      off-axis &mdash; a near head-on approach to a target the camera nonetheless failed to carry forward
+      in memory. The two outliers by type: <strong>walls</strong> are hit almost perpendicular
+      (86.8&deg; mean) at the lowest speed (1.11 m/s) &mdash; the spawn-trap signature, sliding sideways
+      into a nearby face before forward flight is established &mdash; and <strong>trees</strong> are hit
+      more head-on (42.3&deg;) and faster (2.46 m/s) than anything else, a rarer but more direct
+      fly-through.
+    </p>
+    <div class="chart-row">
+      <div class="chart-card">
+        <div class="chart-title">Impact angle off boresight</div>
+        <div class="chart-wrap"><canvas id="chartAngle"></canvas></div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Impact speed</div>
+        <div class="chart-wrap"><canvas id="chartSpeed"></canvas></div>
+      </div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Every collision: angle vs. speed, colored by obstacle type</div>
+      <div class="chart-wrap tall"><canvas id="chartScatter"></canvas></div>
+    </div>
+    <div class="legend" id="scatterLegend"></div>
+  </section>
+
+  <footer>
+    <h3>Method</h3>
+    <ul>
+      <li>The b4 checkpoint's actor was rebuilt directly from its saved weights and run deterministically
+        (no exploration noise, no gradient updates) inside the live task for 6,000 physics steps across
+        256 parallel environments, with curriculum <span class="mono">min_level = max_level = 30</span>
+        pinned throughout &mdash; the density the training curriculum tops out at.</li>
+      <li>A crash is the task's own collision buffer (a contact-force threshold on the airframe) firing
+        outside an arrival or out-of-bounds event &mdash; the same definition <span class="mono">compute_rewards()</span>
+        uses to end an episode. 1,651 fired this way, for a 16.4% crash rate consistent with the
+        ~17&ndash;21% plateau seen across training runs at this level.</li>
+      <li>The struck obstacle is the nearest live obstacle to the airframe at the moment of impact
+        (this task exposes obstacle position but not a contact-body id, so two obstacles within a few
+        tens of centimeters of each other could be misattributed).</li>
+      <li>"In view" is a geometric frustum + range check (87&deg; horizontal / 56.1&deg; vertical FOV,
+        0.1&ndash;10&nbsp;m range) against the struck obstacle's static position at each of the last
+        &le;10 physics steps ending at impact &mdash; it re-derives visibility from pose history, it does
+        not re-sample the rendered depth image. It also uses the camera's nominal mount pose, ignoring
+        the &le;12&nbsp;cm translation offset and &plusmn;5&deg; rotation randomization applied per
+        environment at reset.</li>
+      <li>Vertical FOV (56.1&deg;) isn't configured upstream; it's derived from the 87&deg; horizontal FOV
+        and the sensor's 320&times;180 pixel aspect ratio under a square-pixel assumption, not read
+        directly from the simulator.</li>
+    </ul>
+    <div class="kv">
+      <div><b>obstacle density</b> 0.0804 /m&sup3; (level 30, max)</div>
+      <div><b>env bounds</b> 20&times;20&times;[4&ndash;6] m</div>
+      <div><b>camera FOV</b> 87&deg; H / 56.1&deg; V, 0.1&ndash;10 m</div>
+      <div><b>spawn-trap threshold</b> step &lt; 5</div>
+      <div><b>history window</b> last 10 physics steps</div>
+      <div><b>seed</b> 42 (task config default)</div>
+    </div>
+  </footer>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var TYPE_COLOR = {
+    tree: "#6fae5c", panel: "#9b8fe0", sphere: "#4fa3d1",
+    cylinder: "#c99a52", wall: "#97a1ab", object: "#6b7480"
+  };
+  var TEXT_DIM = "#98a1b0";
+  var TEXT_FAINT = "#5c6675";
+  var BORDER = "#2a313c";
+  var AMBER = "#ff8f4d";
+  var TEAL = "#55c9c9";
+  var FONT = "'IBM Plex Mono', ui-monospace, monospace";
+
+  Chart.defaults.color = TEXT_DIM;
+  Chart.defaults.font.family = FONT;
+  Chart.defaults.font.size = 11;
+  Chart.defaults.borderColor = BORDER;
+
+  var byType = {
+    tree:     {count:25,  crash:1.5,  pool:3.0,  ratio:0.50, spawn:0.0,  neverView:64.0,  step:143, speed:2.46, angle:42.3},
+    panel:    {count:135, crash:8.2,  pool:3.5,  ratio:2.34, spawn:18.5, neverView:86.7,  step:92,  speed:1.31, angle:66.4},
+    sphere:   {count:348, crash:21.1, pool:22.0, ratio:0.96, spawn:13.2, neverView:82.5,  step:86,  speed:1.43, angle:65.9},
+    cylinder: {count:431, crash:26.1, pool:22.0, ratio:1.19, spawn:11.4, neverView:85.6,  step:90,  speed:1.58, angle:64.5},
+    wall:     {count:27,  crash:1.6,  pool:2.0,  ratio:0.82, spawn:25.9, neverView:100.0, step:25,  speed:1.11, angle:86.8},
+    object:   {count:685, crash:41.5, pool:47.5, ratio:0.87, spawn:11.5, neverView:87.7,  step:92,  speed:1.49, angle:66.7}
+  };
+  var TYPE_ORDER = ["tree", "panel", "sphere", "cylinder", "wall", "object"];
+
+  // ---- table ----
+  var tbody = document.getElementById("typeTableBody");
+  TYPE_ORDER.forEach(function (t) {
+    var d = byType[t];
+    var ratioClass = d.ratio >= 1.15 ? "ratio-up" : (d.ratio <= 0.85 ? "ratio-down" : "");
+    var tr = document.createElement("tr");
+    tr.innerHTML =
+      '<td class="name"><span class="swatch" style="background:' + TYPE_COLOR[t] + '"></span>' + t + '</td>' +
+      '<td class="num">' + d.count.toLocaleString() + '</td>' +
+      '<td class="num">' + d.crash.toFixed(1) + '%</td>' +
+      '<td class="num">' + d.pool.toFixed(1) + '%</td>' +
+      '<td class="num ' + ratioClass + '">' + d.ratio.toFixed(2) + '&times;</td>' +
+      '<td class="num">' + d.spawn.toFixed(1) + '%</td>' +
+      '<td class="num">' + d.neverView.toFixed(1) + '%</td>' +
+      '<td class="num">' + d.step + '</td>' +
+      '<td class="num">' + d.speed.toFixed(2) + ' m/s</td>' +
+      '<td class="num">' + d.angle.toFixed(1) + '&deg;</td>';
+    tbody.appendChild(tr);
+  });
+
+  function grid() {
+    return { color: "rgba(255,255,255,0.06)", drawTicks: false };
+  }
+  function axisLabel(text) {
+    return { display: true, text: text, color: TEXT_FAINT, font: { family: FONT, size: 11 } };
+  }
+
+  // ---- 01: crash share vs pool share ----
+  new Chart(document.getElementById("chartType"), {
+    type: "bar",
+    data: {
+      labels: TYPE_ORDER.map(function (t) { return t; }),
+      datasets: [
+        {
+          label: "Crash share",
+          data: TYPE_ORDER.map(function (t) { return byType[t].crash; }),
+          backgroundColor: TYPE_ORDER.map(function (t) { return TYPE_COLOR[t]; }),
+          borderRadius: 3,
+          barPercentage: 0.75, categoryPercentage: 0.7
+        },
+        {
+          label: "Pool share",
+          data: TYPE_ORDER.map(function (t) { return byType[t].pool; }),
+          backgroundColor: "rgba(255,255,255,0.14)",
+          borderRadius: 3,
+          barPercentage: 0.75, categoryPercentage: 0.7
+        }
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { position: "top", align: "end", labels: { boxWidth: 10, color: TEXT_DIM, font: { family: "'IBM Plex Sans'", size: 12 } } } },
+      scales: {
+        x: { grid: { display: false } },
+        y: { grid: grid(), title: axisLabel("% of total"), beginAtZero: true }
+      }
+    }
+  });
+
+  // ---- 02: step histogram ----
+  var stepEdges = [0,10,20,30,40,50,60,70,80,90,100,110,120,130,140,150,160,170,180,190,200,210,220,230,240,250,260,270,280,290,300];
+  var stepCounts = [235,62,49,73,76,83,72,88,85,83,89,77,88,79,67,66,60,54,39,38,31,19,13,8,4,4,2,3,2,2];
+  new Chart(document.getElementById("chartStep"), {
+    type: "bar",
+    data: {
+      labels: stepEdges.slice(0, -1).map(function (e) { return e + "-" + (e + 10); }),
+      datasets: [{
+        data: stepCounts,
+        backgroundColor: stepEdges.slice(0, -1).map(function (e) { return e === 0 ? AMBER : "rgba(255,255,255,0.16)"; }),
+        borderRadius: 2, barPercentage: 0.95, categoryPercentage: 0.95
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { grid: { display: false }, title: axisLabel("step at impact"), ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 10 } },
+        y: { grid: grid(), title: axisLabel("crashes"), beginAtZero: true }
+      }
+    }
+  });
+
+  // ---- 03: in-view histogram ----
+  var ivEdges = [0.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0];
+  var ivCounts = [1417,12,17,13,19,8,21,16,15,113];
+  new Chart(document.getElementById("chartView"), {
+    type: "bar",
+    data: {
+      labels: ["0", "0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9–1.0"],
+      datasets: [{
+        data: ivCounts,
+        backgroundColor: ivCounts.map(function (_, i) { return i === 0 ? AMBER : (i === ivCounts.length - 1 ? TEAL : "rgba(255,255,255,0.16)"); }),
+        borderRadius: 2, barPercentage: 0.85, categoryPercentage: 0.85
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { grid: { display: false }, title: axisLabel("fraction of last 10 frames in view") },
+        y: { grid: grid(), title: axisLabel("crashes"), type: "logarithmic",
+             ticks: { callback: function (v) { return [1,10,100,1000,10000].indexOf(v) >= 0 ? v : ""; } } }
+      }
+    }
+  });
+  document.getElementById("viewLegend").innerHTML =
+    '<span><span class="swatch" style="background:' + AMBER + '"></span>never in view (85.8% of all crashes)</span>' +
+    '<span><span class="swatch" style="background:' + TEAL + '"></span>almost always in view, &ge;90% (6.8%)</span>';
+
+  // ---- 04a: angle histogram ----
+  var angleEdges = [0,15,30,45,60,75,90,105,120,135,150,165,180];
+  var angleCounts = [105,288,192,267,233,138,107,94,87,70,53,17];
+  new Chart(document.getElementById("chartAngle"), {
+    type: "bar",
+    data: {
+      labels: angleEdges.slice(0, -1).map(function (e) { return e + "–" + (e + 15); }),
+      datasets: [{ data: angleCounts, backgroundColor: "rgba(255,143,77,0.55)", borderRadius: 2, barPercentage: 0.95, categoryPercentage: 0.95 }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { grid: { display: false }, title: axisLabel("degrees off boresight"), ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 7 } },
+        y: { grid: grid(), title: axisLabel("crashes"), beginAtZero: true }
+      }
+    }
+  });
+
+  // ---- 04b: speed histogram ----
+  var speedEdges = [0,0.5,1.0,1.5,2.0,2.5,3.0,3.5,4.0,4.5,5.0,5.5,6.0];
+  var speedCounts = [287,411,267,182,184,135,115,47,19,3,1,0];
+  new Chart(document.getElementById("chartSpeed"), {
+    type: "bar",
+    data: {
+      labels: speedEdges.slice(0, -1).map(function (e) { return e.toFixed(1); }),
+      datasets: [{ data: speedCounts, backgroundColor: "rgba(85,201,201,0.55)", borderRadius: 2, barPercentage: 0.95, categoryPercentage: 0.95 }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { grid: { display: false }, title: axisLabel("impact speed, m/s"), ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 7 } },
+        y: { grid: grid(), title: axisLabel("crashes"), beginAtZero: true }
+      }
+    }
+  });
+
+  // ---- 04c: scatter ----
+  fetch("crash_scatter.json").then(function (r) { return r.json(); }).then(renderScatter).catch(function (err) {
+    console.error("could not load crash_scatter.json", err);
+    renderScatter([]);
+  });
+
+  function renderScatter(points) {
+    var datasets = TYPE_ORDER.map(function (t) {
+      return {
+        label: t,
+        data: points.filter(function (p) { return p.t === t; }).map(function (p) { return { x: p.x, y: p.y }; }),
+        backgroundColor: TYPE_COLOR[t] + "cc",
+        pointRadius: 2.6, pointHoverRadius: 4
+      };
+    });
+    new Chart(document.getElementById("chartScatter"), {
+      type: "scatter",
+      data: { datasets: datasets },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { grid: grid(), min: 0, max: 180, title: axisLabel("angle to camera boresight, degrees") },
+          y: { grid: grid(), min: 0, title: axisLabel("impact speed, m/s") }
+        }
+      }
+    });
+    document.getElementById("scatterLegend").innerHTML = TYPE_ORDER.map(function (t) {
+      return '<span><span class="swatch" style="background:' + TYPE_COLOR[t] + '"></span>' + t + '</span>';
+    }).join("");
+  }
+})();
+</script>
