@@ -97,7 +97,9 @@ class task_config:
     # bounds_loss_coef=0.01 specifically to test whether that mechanism, absent last time,
     # prevents the same runaway.
     max_yaw_rate = math.radians(float(os.environ.get("F450_MAX_YAW_RATE_DEG", 60.0)))  # rad/s
-    v_max = 5.0  # Speed threshold for excess speed penalty (m/s)
+    # Override via env var F450_V_MAX to sweep without touching this file (this task
+    # config is shared -- other training jobs may already be running against it).
+    v_max = float(os.environ.get("F450_V_MAX", 5.0))  # Speed threshold for excess speed penalty (m/s)
 
     # --- OBSERVATIONS ---
     state_dim = 17

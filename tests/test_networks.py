@@ -29,6 +29,12 @@ GRU_PARAMS = {
               "gru": {"hidden_size": 32, "num_layers": 1}},
     "critic": {"hidden_dims": [64, 32], "activation": "elu"},
 }
+GRU_ACTOR_CRITIC_PARAMS = {
+    "actor": {"hidden_dims": [64, 32], "activation": "elu",
+              "gru": {"hidden_size": 32, "num_layers": 1}},
+    "critic": {"hidden_dims": [64, 32], "activation": "elu",
+               "gru": {"hidden_size": 16, "num_layers": 1}},
+}
 POPSAN_PARAMS = {
     "actor": {
         "hidden_dims": [64, 32], "num_steps": 5, "spike_grad": "fast_sigmoid",
@@ -73,6 +79,7 @@ def test_gru_forward_shapes_and_state(obs):
     assert net.is_rnn() is True
 
     hidden = net.get_default_rnn_state()
+    assert len(hidden) == 1, "no critic.gru in config -> critic stays feed-forward"
     assert hidden[0].shape == (1, BATCH, 32)
 
     mu, log_std, value, states = net({**obs, "rnn_states": hidden, "seq_length": 1})
@@ -80,6 +87,69 @@ def test_gru_forward_shapes_and_state(obs):
     assert value.shape == (BATCH, 1)
     assert states[0].shape == hidden[0].shape
     assert torch.isfinite(mu).all() and torch.isfinite(value).all()
+
+
+def test_gru_actor_critic_forward_shapes_and_state(obs):
+    """With critic.gru set, get_default_rnn_state() must return (actor_state,
+    critic_state) - rl_games indexes this tuple positionally everywhere it
+    round-trips through rollout storage, so the order and count matter."""
+    net = build(GRUActorCriticNetworkBuilder, GRU_ACTOR_CRITIC_PARAMS, num_seqs=BATCH)
+    assert net.is_rnn() is True
+
+    hidden = net.get_default_rnn_state()
+    assert len(hidden) == 2
+    assert hidden[0].shape == (1, BATCH, 32)  # actor
+    assert hidden[1].shape == (1, BATCH, 16)  # critic
+
+    mu, log_std, value, states = net({**obs, "rnn_states": hidden, "seq_length": 1})
+    assert mu.shape == (BATCH, ACTION_DIM)
+    assert value.shape == (BATCH, 1)
+    assert len(states) == 2
+    assert states[0].shape == hidden[0].shape
+    assert states[1].shape == hidden[1].shape
+    assert torch.isfinite(mu).all() and torch.isfinite(value).all()
+
+
+def test_gru_actor_critic_memory_changes_output(obs):
+    """Feeding a non-zero incoming state must change both mu and value versus
+    a zero incoming state for the same obs - otherwise the GRU is a no-op."""
+    net = build(GRUActorCriticNetworkBuilder, GRU_ACTOR_CRITIC_PARAMS, num_seqs=BATCH)
+
+    zero_state = net.get_default_rnn_state()
+    mu0, _, value0, state1 = net({**obs, "rnn_states": zero_state, "seq_length": 1})
+    mu1, _, value1, _ = net({**obs, "rnn_states": state1, "seq_length": 1})
+
+    assert not torch.allclose(mu0, mu1)
+    assert not torch.allclose(value0, value1)
+
+
+def test_gru_done_resets_actor_and_critic_state():
+    """A done flag mid-sequence must zero BOTH the actor's and the critic's
+    hidden state at that point - state leakage across an episode boundary is
+    silent and just looks like a worse policy, so this is the load-bearing test.
+
+    rl_games' RnnWithDones splits the sequence at the done index and re-zeroes
+    the incoming state for the chunk that *starts* there (see
+    rl_games.common.layers.recurrent.RnnWithDones.forward), so the post-done
+    tail of a done-masked sequence must equal a fresh call over just that tail
+    starting from a zero state.
+    """
+    net = build(GRUActorCriticNetworkBuilder, GRU_ACTOR_CRITIC_PARAMS, num_seqs=1)
+    net.eval()
+
+    obs_seq = torch.randn(4, OBS_DIM)
+    zero_state = net.get_default_rnn_state()
+    dones = torch.tensor([0.0, 0.0, 1.0, 0.0]).reshape(4, 1)
+
+    mu_full, _, value_full, _ = net(
+        {"obs": obs_seq, "rnn_states": zero_state, "dones": dones, "seq_length": 4}
+    )
+    mu_post_reset, _, value_post_reset, _ = net(
+        {"obs": obs_seq[2:], "rnn_states": zero_state, "seq_length": 2}
+    )
+
+    assert torch.allclose(mu_full[2:], mu_post_reset, atol=1e-5, rtol=1e-4)
+    assert torch.allclose(value_full[2:], value_post_reset, atol=1e-5, rtol=1e-4)
 
 
 # --- the decoupling ---------------------------------------------------------
