@@ -198,8 +198,12 @@ def main():
         hist_valid[ptr] = True
         hist_ptr[0] = (ptr + 1) % HIST
 
-        # p_fov term value at lambda_fov = 1, every env, every step.
-        v_all = obs_dict["robot_vehicle_linvel"]
+        # p_fov term value at lambda_fov = 1, every env, every step. BODY frame, to
+        # match the reward: the camera pitches with the airframe, so hard acceleration
+        # tilts it off the flight path and that has to show up in the measurement.
+        v_all = quat_rotate_inverse(
+            obs_dict["robot_orientation"], obs_dict["robot_linvel"]
+        )
         horiz_all = torch.linalg.norm(v_all[:, :2], dim=1)
         psi_all = torch.atan2(v_all[:, 1], v_all[:, 0])
         theta_all = torch.atan2(v_all[:, 2], horiz_all + 1e-6)
@@ -211,8 +215,9 @@ def main():
         ) * r_all.pow(FOV_POWER)
         scale["term_sum"] += float(term_all.sum())
         # The FLOOR a perfectly yaw-aligned policy could reach: azimuth driven to zero,
-        # elevation left as-is because no actuator aims a body-fixed camera in elevation.
-        # Today's value minus this floor is the real headroom the term offers.
+        # body-frame elevation left as-is -- no actuator aims a body-fixed camera in
+        # elevation, and yaw cannot undo pitch either. Today's value minus this floor is
+        # the real headroom the term offers.
         r_yawslaved = (theta_all / _HALF_V_FOV).abs()
         term_yawslaved = torch.clamp(
             torch.linalg.norm(v_all, dim=1), max=FOV_V_REF

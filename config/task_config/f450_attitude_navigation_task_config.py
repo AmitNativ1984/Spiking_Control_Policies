@@ -342,29 +342,39 @@ class task_config:
         # live camera config at init, so widening the lens automatically widens the free
         # region rather than silently leaving the penalty keyed to the old frustum.
         # SIZING (analysis/crash_cause_eval.py, 10k episodes per policy at level 30,
-        # measured over EVERY step rather than crashes only):
-        #   b4       mean r_fov 1.091, term 2.307/step at lambda=1, of which 0.522 is the
-        #            elevation floor no yaw can remove -> 1.785 removable (77.4%)
-        #   p_blind  mean r_fov 0.897, term 1.449/step, floor 0.665 -> 0.784 removable
-        #            (54.1%) -- p_blind already spent most of the azimuth headroom
+        # measured in the BODY frame over EVERY step, not crashes only):
+        #   b4       mean r_fov 1.119 -- the AVERAGE step is already outside the cone --
+        #            term 2.375/step at lambda=1, of which 0.622 is a floor no yaw can
+        #            remove -> 1.753 removable (73.8%). 33% of steps have r_fov > 1.
+        #   p_blind  mean r_fov 0.926, term 1.523/step, floor 0.778 -> 0.745 removable.
+        #            Only 48.9% removable: p_blind has already harvested the azimuth
+        #            slack, so what is left is mostly elevation.
+        #
+        # Pitch/roll contribute less than expected: body frame raises mean r_fov by only
+        # 2.6-3.2% over the yaw-only frame. But it raises the FLOOR by ~19% while barely
+        # moving the total, because tilt lands entirely in elevation, which yaw cannot
+        # undo -- so the irreducible share goes 22.6 -> 26.2% (b4) and 45.9 -> 51.1%
+        # (p_blind). The body frame is still the right one (it is the actual frustum),
+        # it just reallocates rather than inflates.
         #
         # 0.015 is where three independent constraints meet, which is why it is the
-        # default rather than a swept value:
+        # documented value rather than a swept one:
         #   1. SLOW-DOWN SETPOINT. Below fov_v_ref, slowing beats aiming iff
         #      lambda * r_fov^power > lambda_p * dt = 0.5 * 0.03 = 0.015. At exactly
         #      lambda_fov = 0.015 that crossover lands on r_fov = 1 -- the cone boundary.
         #      Inside the cone, fly as fast as you like; outside it, slowing starts to
-        #      pay. That is Falanga's "drive within your sensing range" (RAL 2019) falling
-        #      out of the arithmetic rather than being tuned in.
-        #   2. MAGNITUDE. 0.015 * 1.785 = 0.027/step removable against b4, inside the
+        #      pay. That is Falanga's "drive within your sensing range" (RAL 2019)
+        #      falling out of the arithmetic rather than being tuned in. It costs
+        #      slow-down pressure on the 33% of b4 steps that sit beyond the cone.
+        #   2. MAGNITUDE. 0.015 * 1.753 = 0.026/step removable against b4, inside the
         #      0.025-0.085 band the other components occupy (r_bearing measured 0.0842,
         #      r_progress 0.029, p_action_mag 0.025).
-        #   3. PRECEDENT. 5.3 points/episode total and 4.1 removable on b4's 25.9 return,
-        #      against p_blind's own sizing of "-5.2/episode untrained ... ~4.5 points of
-        #      headroom". Same regime, arrived at independently.
+        #   3. PRECEDENT. 5.4 points/episode total and 3.9 removable on b4's 25.9
+        #      return, against p_blind's own sizing of "-5.2/episode untrained ... ~4.5
+        #      points of headroom". Same regime, arrived at independently.
         #
-        # Fine-tuning from p_blind rather than b4 needs ~0.03 for the same removable
-        # magnitude, since p_blind has already taken half the azimuth slack out.
+        # Fine-tuning from p_blind rather than b4 needs ~0.034 for the same removable
+        # magnitude, since only half its remaining misalignment is yaw-addressable.
         "lambda_fov": float(os.environ.get("F450_LAMBDA_FOV", 0.0)),  # 0.0 = inert; 0.015 to enable
         "fov_power": float(os.environ.get("F450_FOV_POWER", 2.0)),    # 4 = quartic
         "fov_v_ref": float(os.environ.get("F450_FOV_V_REF", 2.0)),    # m/s saturation

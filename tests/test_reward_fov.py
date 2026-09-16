@@ -53,7 +53,13 @@ def _reward(stub, v, dist=5.0):
     d = torch.full((num,), dist)
     zeros = torch.zeros(num, 4)
 
-    stub.obs_dict = {"robot_vehicle_linvel": v}
+    # Identity attitude, so quat_rotate_inverse is a no-op and the body-frame velocity
+    # p_fov reads equals the vector under test. Isaac Gym quaternions are (x, y, z, w).
+    stub.obs_dict = {
+        "robot_vehicle_linvel": v,
+        "robot_orientation": torch.tensor([[0.0, 0.0, 0.0, 1.0]]).expand(num, 4),
+        "robot_linvel": v,
+    }
     stub.prev_dist = d
     stub.prev_action = zeros
     stub._get_dist_to_target = lambda: d
@@ -70,7 +76,8 @@ def _p_fov_only(v, lam=LAMBDA_FOV):
 
 
 def _vel(speed, azimuth_deg=0.0, elevation_deg=0.0):
-    """Vehicle frame is yaw-aligned and FLU: x forward (nose), y left, z up."""
+    """FLU: x forward (boresight), y left, z up. Fed as both the vehicle-frame and the
+    world velocity; the stub's identity attitude makes the body frame agree with both."""
     az, el = math.radians(azimuth_deg), math.radians(elevation_deg)
     return torch.tensor([[
         speed * math.cos(el) * math.cos(az),
@@ -172,3 +179,48 @@ def test_bounded_by_geometry():
         for el in (-90.0, -45.0, 0.0, 45.0, 90.0)
     )
     assert worst >= -LAMBDA_FOV * V_REF * r_max ** POWER * (1 + 1e-5)
+
+
+def _reward_pitched(v_world, pitch_deg, lam=LAMBDA_FOV):
+    """p_fov with the airframe pitched nose-down by pitch_deg, velocity held in world.
+
+    Rotation about the body y axis: q = (0, sin(p/2), 0, cos(p/2)) in (x, y, z, w).
+    Nose-down is a NEGATIVE pitch about +y under FLU.
+    """
+    def run(lmbda):
+        stub = _stub(lambda_fov=lmbda)
+        num = v_world.shape[0]
+        d = torch.full((num,), 5.0)
+        zeros = torch.zeros(num, 4)
+        half = math.radians(-pitch_deg) / 2.0
+        quat = torch.tensor([[0.0, math.sin(half), 0.0, math.cos(half)]]).expand(num, 4)
+        stub.obs_dict = {
+            "robot_vehicle_linvel": v_world,
+            "robot_orientation": quat,
+            "robot_linvel": v_world,
+        }
+        stub.prev_dist = d
+        stub.prev_action = zeros
+        stub._get_dist_to_target = lambda: d
+        return NavigationWithObstaclesTask._reward_progress(
+            stub, torch.ones(num, dtype=torch.bool), zeros
+        )
+    return (run(lam) - run(0.0)).item()
+
+
+def test_pitching_to_accelerate_is_charged():
+    """The point of using the BODY frame: the camera is bolted to the airframe, so
+    pitching nose-down to accelerate tilts it off the flight path. Level flight at a
+    steep pitch is a genuine blind condition and must cost something, even though the
+    velocity is perfectly aligned in the yaw-only vehicle frame."""
+    level = _vel(V_REF)  # straight along the world x axis, no misalignment at all
+    assert _p_fov_only(level) == pytest.approx(0.0, abs=1e-9)
+    assert _reward_pitched(level, 0.0) == pytest.approx(0.0, abs=1e-9)
+    assert _reward_pitched(level, 30.0) < 0.0
+
+
+def test_pitch_cost_grows_with_pitch():
+    level = _vel(V_REF)
+    mild = abs(_reward_pitched(level, 15.0))
+    steep = abs(_reward_pitched(level, 40.0))
+    assert steep > mild > 0.0

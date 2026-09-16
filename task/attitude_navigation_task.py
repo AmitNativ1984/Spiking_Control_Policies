@@ -1417,8 +1417,23 @@ class NavigationWithObstaclesTask(BaseTask):
         # by their OWN half-angle, so r_fov = 1 is the frustum boundary and the tighter
         # vertical cone charges sooner -- the asymmetry is structural, not a weight.
         # atan2(0, 0) = 0, so a hover sits at r_fov = 0 and pays nothing.
-        psi = torch.atan2(v[:, 1], v[:, 0])
-        theta = torch.atan2(v[:, 2], horizontal_speed + 1e-6)
+        #
+        # BODY frame, not the yaw-only vehicle frame the other terms use: the camera is
+        # bolted to the airframe and pitches with it, so the body frame IS the frustum.
+        # The consequence is deliberate -- a quadrotor pitches to accelerate, so hard
+        # acceleration tilts the camera off the flight path and p_fov charges for it.
+        # That is a real blind condition, not an artifact: at 40 deg nose-down the
+        # camera is not looking where the drone is going. The charge is also transient
+        # (an acceleration phase is ~12 steps, ~0.4 points on a ~25 point return) and
+        # measured attitudes are modest in ordinary flight -- body- and vehicle-frame
+        # visibility of the struck obstacle differ by only 0.2-0.8pp -- so the two frames
+        # nearly coincide except exactly when the tilt genuinely blinds the camera.
+        v_body = quat_rotate_inverse(
+            self.obs_dict["robot_orientation"], self.obs_dict["robot_linvel"]
+        )
+        horizontal_speed_body = torch.linalg.norm(v_body[:, :2], dim=1)
+        psi = torch.atan2(v_body[:, 1], v_body[:, 0])
+        theta = torch.atan2(v_body[:, 2], horizontal_speed_body + 1e-6)
         r_fov = torch.sqrt(
             (psi / self._half_h_fov).pow(2) + (theta / self._half_v_fov).pow(2)
         )

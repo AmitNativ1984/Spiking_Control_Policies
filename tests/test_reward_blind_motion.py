@@ -54,7 +54,13 @@ def _reward(stub, v, dist=5.0):
     d = torch.full((num,), dist)
     zeros = torch.zeros(num, 4)
 
-    stub.obs_dict = {"robot_vehicle_linvel": v}
+    # Identity attitude, so quat_rotate_inverse is a no-op and the body-frame velocity
+    # p_fov reads equals the vector under test. Isaac Gym quaternions are (x, y, z, w).
+    stub.obs_dict = {
+        "robot_vehicle_linvel": v,
+        "robot_orientation": torch.tensor([[0.0, 0.0, 0.0, 1.0]]).expand(num, 4),
+        "robot_linvel": v,
+    }
     stub.prev_dist = d
     stub.prev_action = zeros
     stub._get_dist_to_target = lambda: d
