@@ -305,8 +305,8 @@ class task_config:
         # volume. This is the ellipse inscribed in the rectangular frustum, so it is
         # slightly conservative at the image corners; that is the cheap side to err on.
         #
-        # GROWTH is a power law in the distance from BORESIGHT, (r_fov/r_fov_max)^power,
-        # MONOTONE over the whole domain. There is deliberately no clamp: a cutoff
+        # GROWTH is a power law in the distance from BORESIGHT, r_fov^power, MONOTONE
+        # over the whole domain. There is deliberately no clamp: a cutoff
         # flattens the gradient beyond it, and p_blind's own note rejects a saturating
         # shape for exactly that reason -- "at init yaw is uncorrelated with velocity
         # (median misalignment 90 deg), so the policy would start in the region where
