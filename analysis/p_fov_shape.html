@@ -1,0 +1,502 @@
+<!doctype html>
+<title>Blind Cone</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #10131a;
+    --surface: #171c24;
+    --surface-2: #1d232c;
+    --border: #2a313c;
+    --text: #e7ebf1;
+    --text-dim: #98a1b0;
+    --text-faint: #5c6675;
+    --amber: #ff8f4d;
+    --teal: #55c9c9;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    margin: 0;
+    font-family: "IBM Plex Sans", system-ui, sans-serif;
+    font-size: 15px; line-height: 1.6;
+    padding-inline: 20px;
+    padding-block: max(28px, env(safe-area-inset-top, 0px)) max(48px, env(safe-area-inset-bottom, 0px));
+  }
+  .page { max-width: 900px; margin: 0 auto; }
+  .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; }
+
+  header { border-bottom: 1px solid var(--border); padding-bottom: 24px; margin-bottom: 28px; }
+  .eyebrow {
+    font-family: "IBM Plex Mono", monospace; font-size: 11.5px;
+    letter-spacing: 0.12em; text-transform: uppercase; color: var(--amber);
+  }
+  h1 {
+    font-family: "IBM Plex Mono", monospace; font-weight: 700;
+    font-size: clamp(28px, 5vw, 38px); line-height: 1.08;
+    margin: 10px 0 10px; text-wrap: balance; letter-spacing: -0.01em;
+  }
+  .dek { color: var(--text-dim); max-width: 64ch; }
+
+  .eq {
+    font-family: "IBM Plex Mono", monospace; font-size: 13.5px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 16px; margin-top: 16px; color: var(--text);
+    overflow-x: auto; white-space: pre;
+  }
+  .eq .dim { color: var(--text-faint); }
+
+  section { margin-bottom: 44px; }
+  .sec-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+  .sec-num { font-family: "IBM Plex Mono", monospace; font-size: 13px; color: var(--text-faint); }
+  h2 { font-family: "IBM Plex Mono", monospace; font-size: 18px; font-weight: 600; margin: 0; }
+  .finding { color: var(--text-dim); max-width: 68ch; margin: 8px 0 16px; }
+  .finding strong { color: var(--text); font-weight: 600; }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px;
+  }
+  .card + .card { margin-top: 14px; }
+  canvas { display: block; width: 100%; height: auto; border-radius: 6px; }
+  .chart-wrap { position: relative; height: 280px; }
+
+  .controls {
+    display: flex; flex-wrap: wrap; gap: 10px 20px; align-items: center;
+    margin-bottom: 14px; font-size: 13px; color: var(--text-dim);
+  }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+  .seg button {
+    font-family: "IBM Plex Mono", monospace; font-size: 12.5px;
+    background: var(--surface-2); color: var(--text-dim);
+    border: 0; padding: 6px 13px; cursor: pointer;
+  }
+  .seg button + button { border-left: 1px solid var(--border); }
+  .seg button[aria-pressed="true"] { background: var(--amber); color: #1a1205; font-weight: 600; }
+  .seg button:focus-visible { outline: 2px solid var(--teal); outline-offset: -2px; }
+
+  .cbar { display: flex; align-items: center; gap: 10px; margin-top: 12px; font-size: 11.5px; color: var(--text-faint); }
+  .cbar .ramp { flex: 1; height: 10px; border-radius: 3px; border: 1px solid var(--border); }
+  .cap {
+    font-size: 12px; color: var(--text-faint); margin-top: 10px;
+    font-family: "IBM Plex Mono", monospace;
+  }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
+  thead th {
+    text-align: left; font-family: "IBM Plex Mono", monospace; font-weight: 500;
+    font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase;
+    color: var(--text-faint); background: var(--surface-2);
+    padding: 9px 13px; border-bottom: 1px solid var(--border); white-space: nowrap;
+  }
+  tbody td { padding: 9px 13px; border-bottom: 1px solid var(--border); color: var(--text-dim); white-space: nowrap; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:nth-child(odd) { background: var(--surface); }
+  tbody tr:nth-child(even) { background: var(--surface-2); }
+  td.num { font-family: "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums; }
+  .hot { color: var(--amber); }
+
+  footer { border-top: 1px solid var(--border); padding-top: 22px; }
+  footer h3 {
+    font-family: "IBM Plex Mono", monospace; font-size: 12.5px; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--text-faint); margin: 0 0 12px;
+  }
+  footer ul { margin: 0; padding-left: 18px; color: var(--text-dim); font-size: 13px; }
+  footer li { margin-bottom: 8px; }
+</style>
+
+<div class="page">
+
+  <header>
+    <div class="eyebrow">F450 &middot; p_fov reward shape</div>
+    <h1>Blind Cone</h1>
+    <p class="dek">What the new penalty charges, as a function of which way the drone is
+      actually travelling. Measured crash directions from 10,000 episodes at curriculum
+      level 30 are overlaid, so you can see whether the term charges where the failures
+      really are.</p>
+    <div class="eq">p_fov = -&lambda;<sub>fov</sub> &middot; min(‖v‖, v_ref) &middot; r_fov<sup>p</sup>      <span class="dim">v in the BODY frame</span>
+r_fov = sqrt( (&psi; / 43.5&deg;)&sup2; + (&theta; / 28.1&deg;)&sup2; )   <span class="dim">= 1.0 on the cone boundary</span></div>
+  </header>
+
+  <section>
+    <div class="sec-head"><span class="sec-num">01</span><h2>Cost vs. angle off boresight</h2></div>
+    <p class="finding">
+      Each axis is divided by its own half-angle, so the same absolute excursion costs
+      more vertically &mdash; the vertical cone is 28.1&deg; against 43.5&deg; horizontal.
+      Both curves cross <strong>1.0 &lambda;</strong> at their own cone edge, and keep
+      climbing: there is no clamp, so the gradient never dies.
+    </p>
+    <div class="card">
+      <div class="controls">
+        <span>exponent p</span>
+        <span class="seg" id="powSeg">
+          <button data-p="2" aria-pressed="true">2</button>
+          <button data-p="3" aria-pressed="false">3</button>
+          <button data-p="4" aria-pressed="false">4</button>
+        </span>
+        <span class="mono" id="powNote"></span>
+      </div>
+      <div class="chart-wrap"><canvas id="curve"></canvas></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><span class="sec-num">02</span><h2>Penalty over all travel directions</h2></div>
+    <p class="finding">
+      Every direction the drone could travel, coloured by what it costs. The dashed
+      rectangle is the camera's field of view; the solid ellipse is
+      <span class="mono">r_fov = 1</span>. Note the ellipse is <em>inscribed</em> in the
+      rectangle &mdash; it touches the edge midpoints and cuts the corners off.
+      Turn on the crash overlay: b4's crash directions pile up along and outside the
+      boundary, which is where the term starts charging in earnest.
+    </p>
+    <div class="card">
+      <div class="controls">
+        <span>crash overlay</span>
+        <span class="seg" id="overlaySeg">
+          <button data-ov="none" aria-pressed="true">off</button>
+          <button data-ov="b4" aria-pressed="false">b4</button>
+          <button data-ov="p_blind" aria-pressed="false">p_blind</button>
+        </span>
+        <span class="mono" id="ovNote">&nbsp;</span>
+      </div>
+      <canvas id="sky" width="900" height="450"></canvas>
+      <div class="cbar">
+        <span>0</span><div class="ramp" id="rampSky"></div><span id="skyMax" class="mono"></span>
+      </div>
+      <div class="cap">azimuth &minus;180&deg;&hellip;180&deg; (left&ndash;right) &times; elevation &minus;90&deg;&hellip;90&deg; (down&ndash;up), body frame</div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><span class="sec-num">03</span><h2>Projected onto the camera image</h2></div>
+    <p class="finding">
+      The same penalty painted across the actual 320&times;180 depth image, through the
+      pinhole projection. Inside the image the cost runs from zero at the centre pixel to
+      <strong>1.0 &lambda;</strong> at the edge midpoints &mdash; and
+      <strong>1.57 &lambda; in the corners</strong>, because the corners sit at
+      <span class="mono">r_fov = 1.25</span>, outside the inscribed ellipse despite being
+      perfectly visible pixels. That is a real quirk of using an elliptical norm on a
+      rectangular sensor; see the note below.
+    </p>
+    <div class="card">
+      <canvas id="img" width="880" height="495"></canvas>
+      <div class="cbar">
+        <span>0</span><div class="ramp" id="rampImg"></div><span id="imgMax" class="mono"></span>
+      </div>
+      <div class="cap">320 &times; 180 px, 87&deg; &times; 56&deg;, pinhole f = 168.6 px</div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><span class="sec-num">04</span><h2>Reference values</h2></div>
+    <p class="finding">
+      Cost in units of &lambda;<sub>fov</sub> at or above <span class="mono">v_ref</span>,
+      at the recommended <span class="mono">&lambda;<sub>fov</sub> = 0.015</span> and
+      <span class="mono">p = 2</span>. For scale, <span class="mono">r_progress</span>
+      measures about 0.029 per step.
+    </p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Travel direction</th><th>r_fov</th><th>cost (&lambda;)</th><th>per step @ &lambda;=0.015</th></tr></thead>
+        <tbody id="refBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>
+    <h3>Notes</h3>
+    <ul>
+      <li><strong>The corner quirk is real.</strong> `r_fov` uses an elliptical norm, so
+        the image corners score 1.25 and are charged as if outside the cone even though
+        they are visible pixels. It is the conservative direction to err in &mdash; corners
+        are the worst part of a depth image &mdash; but if it matters, a rectangular
+        (max-of-axes) norm would treat the whole image as free instead.</li>
+      <li><strong>The crash overlay is vehicle-frame.</strong> The per-crash azimuth and
+        elevation were logged in the yaw-only frame, while the penalty is computed in the
+        body frame. Measured difference between the two is 2.6&ndash;3.2% on mean r_fov,
+        so the overlay is a close but not exact match to what the term would have charged.</li>
+      <li><strong>Speed is folded out of these plots.</strong> Everything shown assumes
+        ‖v‖ &ge; v_ref = 2 m/s, where the speed multiplier saturates. Below that the whole
+        surface scales linearly with speed, and a hover costs nothing at any angle.</li>
+    </ul>
+  </footer>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var HALF_H = 43.5, HALF_V = 28.09296834733278;
+  var V_REF = 2.0, LAMBDA = 0.015;
+  var AMBER = "#ff8f4d", TEAL = "#55c9c9";
+  var TEXT_DIM = "#98a1b0", TEXT_FAINT = "#5c6675";
+  var FONT = "'IBM Plex Mono', ui-monospace, monospace";
+  var power = 2;
+  var overlay = "none";
+  var crashDirs = null;
+
+  function rFov(azDeg, elDeg) {
+    var a = azDeg / HALF_H, e = elDeg / HALF_V;
+    return Math.sqrt(a * a + e * e);
+  }
+
+  // dark -> teal -> amber -> hot. Stops are [t, r, g, b].
+  var STOPS = [
+    [0.00, 16, 19, 26], [0.12, 24, 62, 66], [0.32, 85, 201, 201],
+    [0.58, 214, 164, 90], [0.80, 255, 143, 77], [1.00, 255, 233, 199]
+  ];
+  function ramp(t) {
+    t = Math.max(0, Math.min(1, t));
+    for (var i = 1; i < STOPS.length; i++) {
+      if (t <= STOPS[i][0]) {
+        var a = STOPS[i - 1], b = STOPS[i];
+        var f = (t - a[0]) / (b[0] - a[0]);
+        return [
+          Math.round(a[1] + f * (b[1] - a[1])),
+          Math.round(a[2] + f * (b[2] - a[2])),
+          Math.round(a[3] + f * (b[3] - a[3]))
+        ];
+      }
+    }
+    return [255, 233, 199];
+  }
+  function rampCss() {
+    return "linear-gradient(to right," + STOPS.map(function (s) {
+      return "rgb(" + s[1] + "," + s[2] + "," + s[3] + ") " + (s[0] * 100) + "%";
+    }).join(",") + ")";
+  }
+  document.getElementById("rampSky").style.background = rampCss();
+  document.getElementById("rampImg").style.background = rampCss();
+
+  // ---------- 01: curves ----------
+  var curveChart = null;
+  function drawCurve() {
+    var labels = [], az = [], el = [];
+    for (var d = 0; d <= 90; d += 1) {
+      labels.push(d);
+      az.push(Math.pow(rFov(d, 0), power));
+      el.push(Math.pow(rFov(0, d), power));
+    }
+    var cfg = {
+      type: "line",
+      data: {
+        labels: labels,
+        datasets: [
+          { label: "azimuth (horizontal)", data: az, borderColor: TEAL,
+            backgroundColor: TEAL, borderWidth: 2, pointRadius: 0, tension: 0.1 },
+          { label: "elevation (vertical)", data: el, borderColor: AMBER,
+            backgroundColor: AMBER, borderWidth: 2, pointRadius: 0, tension: 0.1 }
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { position: "top", align: "end",
+            labels: { boxWidth: 10, color: TEXT_DIM, font: { family: "'IBM Plex Sans'", size: 12 } } }
+        },
+        scales: {
+          x: {
+            grid: { color: "rgba(255,255,255,0.06)", drawTicks: false },
+            title: { display: true, text: "degrees off boresight", color: TEXT_FAINT, font: { family: FONT, size: 11 } },
+            ticks: { color: TEXT_DIM, font: { family: FONT, size: 11 }, maxTicksLimit: 10 }
+          },
+          y: {
+            grid: { color: "rgba(255,255,255,0.06)", drawTicks: false },
+            title: { display: true, text: "cost, in units of λ", color: TEXT_FAINT, font: { family: FONT, size: 11 } },
+            ticks: { color: TEXT_DIM, font: { family: FONT, size: 11 } },
+            beginAtZero: true, max: power === 2 ? 6 : (power === 3 ? 12 : 24)
+          }
+        }
+      }
+    };
+    if (curveChart) { curveChart.destroy(); }
+    curveChart = new Chart(document.getElementById("curve"), cfg);
+    document.getElementById("powNote").textContent =
+      "cone edge = 1.00λ   ·   90° az = " +
+      Math.pow(rFov(90, 0), power).toFixed(2) + "λ   ·   90° el = " +
+      Math.pow(rFov(0, 90), power).toFixed(2) + "λ";
+  }
+
+  // ---------- 02: directional map ----------
+  var sky = document.getElementById("sky"), sctx = sky.getContext("2d");
+  var SKY_MAX_R = rFov(180, 90);           // geometric worst case
+  function drawSky() {
+    var W = sky.width, H = sky.height;
+    var img = sctx.createImageData(W, H);
+    var maxCost = Math.pow(SKY_MAX_R, power);
+    for (var y = 0; y < H; y++) {
+      var elDeg = 90 - (y / (H - 1)) * 180;
+      for (var x = 0; x < W; x++) {
+        var azDeg = -180 + (x / (W - 1)) * 360;
+        var cost = Math.pow(rFov(azDeg, elDeg), power);
+        // gamma so the low end stays legible across a 27x range
+        var c = ramp(Math.pow(cost / maxCost, 0.38));
+        var i = (y * W + x) * 4;
+        img.data[i] = c[0]; img.data[i + 1] = c[1]; img.data[i + 2] = c[2]; img.data[i + 3] = 255;
+      }
+    }
+    sctx.putImageData(img, 0, 0);
+
+    function px(azDeg) { return (azDeg + 180) / 360 * (W - 1); }
+    function py(elDeg) { return (90 - elDeg) / 180 * (H - 1); }
+
+    // crash overlay
+    if (overlay !== "none" && crashDirs && crashDirs[overlay]) {
+      var pts = crashDirs[overlay];
+      sctx.fillStyle = "rgba(255,255,255,0.55)";
+      for (var k = 0; k < pts.length; k++) {
+        sctx.beginPath();
+        sctx.arc(px(pts[k][0]), py(pts[k][1]), 1.5, 0, 6.2832);
+        sctx.fill();
+      }
+      document.getElementById("ovNote").textContent = pts.length + " crash directions";
+    } else {
+      document.getElementById("ovNote").innerHTML = "&nbsp;";
+    }
+
+    // FOV rectangle
+    sctx.setLineDash([6, 5]);
+    sctx.strokeStyle = "rgba(255,255,255,0.75)"; sctx.lineWidth = 1.5;
+    sctx.strokeRect(px(-HALF_H), py(HALF_V), px(HALF_H) - px(-HALF_H), py(-HALF_V) - py(HALF_V));
+    sctx.setLineDash([]);
+
+    // r_fov = 1 ellipse, and 2
+    [[1, "rgba(255,255,255,0.95)", 2], [2, "rgba(255,255,255,0.35)", 1.2]].forEach(function (spec) {
+      sctx.strokeStyle = spec[1]; sctx.lineWidth = spec[2];
+      sctx.beginPath();
+      for (var t = 0; t <= 360; t += 2) {
+        var rad = t * Math.PI / 180;
+        var a = spec[0] * HALF_H * Math.cos(rad), e = spec[0] * HALF_V * Math.sin(rad);
+        var X = px(a), Y = py(e);
+        if (t === 0) { sctx.moveTo(X, Y); } else { sctx.lineTo(X, Y); }
+      }
+      sctx.stroke();
+    });
+
+    // labels
+    sctx.fillStyle = "rgba(255,255,255,0.85)";
+    sctx.font = "12px " + FONT;
+    sctx.fillText("FOV 87° × 56°", px(-HALF_H) + 6, py(HALF_V) - 8);
+    sctx.fillText("r_fov = 1", px(0) - 26, py(-HALF_V) + 16);
+    sctx.fillText("r_fov = 2", px(0) - 26, py(-2 * HALF_V) + 16);
+    sctx.fillStyle = "rgba(255,255,255,0.5)";
+    sctx.fillText("boresight", px(0) + 6, py(0) - 6);
+    sctx.beginPath(); sctx.arc(px(0), py(0), 2.5, 0, 6.2832); sctx.fill();
+
+    document.getElementById("skyMax").textContent =
+      maxCost.toFixed(1) + "λ (" + (maxCost * LAMBDA * V_REF).toFixed(2) + "/step)";
+  }
+
+  // ---------- 03: image-plane map ----------
+  var imgC = document.getElementById("img"), ictx = imgC.getContext("2d");
+  var F_PX = 160 / Math.tan(HALF_H * Math.PI / 180);   // 168.6 px
+  function drawImage() {
+    var W = imgC.width, H = imgC.height;
+    var out = ictx.createImageData(W, H);
+    var cy = 90 / F_PX, cx = 160 / F_PX;
+    var cornerR = rFov(Math.atan2(cx, 1) * 180 / Math.PI,
+                       Math.atan2(cy, Math.sqrt(1 + cx * cx)) * 180 / Math.PI);
+    var maxCost = Math.pow(cornerR, power);
+    for (var y = 0; y < H; y++) {
+      var vPx = ((y / (H - 1)) - 0.5) * 180;        // image rows, +down
+      for (var x = 0; x < W; x++) {
+        var uPx = ((x / (W - 1)) - 0.5) * 320;      // image cols, +right
+        // pinhole ray in FLU body coords: x fwd, y left, z up
+        var ry = -uPx / F_PX, rz = -vPx / F_PX;
+        var azDeg = Math.atan2(ry, 1) * 180 / Math.PI;
+        var elDeg = Math.atan2(rz, Math.sqrt(1 + ry * ry)) * 180 / Math.PI;
+        var cost = Math.pow(rFov(azDeg, elDeg), power);
+        var c = ramp(cost / maxCost);
+        var i = (y * W + x) * 4;
+        out.data[i] = c[0]; out.data[i + 1] = c[1]; out.data[i + 2] = c[2]; out.data[i + 3] = 255;
+      }
+    }
+    ictx.putImageData(out, 0, 0);
+
+    // inscribed r_fov = 1 ellipse in pixel space
+    ictx.strokeStyle = "rgba(255,255,255,0.95)"; ictx.lineWidth = 2;
+    ictx.beginPath();
+    for (var t = 0; t <= 360; t += 2) {
+      var rad = t * Math.PI / 180;
+      var a = HALF_H * Math.cos(rad) * Math.PI / 180;
+      var e = HALF_V * Math.sin(rad) * Math.PI / 180;
+      var u = -F_PX * Math.tan(a);
+      var v = -F_PX * Math.tan(e) / Math.cos(a);
+      var X = (u / 320 + 0.5) * (W - 1), Y = (v / 180 + 0.5) * (H - 1);
+      if (t === 0) { ictx.moveTo(X, Y); } else { ictx.lineTo(X, Y); }
+    }
+    ictx.closePath(); ictx.stroke();
+
+    ictx.fillStyle = "rgba(255,255,255,0.9)"; ictx.font = "13px " + FONT;
+    ictx.fillText("r_fov = 1", W / 2 - 34, H / 2 - 10);
+    var cLbl = maxCost.toFixed(2) + "λ";
+    ictx.fillText(cLbl, 12, 22);
+    ictx.fillText(cLbl, W - 66, 22);
+    ictx.fillText(cLbl, 12, H - 12);
+    ictx.fillText(cLbl, W - 66, H - 12);
+    ictx.beginPath(); ictx.arc(W / 2, H / 2, 3, 0, 6.2832); ictx.fill();
+
+    document.getElementById("imgMax").textContent =
+      maxCost.toFixed(2) + "λ (" + (maxCost * LAMBDA * V_REF).toFixed(3) + "/step)";
+  }
+
+  // ---------- 04: reference table ----------
+  function drawTable() {
+    var rows = [
+      ["boresight (perfectly aimed)", 0, 0],
+      ["20° azimuth", 20, 0],
+      ["43.5° azimuth — cone edge", HALF_H, 0],
+      ["28.1° elevation — cone edge", 0, HALF_V],
+      ["b4 median crash direction", 43.9, 19.3],
+      ["p_blind median crash direction", 32.0, 20.9],
+      ["60° azimuth", 60, 0],
+      ["45° elevation", 0, 45],
+      ["90° azimuth (pure sideways)", 90, 0],
+      ["180° (flying backwards)", 180, 0]
+    ];
+    var html = rows.map(function (r) {
+      var rf = rFov(r[1], r[2]);
+      var cost = Math.pow(rf, power);
+      var per = cost * LAMBDA * V_REF;
+      var cls = cost >= 1 ? " class=\"hot\"" : "";
+      return "<tr><td>" + r[0] + "</td>" +
+        "<td class=\"num\">" + rf.toFixed(2) + "</td>" +
+        "<td class=\"num\"" + cls + ">" + cost.toFixed(2) + "</td>" +
+        "<td class=\"num\">" + per.toFixed(3) + "</td></tr>";
+    }).join("");
+    document.getElementById("refBody").innerHTML = html;
+  }
+
+  function redraw() { drawCurve(); drawSky(); drawImage(); drawTable(); }
+
+  document.getElementById("powSeg").addEventListener("click", function (e) {
+    var b = e.target.closest("button"); if (!b) { return; }
+    power = parseInt(b.dataset.p, 10);
+    Array.prototype.forEach.call(this.querySelectorAll("button"), function (x) {
+      x.setAttribute("aria-pressed", x === b ? "true" : "false");
+    });
+    redraw();
+  });
+  document.getElementById("overlaySeg").addEventListener("click", function (e) {
+    var b = e.target.closest("button"); if (!b) { return; }
+    overlay = b.dataset.ov;
+    Array.prototype.forEach.call(this.querySelectorAll("button"), function (x) {
+      x.setAttribute("aria-pressed", x === b ? "true" : "false");
+    });
+    drawSky();
+  });
+
+  redraw();
+  fetch("crash_dirs.json").then(function (r) { return r.json(); }).then(function (j) {
+    crashDirs = j;
+    if (overlay !== "none") { drawSky(); }
+  }).catch(function (err) { console.error("crash_dirs.json unavailable", err); });
+})();
+</script>
