@@ -1444,10 +1444,17 @@ class NavigationWithObstaclesTask(BaseTask):
         # AT the edge -- the operating point the crashes actually sit at (median azimuth
         # 43.9 deg vs a 43.5 deg half-angle). Normalizing by r_fov_max instead would peg
         # the scale to the full-reversal corner and bury the edge at 1/27th of it.
-        fov_excess = r_fov
-        p_fov = -params["lambda_fov"] * torch.clamp(
-            speed, max=params["fov_v_ref"]
-        ) * fov_excess.pow(params["fov_power"])
+        # SPEED ENTERS AS v^2, not as a saturating multiplier. One term does three jobs
+        # that previously needed three knobs: hover is free because v^2 -> 0 (so the
+        # meaningless direction of station-keeping drift costs nothing, and no gate is
+        # needed); the tolerated misalignment narrows as 1/v, since iso-penalty contours
+        # satisfy |v| * r_fov = const; and the speed at which slowing beats aiming falls
+        # as the drone speeds up. None of that needs a reachability model -- deliberately,
+        # because available acceleration is NOT a constant: holding altitude at 45 deg
+        # tilt already spends 1.41 mg of the 2 mg the controller can command, leaving
+        # 0.41 g of vertical escape authority against 1.0 g when level. v^2 claims only
+        # that faster means more committed, which holds whatever budget is left.
+        p_fov = -params["lambda_fov"] * speed.pow(2) * r_fov.pow(params["fov_power"])
 
         # Apply mask to zero out rewards for envs that had terminal events
         r_progress = r_progress[mask]

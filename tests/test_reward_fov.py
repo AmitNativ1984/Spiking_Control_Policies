@@ -26,7 +26,7 @@ HALF_H = math.radians(CAM.horizontal_fov_deg) / 2.0
 HALF_V = math.atan(math.tan(HALF_H) * (CAM.height / CAM.width))
 LAMBDA_FOV = 0.05  # exercised value; the shipped default is 0.0 (inert)
 POWER = task_config.reward_parameters["fov_power"]
-V_REF = task_config.reward_parameters["fov_v_ref"]
+SPEED = 2.0  # reference speed for the cost tables below; nothing saturates now
 
 
 def _stub(**overrides):
@@ -138,35 +138,44 @@ def test_leaving_the_vertical_cone_costs_more():
     assert vertical < horizontal < 0.0
 
 
-def test_speed_saturates():
-    """Above fov_v_ref the only remaining lever is aim, not slowing down."""
-    at_ref = _p_fov_only(_vel(V_REF, azimuth_deg=90.0))
-    way_over = _p_fov_only(_vel(4.0 * V_REF, azimuth_deg=90.0))
-    assert at_ref == pytest.approx(way_over, rel=1e-6)
+def test_cost_is_quadratic_in_speed():
+    """Speed enters as v^2 with no saturation, so doubling speed quadruples the cost."""
+    slow = abs(_p_fov_only(_vel(1.0, azimuth_deg=60.0)))
+    fast = abs(_p_fov_only(_vel(2.0, azimuth_deg=60.0)))
+    assert fast == pytest.approx(4.0 * slow, rel=1e-5)
 
 
-def test_slowing_below_v_ref_still_helps():
-    """Below the saturation point the risk gradient is intact, so hover stays free."""
-    slow = _p_fov_only(_vel(0.5 * V_REF, azimuth_deg=90.0))
-    fast = _p_fov_only(_vel(V_REF, azimuth_deg=90.0))
-    assert fast < slow < 0.0
+def test_drift_at_hover_costs_almost_nothing():
+    """Why no speed gate is needed: station-keeping drift has a meaningless direction,
+    and v^2 suppresses it on its own."""
+    drift = abs(_p_fov_only(_vel(0.1, azimuth_deg=90.0)))
+    committed = abs(_p_fov_only(_vel(2.0, azimuth_deg=math.degrees(HALF_H))))
+    assert drift < 0.02 * committed
 
 
-def test_lambda_is_the_cost_at_the_cone_edge():
-    """The whole point of dropping the normalizer: lambda_fov reads directly as the
-    per-step cost of flying AT the edge of what the camera can see -- the operating
-    point the crashes sit at (median azimuth 43.9 deg vs a 43.5 deg half-angle)."""
-    at_h_edge = _p_fov_only(_vel(V_REF, azimuth_deg=math.degrees(HALF_H)))
-    at_v_edge = _p_fov_only(_vel(V_REF, elevation_deg=math.degrees(HALF_V)))
-    assert at_h_edge == pytest.approx(-LAMBDA_FOV * V_REF, rel=1e-5)
-    assert at_v_edge == pytest.approx(-LAMBDA_FOV * V_REF, rel=1e-5)
+def test_tolerated_cone_narrows_with_speed():
+    """Iso-penalty contours satisfy |v| * r_fov = const, so the misalignment costing the
+    same as the cone edge at 2 m/s is exactly half of it at 4 m/s."""
+    ref = abs(_p_fov_only(_vel(2.0, azimuth_deg=math.degrees(HALF_H))))
+    at_4 = abs(_p_fov_only(_vel(4.0, azimuth_deg=math.degrees(HALF_H) / 2.0)))
+    assert at_4 == pytest.approx(ref, rel=1e-5)
+
+
+def test_lambda_is_the_cost_at_the_cone_edge_per_v_squared():
+    """lambda_fov is the per-step cost of flying AT the edge of what the camera can see,
+    per (m/s)^2 -- and both axes cost the same at their own edge, which is what the
+    per-axis normalization buys."""
+    at_h_edge = _p_fov_only(_vel(SPEED, azimuth_deg=math.degrees(HALF_H)))
+    at_v_edge = _p_fov_only(_vel(SPEED, elevation_deg=math.degrees(HALF_V)))
+    assert at_h_edge == pytest.approx(-LAMBDA_FOV * SPEED ** 2, rel=1e-5)
+    assert at_v_edge == pytest.approx(-LAMBDA_FOV * SPEED ** 2, rel=1e-5)
 
 
 def test_inside_the_cone_is_a_fraction_of_the_edge():
     """Half a cone width costs a quarter of the edge at quadratic, so ordinary in-cone
     manoeuvring stays cheap relative to skirting the boundary."""
-    half = abs(_p_fov_only(_vel(V_REF, azimuth_deg=0.5 * math.degrees(HALF_H))))
-    edge = abs(_p_fov_only(_vel(V_REF, azimuth_deg=math.degrees(HALF_H))))
+    half = abs(_p_fov_only(_vel(SPEED, azimuth_deg=0.5 * math.degrees(HALF_H))))
+    edge = abs(_p_fov_only(_vel(SPEED, azimuth_deg=math.degrees(HALF_H))))
     assert half == pytest.approx(0.25 * edge, rel=1e-5)
 
 
@@ -178,7 +187,7 @@ def test_bounded_by_geometry():
         for az in (0.0, 90.0, 180.0)
         for el in (-90.0, -45.0, 0.0, 45.0, 90.0)
     )
-    assert worst >= -LAMBDA_FOV * V_REF * r_max ** POWER * (1 + 1e-5)
+    assert worst >= -LAMBDA_FOV * 9.0 ** 2 * r_max ** POWER * (1 + 1e-5)
 
 
 def _reward_pitched(v_world, pitch_deg, lam=LAMBDA_FOV):
@@ -213,14 +222,14 @@ def test_pitching_to_accelerate_is_charged():
     pitching nose-down to accelerate tilts it off the flight path. Level flight at a
     steep pitch is a genuine blind condition and must cost something, even though the
     velocity is perfectly aligned in the yaw-only vehicle frame."""
-    level = _vel(V_REF)  # straight along the world x axis, no misalignment at all
+    level = _vel(SPEED)  # straight along the world x axis, no misalignment at all
     assert _p_fov_only(level) == pytest.approx(0.0, abs=1e-9)
     assert _reward_pitched(level, 0.0) == pytest.approx(0.0, abs=1e-9)
     assert _reward_pitched(level, 30.0) < 0.0
 
 
 def test_pitch_cost_grows_with_pitch():
-    level = _vel(V_REF)
+    level = _vel(SPEED)
     mild = abs(_reward_pitched(level, 15.0))
     steep = abs(_reward_pitched(level, 40.0))
     assert steep > mild > 0.0

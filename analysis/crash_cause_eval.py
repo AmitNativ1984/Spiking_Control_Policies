@@ -170,12 +170,12 @@ def main():
     from config.task_config import F450NavTaskConfig as _cfg
     _rp = _cfg.reward_parameters
     FOV_POWER = float(_rp.get("fov_power", 2.0))
-    FOV_V_REF = float(_rp.get("fov_v_ref", 2.0))
     R_FOV_MAX = math.sqrt(
         (math.pi / _HALF_H_FOV) ** 2 + ((math.pi / 2) / _HALF_V_FOV) ** 2
     )
     scale = {"term_sum": 0.0, "term_yawslaved_sum": 0.0, "steps": 0, "r_sum": 0.0,
-             "r_hist": torch.zeros(40, device=dev)}  # r_fov in [0, 4) at 0.1 per bin
+             "r_hist": torch.zeros(40, device=dev),
+             "v_hist": torch.zeros(40, device=dev), "v_sum": 0.0}  # r_fov in [0, 4) at 0.1 per bin
 
     orig_compute_rewards = task.compute_rewards
 
@@ -210,22 +210,22 @@ def main():
         r_all = torch.sqrt(
             (psi_all / _HALF_H_FOV).pow(2) + (theta_all / _HALF_V_FOV).pow(2)
         )
-        term_all = torch.clamp(
-            torch.linalg.norm(v_all, dim=1), max=FOV_V_REF
-        ) * r_all.pow(FOV_POWER)
+        speed_all = torch.linalg.norm(v_all, dim=1)
+        term_all = speed_all.pow(2) * r_all.pow(FOV_POWER)
         scale["term_sum"] += float(term_all.sum())
         # The FLOOR a perfectly yaw-aligned policy could reach: azimuth driven to zero,
         # body-frame elevation left as-is -- no actuator aims a body-fixed camera in
         # elevation, and yaw cannot undo pitch either. Today's value minus this floor is
         # the real headroom the term offers.
         r_yawslaved = (theta_all / _HALF_V_FOV).abs()
-        term_yawslaved = torch.clamp(
-            torch.linalg.norm(v_all, dim=1), max=FOV_V_REF
-        ) * r_yawslaved.pow(FOV_POWER)
+        term_yawslaved = speed_all.pow(2) * r_yawslaved.pow(FOV_POWER)
         scale["term_yawslaved_sum"] += float(term_yawslaved.sum())
         scale["r_sum"] += float(r_all.sum())
         scale["steps"] += int(v_all.shape[0])
         scale["r_hist"] += torch.histc(r_all, bins=40, min=0.0, max=4.0)
+        # speed on its own, which was previously only ever stored folded into the product
+        scale["v_hist"] += torch.histc(speed_all, bins=40, min=0.0, max=8.0)
+        scale["v_sum"] += float(speed_all.sum())
 
         if collision_mask.any():
             crashed_idx = collision_mask.nonzero(as_tuple=True)[0]
@@ -412,7 +412,6 @@ def main():
         "p_fov_scale": {
             "fov_power": FOV_POWER,
             "r_fov_max": R_FOV_MAX,
-            "fov_v_ref": FOV_V_REF,
             "steps_measured": scale["steps"],
             # Per-step value of the p_fov term at lambda_fov = 1. Multiply by the target
             # lambda to get the per-step cost, and by mean_episode_steps for the
@@ -427,6 +426,9 @@ def main():
             ),
             "r_fov_hist_edges": [i * 0.1 for i in range(41)],
             "r_fov_hist": scale["r_hist"].tolist(),
+            "mean_speed": scale["v_sum"] / max(scale["steps"], 1),
+            "speed_hist_edges": [i * 0.2 for i in range(41)],
+            "speed_hist": scale["v_hist"].tolist(),
         },
         "records": records,
     }, open(args.out, "w"))

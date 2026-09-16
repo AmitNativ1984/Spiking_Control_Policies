@@ -286,7 +286,7 @@ class task_config:
         "lambda_blind": float(os.environ.get("F450_LAMBDA_BLIND", 0.03)),
 
         # --- p_fov: velocity pointed outside what the camera can actually see ---
-        # -lambda_fov * min(speed, fov_v_ref) * r_fov^fov_power,  r_fov = 1.0 on the boundary
+        # -lambda_fov * ||v||^2 * r_fov^fov_power,  r_fov = 1.0 on the cone boundary
         #
         # p_blind measures misalignment from the NOSE AXIS and is horizontal-only. Both
         # are wrong relative to the measured failure. Crash-cause eval of b4 and p_blind
@@ -332,11 +332,28 @@ class task_config:
         # Raise fov_power via F450_FOV_POWER if the quadratic proves too permissive near
         # the axis.
         #
-        # SPEED is SATURATED, not raw. Speed belongs in the term (flying fast into unseen
-        # space is worse than drifting into it) but a raw multiplier lets the policy
-        # satisfy a larger lambda by SLOWING DOWN instead of by aiming -- which just
-        # rediscovers the v_max cap. Saturating keeps hover free and the risk gradient
-        # intact while making aim the only remaining lever above fov_v_ref.
+        # SPEED ENTERS AS v^2. Earlier revisions used min(speed, v_ref), which needed a
+        # saturation threshold nobody could derive -- it was picked by eye and quietly
+        # meant different things for different policies (b4 flies mostly below 2 m/s so
+        # the multiplier was a live ramp; p_blind flies above it so it was nearly flat).
+        # v^2 removes the knob and does three jobs at once:
+        #   - hover is free, because v^2 -> 0. Station-keeping drift has a meaningless
+        #     direction, and at 0.1 m/s it costs ~0.7% of the cone edge at 2 m/s, so no
+        #     gate is needed to suppress it.
+        #   - the tolerated misalignment NARROWS AS 1/v: iso-penalty contours satisfy
+        #     |v| * r_fov = const, so the cone the policy is allowed to stray outside
+        #     halves every time speed doubles.
+        #   - the crossover where slowing beats aiming moves inward as speed rises
+        #     (r_fov = 1.00 at 1 m/s, 0.71 at 2, 0.58 at 3), which is Falanga's
+        #     speed-vs-sensing relation (RAL 2019) appearing without being encoded.
+        #
+        # Deliberately NOT derived from a reachability model. Available acceleration is
+        # not a constant: holding altitude at 45 deg tilt already spends 1.41 mg of the
+        # 2 mg the controller can command, leaving 0.41 g of vertical escape authority
+        # against 1.0 g when level -- and that is the narrow FOV axis. Modelling the
+        # reachable acceleration set per state is a planner, not a reward term. v^2
+        # claims only that faster means more committed, which holds whatever budget is
+        # left.
         #
         # The half-angles are NOT duplicated here: the task derives them from the robot's
         # live camera config at init, so widening the lens automatically widens the free
@@ -357,27 +374,38 @@ class task_config:
         # (p_blind). The body frame is still the right one (it is the actual frustum),
         # it just reallocates rather than inflates.
         #
-        # 0.015 is where three independent constraints meet, which is why it is the
-        # documented value rather than a swept one:
-        #   1. SLOW-DOWN SETPOINT. Below fov_v_ref, slowing beats aiming iff
-        #      lambda * r_fov^power > lambda_p * dt = 0.5 * 0.03 = 0.015. At exactly
-        #      lambda_fov = 0.015 that crossover lands on r_fov = 1 -- the cone boundary.
-        #      Inside the cone, fly as fast as you like; outside it, slowing starts to
-        #      pay. That is Falanga's "drive within your sensing range" (RAL 2019)
-        #      falling out of the arithmetic rather than being tuned in. It costs
-        #      slow-down pressure on the 33% of b4 steps that sit beyond the cone.
-        #   2. MAGNITUDE. 0.015 * 1.753 = 0.026/step removable against b4, inside the
-        #      0.025-0.085 band the other components occupy (r_bearing measured 0.0842,
-        #      r_progress 0.029, p_action_mag 0.025).
-        #   3. PRECEDENT. 5.4 points/episode total and 3.9 removable on b4's 25.9
-        #      return, against p_blind's own sizing of "-5.2/episode untrained ... ~4.5
-        #      points of headroom". Same regime, arrived at independently.
+        # SIZING RULE: set lambda_fov so the mean per-step penalty is comparable to
+        # r_progress, which measures about 0.029/step. That is the whole criterion --
+        # loud enough for the policy to attend to, not loud enough to displace the task.
+        # lambda_fov = 0.029 / mean(||v||^2 * r_fov^2), measured over every step rather
+        # than crashes only. NOTE the units changed with the v^2 multiplier: lambda is
+        # now per (m/s)^2, so it is not comparable to the pre-v^2 value of 0.015.
         #
-        # Fine-tuning from p_blind rather than b4 needs ~0.034 for the same removable
-        # magnitude, since only half its remaining misalignment is yaw-addressable.
-        "lambda_fov": float(os.environ.get("F450_LAMBDA_FOV", 0.0)),  # 0.0 = inert; 0.015 to enable
+        # MEASURED on b4, 10,097 episodes at level 30 (analysis/data/scale_b4_v2.json):
+        #   mean(||v||^2 * r_fov^2) = 4.207 /step at lambda = 1
+        #   yaw-slaved floor         = 1.870  -> 2.336 removable (55.5%)
+        #   mean r_fov 1.125, mean speed 2.61 m/s, 152 steps/episode
+        # => lambda_fov = 0.029 / 4.207 = 0.0069 per (m/s)^2, giving 0.029/step mean and
+        #    4.4 points/episode against b4's 25.9 return. Sizing against the REMOVABLE
+        #    part instead gives 0.0124; the honest answer is somewhere between, since the
+        #    floor lowers return without creating gradient.
+        #
+        # The speed distribution this run finally measured separately is BIMODAL: a slow
+        # mode around 1.0-1.2 m/s and a larger cruise mode at 3.6-4.4 m/s, 61% of steps
+        # above 2 m/s. The old fov_v_ref = 2.0 sat almost exactly in the TROUGH between
+        # them, so the saturating multiplier behaved as a linear ramp in one regime and a
+        # flat constant in the other -- the worst place to put a threshold, and a good
+        # retrospective argument for having removed it.
+        #
+        # OPEN QUESTION, recorded rather than resolved: b4's mean speed over all steps is
+        # 2.61 m/s but its MEDIAN SPEED AT IMPACT is 1.24 m/s, so crashes concentrate in
+        # the slow mode while v^2 weights the penalty ~10x harder in the fast one. That is
+        # defensible if fast blind cruise is what sets up the slow crash that follows, but
+        # it is an assumption, not a measurement. If p_fov underperforms, this is the first
+        # thing to test -- a v^1 multiplier would move the weight toward where crashes
+        # actually happen.
+        "lambda_fov": float(os.environ.get("F450_LAMBDA_FOV", 0.0)),  # 0.0 = inert; 0.0069 to enable
         "fov_power": float(os.environ.get("F450_FOV_POWER", 2.0)),    # 4 = quartic
-        "fov_v_ref": float(os.environ.get("F450_FOV_V_REF", 2.0)),    # m/s saturation
     }
 
 
