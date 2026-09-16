@@ -1422,10 +1422,14 @@ class NavigationWithObstaclesTask(BaseTask):
         r_fov = torch.sqrt(
             (psi / self._half_h_fov).pow(2) + (theta / self._half_v_fov).pow(2)
         )
-        # Power law in the distance from BORESIGHT, not a hinge at the edge: the cost
-        # rises the further out the velocity points, and the exponent supplies the soft
-        # deadzone near the centre without a hard corner for the policy to park against.
-        fov_excess = torch.clamp(r_fov / params["fov_r_clip"], max=1.0)
+        # Power law in the distance from BORESIGHT, monotone over the WHOLE domain:
+        # no clamp, so there is no misalignment at which the gradient dies -- including
+        # the ~90 deg a from-scratch policy starts at. NOT normalized: r_fov is already
+        # 1.0 on the cone boundary, so lambda_fov reads as the per-step cost of flying
+        # AT the edge -- the operating point the crashes actually sit at (median azimuth
+        # 43.9 deg vs a 43.5 deg half-angle). Normalizing by r_fov_max instead would peg
+        # the scale to the full-reversal corner and bury the edge at 1/27th of it.
+        fov_excess = r_fov
         p_fov = -params["lambda_fov"] * torch.clamp(
             speed, max=params["fov_v_ref"]
         ) * fov_excess.pow(params["fov_power"])

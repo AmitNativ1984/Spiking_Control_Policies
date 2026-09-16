@@ -286,7 +286,7 @@ class task_config:
         "lambda_blind": float(os.environ.get("F450_LAMBDA_BLIND", 0.03)),
 
         # --- p_fov: velocity pointed outside what the camera can actually see ---
-        # -lambda_fov * min(speed, fov_v_ref) * (r_fov/fov_r_clip)^fov_power,  bounded to [0, 1]
+        # -lambda_fov * min(speed, fov_v_ref) * r_fov^fov_power,  r_fov = 1.0 on the boundary
         #
         # p_blind measures misalignment from the NOSE AXIS and is horizontal-only. Both
         # are wrong relative to the measured failure. Crash-cause eval of b4 and p_blind
@@ -305,23 +305,32 @@ class task_config:
         # volume. This is the ellipse inscribed in the rectangular frustum, so it is
         # slightly conservative at the image corners; that is the cheap side to err on.
         #
-        # GROWTH is a power law in the distance from BORESIGHT, (r_fov/r_clip)^power,
-        # not a hinge at the cone edge. The cost rises the further out the velocity
-        # points, and the exponent supplies the deadzone near the centre by itself:
-        # at fov_power = 4 the cone edge (r = 1, r_clip = 2) costs 6.3% of maximum and
-        # half a cone width costs 0.4%, so ordinary in-cone manoeuvring is ~free while
-        # leaving the cone climbs steeply. This follows p_blind's own reasoning for going
-        # quartic -- a soft deadzone "with no hard corner for the policy to park against"
-        # -- and avoids the zero-gradient interior a hard hinge would leave, where the
-        # policy has nothing pushing it back toward the centre once inside.
-        # fov_power = 2.0 gives the gentler quadratic if the quartic proves too permissive
-        # near the axis.
+        # GROWTH is a power law in the distance from BORESIGHT, (r_fov/r_fov_max)^power,
+        # MONOTONE over the whole domain. There is deliberately no clamp: a cutoff
+        # flattens the gradient beyond it, and p_blind's own note rejects a saturating
+        # shape for exactly that reason -- "at init yaw is uncorrelated with velocity
+        # (median misalignment 90 deg), so the policy would start in the region where
+        # such a shape teaches nothing". Anything that dies at 90 deg dies precisely
+        # where a from-scratch policy lives.
         #
-        # r_clip SATURATES at twice the cone width: beyond that you are comprehensively
-        # blind and further misalignment is not meaningfully worse. It also BOUNDS the
-        # term to [0, 1] like p_blind's misalignment, so lambda_fov reads directly as the
-        # worst-case per-step cost at fov_v_ref and can never dominate the loss the way an
-        # unbounded term could.
+        # SCALE is anchored at the CONE EDGE, not at the worst case: r_fov is already
+        # 1.0 on the boundary, so lambda_fov IS the per-step cost of flying straight at
+        # the edge of what the camera can see. That is the right unit because it is where
+        # the failures live -- crash velocities have a MEDIAN azimuth of 43.9 deg against
+        # a 43.5 deg half-angle. Dividing through by r_fov_max (= 5.23, set by the
+        # full-reversal corner) would peg the scale to a case that essentially never
+        # happens and leave the edge at 1/27th of it.
+        #
+        # The term stays bounded by geometry -- psi and theta are bounded, so the worst
+        # reachable value is r_fov_max^power = 27.4 at quadratic -- so it cannot run away
+        # the way a genuinely unbounded term could.
+        #
+        # EXPONENT trades in-cone freedom against tail severity, in units of the edge
+        # cost: at quadratic, half a cone width costs 0.25 lambda, the edge 1.0, 90 deg
+        # off 4.3, full reversal 17.1. Quartic would drop half a cone width to 0.06 but
+        # push full reversal to 292, which over-weights a corner the policy is rarely in.
+        # Raise fov_power via F450_FOV_POWER if the quadratic proves too permissive near
+        # the axis.
         #
         # SPEED is SATURATED, not raw. Speed belongs in the term (flying fast into unseen
         # space is worse than drifting into it) but a raw multiplier lets the policy
@@ -332,9 +341,32 @@ class task_config:
         # The half-angles are NOT duplicated here: the task derives them from the robot's
         # live camera config at init, so widening the lens automatically widens the free
         # region rather than silently leaving the penalty keyed to the old frustum.
-        "lambda_fov": float(os.environ.get("F450_LAMBDA_FOV", 0.0)),  # 0.0 = inert
-        "fov_power": float(os.environ.get("F450_FOV_POWER", 4.0)),    # 2 = quadratic
-        "fov_r_clip": float(os.environ.get("F450_FOV_R_CLIP", 2.0)),  # cone widths
+        # SIZING (analysis/crash_cause_eval.py, 10k episodes per policy at level 30,
+        # measured over EVERY step rather than crashes only):
+        #   b4       mean r_fov 1.091, term 2.307/step at lambda=1, of which 0.522 is the
+        #            elevation floor no yaw can remove -> 1.785 removable (77.4%)
+        #   p_blind  mean r_fov 0.897, term 1.449/step, floor 0.665 -> 0.784 removable
+        #            (54.1%) -- p_blind already spent most of the azimuth headroom
+        #
+        # 0.015 is where three independent constraints meet, which is why it is the
+        # default rather than a swept value:
+        #   1. SLOW-DOWN SETPOINT. Below fov_v_ref, slowing beats aiming iff
+        #      lambda * r_fov^power > lambda_p * dt = 0.5 * 0.03 = 0.015. At exactly
+        #      lambda_fov = 0.015 that crossover lands on r_fov = 1 -- the cone boundary.
+        #      Inside the cone, fly as fast as you like; outside it, slowing starts to
+        #      pay. That is Falanga's "drive within your sensing range" (RAL 2019) falling
+        #      out of the arithmetic rather than being tuned in.
+        #   2. MAGNITUDE. 0.015 * 1.785 = 0.027/step removable against b4, inside the
+        #      0.025-0.085 band the other components occupy (r_bearing measured 0.0842,
+        #      r_progress 0.029, p_action_mag 0.025).
+        #   3. PRECEDENT. 5.3 points/episode total and 4.1 removable on b4's 25.9 return,
+        #      against p_blind's own sizing of "-5.2/episode untrained ... ~4.5 points of
+        #      headroom". Same regime, arrived at independently.
+        #
+        # Fine-tuning from p_blind rather than b4 needs ~0.03 for the same removable
+        # magnitude, since p_blind has already taken half the azimuth slack out.
+        "lambda_fov": float(os.environ.get("F450_LAMBDA_FOV", 0.0)),  # 0.0 = inert; 0.015 to enable
+        "fov_power": float(os.environ.get("F450_FOV_POWER", 2.0)),    # 4 = quartic
         "fov_v_ref": float(os.environ.get("F450_FOV_V_REF", 2.0)),    # m/s saturation
     }
 

@@ -169,9 +169,11 @@ def main():
     # which is what turns a target per-episode worth into a lambda.
     from config.task_config import F450NavTaskConfig as _cfg
     _rp = _cfg.reward_parameters
-    FOV_POWER = _rp.get("fov_power", 4.0)
-    FOV_R_CLIP = _rp.get("fov_r_clip", 2.0)
-    FOV_V_REF = _rp.get("fov_v_ref", 2.0)
+    FOV_POWER = float(_rp.get("fov_power", 2.0))
+    FOV_V_REF = float(_rp.get("fov_v_ref", 2.0))
+    R_FOV_MAX = math.sqrt(
+        (math.pi / _HALF_H_FOV) ** 2 + ((math.pi / 2) / _HALF_V_FOV) ** 2
+    )
     scale = {"term_sum": 0.0, "term_yawslaved_sum": 0.0, "steps": 0, "r_sum": 0.0,
              "r_hist": torch.zeros(40, device=dev)}  # r_fov in [0, 4) at 0.1 per bin
 
@@ -206,7 +208,7 @@ def main():
         )
         term_all = torch.clamp(
             torch.linalg.norm(v_all, dim=1), max=FOV_V_REF
-        ) * torch.clamp(r_all / FOV_R_CLIP, max=1.0).pow(FOV_POWER)
+        ) * r_all.pow(FOV_POWER)
         scale["term_sum"] += float(term_all.sum())
         # The FLOOR a perfectly yaw-aligned policy could reach: azimuth driven to zero,
         # elevation left as-is because no actuator aims a body-fixed camera in elevation.
@@ -214,7 +216,7 @@ def main():
         r_yawslaved = (theta_all / _HALF_V_FOV).abs()
         term_yawslaved = torch.clamp(
             torch.linalg.norm(v_all, dim=1), max=FOV_V_REF
-        ) * torch.clamp(r_yawslaved / FOV_R_CLIP, max=1.0).pow(FOV_POWER)
+        ) * r_yawslaved.pow(FOV_POWER)
         scale["term_yawslaved_sum"] += float(term_yawslaved.sum())
         scale["r_sum"] += float(r_all.sum())
         scale["steps"] += int(v_all.shape[0])
@@ -404,7 +406,7 @@ def main():
         "crash_rate": crash_rate,
         "p_fov_scale": {
             "fov_power": FOV_POWER,
-            "fov_r_clip": FOV_R_CLIP,
+            "r_fov_max": R_FOV_MAX,
             "fov_v_ref": FOV_V_REF,
             "steps_measured": scale["steps"],
             # Per-step value of the p_fov term at lambda_fov = 1. Multiply by the target
