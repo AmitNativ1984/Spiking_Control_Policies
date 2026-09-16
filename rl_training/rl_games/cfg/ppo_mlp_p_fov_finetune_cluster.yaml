@@ -16,9 +16,16 @@
 # current reward plus p_fov", not "b4 plus p_fov alone". Unavoidable given the lineage,
 # and the same confound the impact-speed experiment accepted.
 #
-# Submit with p_blind disabled and the checkpoint pinned:
+# MUST be submitted with CURRICULUM_LEVEL=30. Without it the sbatch leaves the
+# curriculum free, which starts at min_level = 0 -- so a fine-tune of a policy that
+# already reached level 30 would spend its whole budget re-climbing ground b4 covered,
+# and would never be measured at the density the comparison is about. The first attempt
+# at this arm (job 271581) was launched without it and had to be cancelled 31 minutes in.
+#
+# Submit with p_blind disabled, the checkpoint pinned, and the level pinned:
 #   sbatch --export=ALL,CONFIG_FILE=<this>,CHECKPOINT=runs/f450_nav_b4_combined/... \
-#     ,F450_LAMBDA_FOV=0.015,F450_LAMBDA_BLIND=0.0 slurm/train_navigation.sbatch
+#     ,CURRICULUM_LEVEL=30,F450_LAMBDA_FOV=0.015,F450_LAMBDA_BLIND=0.0 \
+#     slurm/train_navigation.sbatch
 #
 params:
   seed: 42
