@@ -284,6 +284,58 @@ class task_config:
         # points of headroom on an 11.4-point achievable return. Large enough to find,
         # not large enough to displace the task.
         "lambda_blind": float(os.environ.get("F450_LAMBDA_BLIND", 0.03)),
+
+        # --- p_fov: velocity pointed outside what the camera can actually see ---
+        # -lambda_fov * min(speed, fov_v_ref) * (r_fov/fov_r_clip)^fov_power,  bounded to [0, 1]
+        #
+        # p_blind measures misalignment from the NOSE AXIS and is horizontal-only. Both
+        # are wrong relative to the measured failure. Crash-cause eval of b4 and p_blind
+        # at level 30 (analysis/crash_cause_eval.py) found:
+        #   - 50.6% of crash velocities beyond the 43.5 deg horizontal half-FOV
+        #   - 34.3% beyond the 28.1 deg VERTICAL half-FOV, an axis p_blind cannot see
+        #   - ~55% of struck obstacles beyond the vertical half-angle
+        # so the quantity that predicts a crash is not "how far off the nose" but "how
+        # far outside the sensed cone", and the vertical cone is the tighter one.
+        #
+        # SHAPE. Each axis is normalized by ITS OWN half-angle, so the asymmetry of the
+        # 87 x 56 deg frustum is encoded in the penalty rather than hand-weighted:
+        #   r_fov = sqrt((psi/half_h)^2 + (theta/half_v)^2),  r_fov = 1 on the boundary
+        # The same absolute overshoot therefore costs ~1.5x more vertically (43.5/28.1),
+        # which is correct -- leaving the tighter cone strands you in a smaller sensed
+        # volume. This is the ellipse inscribed in the rectangular frustum, so it is
+        # slightly conservative at the image corners; that is the cheap side to err on.
+        #
+        # GROWTH is a power law in the distance from BORESIGHT, (r_fov/r_clip)^power,
+        # not a hinge at the cone edge. The cost rises the further out the velocity
+        # points, and the exponent supplies the deadzone near the centre by itself:
+        # at fov_power = 4 the cone edge (r = 1, r_clip = 2) costs 6.3% of maximum and
+        # half a cone width costs 0.4%, so ordinary in-cone manoeuvring is ~free while
+        # leaving the cone climbs steeply. This follows p_blind's own reasoning for going
+        # quartic -- a soft deadzone "with no hard corner for the policy to park against"
+        # -- and avoids the zero-gradient interior a hard hinge would leave, where the
+        # policy has nothing pushing it back toward the centre once inside.
+        # fov_power = 2.0 gives the gentler quadratic if the quartic proves too permissive
+        # near the axis.
+        #
+        # r_clip SATURATES at twice the cone width: beyond that you are comprehensively
+        # blind and further misalignment is not meaningfully worse. It also BOUNDS the
+        # term to [0, 1] like p_blind's misalignment, so lambda_fov reads directly as the
+        # worst-case per-step cost at fov_v_ref and can never dominate the loss the way an
+        # unbounded term could.
+        #
+        # SPEED is SATURATED, not raw. Speed belongs in the term (flying fast into unseen
+        # space is worse than drifting into it) but a raw multiplier lets the policy
+        # satisfy a larger lambda by SLOWING DOWN instead of by aiming -- which just
+        # rediscovers the v_max cap. Saturating keeps hover free and the risk gradient
+        # intact while making aim the only remaining lever above fov_v_ref.
+        #
+        # The half-angles are NOT duplicated here: the task derives them from the robot's
+        # live camera config at init, so widening the lens automatically widens the free
+        # region rather than silently leaving the penalty keyed to the old frustum.
+        "lambda_fov": float(os.environ.get("F450_LAMBDA_FOV", 0.0)),  # 0.0 = inert
+        "fov_power": float(os.environ.get("F450_FOV_POWER", 4.0)),    # 2 = quadratic
+        "fov_r_clip": float(os.environ.get("F450_FOV_R_CLIP", 2.0)),  # cone widths
+        "fov_v_ref": float(os.environ.get("F450_FOV_V_REF", 2.0)),    # m/s saturation
     }
 
 

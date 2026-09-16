@@ -18,8 +18,9 @@ import torch
 
 from task.attitude_navigation_task import NavigationWithObstaclesTask
 from config.task_config.f450_attitude_navigation_task_config import task_config
+from config.sensor_config.realsense_d435_cam_config import RealSenseD435CamConfig as CAM
 
-EMA_KEYS = ["r_progress", "p_speed", "p_jerk", "p_action_mag", "p_blind"]
+EMA_KEYS = ["r_progress", "p_speed", "p_jerk", "p_action_mag", "p_blind", "p_fov"]
 
 LAMBDA_BLIND = task_config.reward_parameters["lambda_blind"]
 
@@ -38,6 +39,11 @@ def _stub(**overrides):
     stub._reward_comp_ema = {k: 0.0 for k in EMA_KEYS}
     stub._action_scale = torch.tensor(
         [1.0, math.pi / 4, math.pi / 4, task_config.max_yaw_rate]
+    )
+    # p_fov geometry, derived from the same camera config the task reads at init.
+    stub._half_h_fov = math.radians(CAM.horizontal_fov_deg) / 2.0
+    stub._half_v_fov = math.atan(
+        math.tan(stub._half_h_fov) * (CAM.height / CAM.width)
     )
     return stub
 

@@ -262,6 +262,21 @@ class NavigationWithObstaclesTask(BaseTask):
         asset_manager.clearance = self.task_config.obstacle_spawn_clearance
         self.sim_env.asset_manager = asset_manager
 
+        # Camera half-angles for p_fov, derived from the robot's LIVE camera config so a
+        # change of lens moves the penalty's free region with it. Vertical FOV is not
+        # configured upstream -- it follows from the horizontal FOV and the pixel aspect
+        # ratio under the square-pixel assumption, the same one the renderer makes.
+        cam_cfg = robot_cfg.sensor_config.camera_config
+        self._half_h_fov = math.radians(cam_cfg.horizontal_fov_deg) / 2.0
+        self._half_v_fov = math.atan(
+            math.tan(self._half_h_fov) * (cam_cfg.height / cam_cfg.width)
+        )
+        logger.info(
+            f"p_fov half-angles: H={math.degrees(self._half_h_fov):.1f} deg, "
+            f"V={math.degrees(self._half_v_fov):.1f} deg, "
+            f"lambda_fov={self.task_config.reward_parameters['lambda_fov']}"
+        )
+
         # One throwaway physics step BEFORE the reset below, and it is load-bearing.
         #
         # This exists to absorb OUR OWN _setup_domain_randomization() call above, not to work
@@ -335,7 +350,7 @@ class NavigationWithObstaclesTask(BaseTask):
         # last step's values, so we use an EMA to smooth across steps.
         self._reward_comp_ema = {
             "r_progress": 0.0, "p_speed": 0.0, "p_jerk": 0.0,
-            "p_action_mag": 0.0, "p_blind": 0.0,
+            "p_action_mag": 0.0, "p_blind": 0.0, "p_fov": 0.0,
         }
         self._ema_alpha = 0.02  # smooth over ~50 steps
 
@@ -942,6 +957,7 @@ class NavigationWithObstaclesTask(BaseTask):
         self.infos["reward/p_jerk"] = self._reward_comp_ema["p_jerk"]
         self.infos["reward/p_action_mag"] = self._reward_comp_ema["p_action_mag"]
         self.infos["reward/p_blind"] = self._reward_comp_ema["p_blind"]
+        self.infos["reward/p_fov"] = self._reward_comp_ema["p_fov"]
 
         # Episode-end distance to target. Only refreshed on steps where something ended,
         # so the cached value carries between those steps.
@@ -1396,12 +1412,31 @@ class NavigationWithObstaclesTask(BaseTask):
         misalignment = 0.5 * (1.0 - v[:, 0] / (horizontal_speed + 1e-6))
         p_blind = -params["lambda_blind"] * horizontal_speed * misalignment.pow(2)
 
+        # 6. p_fov: velocity pointed outside the sensed cone. See the config for the
+        # measurements motivating the shape. Azimuth and elevation are each normalized
+        # by their OWN half-angle, so r_fov = 1 is the frustum boundary and the tighter
+        # vertical cone charges sooner -- the asymmetry is structural, not a weight.
+        # atan2(0, 0) = 0, so a hover sits at r_fov = 0 and pays nothing.
+        psi = torch.atan2(v[:, 1], v[:, 0])
+        theta = torch.atan2(v[:, 2], horizontal_speed + 1e-6)
+        r_fov = torch.sqrt(
+            (psi / self._half_h_fov).pow(2) + (theta / self._half_v_fov).pow(2)
+        )
+        # Power law in the distance from BORESIGHT, not a hinge at the edge: the cost
+        # rises the further out the velocity points, and the exponent supplies the soft
+        # deadzone near the centre without a hard corner for the policy to park against.
+        fov_excess = torch.clamp(r_fov / params["fov_r_clip"], max=1.0)
+        p_fov = -params["lambda_fov"] * torch.clamp(
+            speed, max=params["fov_v_ref"]
+        ) * fov_excess.pow(params["fov_power"])
+
         # Apply mask to zero out rewards for envs that had terminal events
         r_progress = r_progress[mask]
         p_speed = p_speed[mask]
         p_jerk = p_jerk[mask]
         p_action_mag = p_action_mag[mask]
         p_blind = p_blind[mask]
+        p_fov = p_fov[mask]
 
         # Update EMA for tensorboard reward component logging.
         # Guarded: when every env terminates on the same step the mask is empty, and
@@ -1415,5 +1450,6 @@ class NavigationWithObstaclesTask(BaseTask):
             self._reward_comp_ema["p_jerk"] += a * (float(p_jerk.mean()) - self._reward_comp_ema["p_jerk"])
             self._reward_comp_ema["p_action_mag"] += a * (float(p_action_mag.mean()) - self._reward_comp_ema["p_action_mag"])
             self._reward_comp_ema["p_blind"] += a * (float(p_blind.mean()) - self._reward_comp_ema["p_blind"])
+            self._reward_comp_ema["p_fov"] += a * (float(p_fov.mean()) - self._reward_comp_ema["p_fov"])
 
-        return r_progress + p_speed + p_jerk + p_action_mag + p_blind
+        return r_progress + p_speed + p_jerk + p_action_mag + p_blind + p_fov
