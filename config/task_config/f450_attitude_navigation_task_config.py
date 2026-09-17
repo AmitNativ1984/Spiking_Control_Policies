@@ -397,13 +397,26 @@ class task_config:
         # flat constant in the other -- the worst place to put a threshold, and a good
         # retrospective argument for having removed it.
         #
-        # OPEN QUESTION, recorded rather than resolved: b4's mean speed over all steps is
-        # 2.61 m/s but its MEDIAN SPEED AT IMPACT is 1.24 m/s, so crashes concentrate in
-        # the slow mode while v^2 weights the penalty ~10x harder in the fast one. That is
-        # defensible if fast blind cruise is what sets up the slow crash that follows, but
-        # it is an assumption, not a measurement. If p_fov underperforms, this is the first
-        # thing to test -- a v^1 multiplier would move the weight toward where crashes
-        # actually happen.
+        # WHY v^2 IS NOT REFUTED BY THE CRASH DISTRIBUTION. Measured on b4: crashes
+        # concentrate in the SLOW regime -- 42% of them below 1 m/s, which is only 17.6%
+        # of flight time, while the 4+ m/s band holds 21.8% of flight and just 1.4% of
+        # crashes. It is tempting to read that as v^2 loading its pressure where nothing
+        # is failing. That reading is wrong: the distribution is the OUTPUT of a policy
+        # that already reserves high speed for space it has established is clear, so the
+        # low crash count up there is evidence the speed/risk tradeoff is being managed,
+        # not that fast flight is harmless. Inferring hazard from the frequency of a
+        # behaviour the policy already optimises against is the same error as concluding
+        # high altitude is safe because few crashes happen there. What a reward term must
+        # price is the COUNTERFACTUAL -- what the policy would do without it -- and
+        # blind fast flight is genuinely worse, because achievable steering angle falls
+        # as ~1/v^2 at fixed sensing range (Falanga, RAL 2019): at speed you are
+        # committed. v^2 encodes that.
+        #
+        # The distribution does imply something narrower and worth keeping in view: the
+        # dominant current failure is clipping obstacles abeam while threading clutter at
+        # ~1 m/s, where v^2 = 1 and this term is small. So p_fov is mostly PREVENTIVE --
+        # it stops blind fast flight from emerging -- rather than corrective against the
+        # clipping that dominates today, and should not be expected to fix that mode.
         "lambda_fov": float(os.environ.get("F450_LAMBDA_FOV", 0.0)),  # 0.0 = inert; 0.0069 to enable
         "fov_power": float(os.environ.get("F450_FOV_POWER", 2.0)),    # 4 = quartic
     }
