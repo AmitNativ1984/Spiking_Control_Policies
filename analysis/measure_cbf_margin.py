@@ -2,9 +2,9 @@
 
 Rolls a checkpoint deterministically at a fixed curriculum level and records, per step:
 
-  - d_obstacle: the FULL-SPHERE exact distance to the nearest surface, read through the
-    task's own _clearance() so this measures precisely what the reward measures -- not a
-    depth-image proxy. The percentiles of this are what d_safe has to fit inside.
+  - d_obstacle: the full-sphere distance to the nearest surface, read through the task's
+    own _clearance() so this measures precisely what the reward measures, ray-cast bias and
+    all -- not a depth-image proxy. Its percentiles are what d_safe has to fit inside.
   - the height above the env floor, and how often the FLOOR is the nearest surface. The
     probe includes the floor, so a d_safe larger than the cruise altitude would turn
     p_cbf partly into an altitude tax. This says whether that is happening.
@@ -28,8 +28,8 @@ RESET LEAKAGE CHECK. DF is 1-Lipschitz in position, so |v_close| can never excee
 drone's speed. A teleport that leaked into the pairing would show up as a v_close of tens
 of m/s and nothing else can produce one, so the script asserts it and reports the margin.
 
-REQUIRES a validated probe. Run analysis/validate_proximity_probe.py first: if the mesh
-query is wrong, every number here is wrong in the same direction and nothing says so.
+REQUIRES a validated probe. Run analysis/validate_ray_probe.py first (both phases): if
+the probe is wrong, every number here is wrong in the same direction and nothing says so.
 
 usage: python analysis/measure_cbf_margin.py <checkpoint.pth> <level> <out.json> \
            [--num_envs 256] [--num_steps 4000] [--target 0.0255]
@@ -169,10 +169,15 @@ def main():
     # --- reset leakage: DF is 1-Lipschitz, so |v_close| <= speed, always ---------------
     mv, ms = float(max_vclose), float(max_speed)
     print(f"\nmax |v_close| {mv:.2f} m/s vs max speed {ms:.2f} m/s")
-    assert mv <= ms * 1.05 + 0.5, (
-        f"max |v_close| {mv:.2f} m/s exceeds the max speed {ms:.2f} m/s: DF is "
-        f"1-Lipschitz in position, so this can only be a teleport leaking across a reset "
-        f"into the pairing. The barrier would read it as an enormous closing speed."
+    # Tolerance, not equality: speed is sampled once per step while the displacement
+    # integrates over it, and this script pairs across steps using the NOMINAL dt (the task
+    # itself uses the true per-step count -- see _cbf_step_dt), so a step that ran 4
+    # substeads instead of 3 inflates v_close here by up to 4/3. Anything far beyond that
+    # is a teleport leaking across a reset, which is what this is really watching for.
+    assert mv <= ms * (4.0 / 3.0) * 1.1 + 0.5, (
+        f"max |v_close| {mv:.2f} m/s exceeds the max speed {ms:.2f} m/s by more than the "
+        f"substep-jitter bound: DF is 1-Lipschitz in position, so the excess can only be "
+        f"a teleport leaking across a reset into the pairing."
     )
 
     qs = [0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90]

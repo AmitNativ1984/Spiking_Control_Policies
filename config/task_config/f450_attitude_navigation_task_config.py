@@ -452,9 +452,21 @@ class task_config:
         # the barrier does not ask for a slower approach, it demands clearance be REGAINED
         # at alpha*|h| -- retreat -- which is not achievable while traversing clutter at
         # this density. The term would stop being a closing-speed signal and become a
-        # near-constant tax competing with r_progress. 1.0 m is the largest value this env
-        # actually affords: still 2.9x the ~0.35 m collision radius, with ~17% of steps
-        # inside the bubble rather than ~45%.
+        # near-constant tax competing with r_progress.
+        #
+        # SINCE MEASURED DIRECTLY, and the in-FOV figures above were optimistic by ~0.46 m
+        # exactly as expected. The probe's own full-sphere distribution on the p_fov
+        # baseline at level 30 (analysis/data/cbf_margin_p_fov_l30.json) is
+        #   p1 0.40 | p5 0.60 | p10 0.65 | p25 0.85 | p50 1.10 | p75 1.40 | p90 1.65 m
+        # so d_safe = 1.0 sits just below the MEDIAN clearance: h < 0 on ~40% of steps, and
+        # the barrier is violated on 51.0% of them. That is tight but not degenerate --
+        # half the steps are still compliant, so the gradient has structure. d_safe = 0.70
+        # is what this distribution would argue for on its own (~13% of steps inside,
+        # 41.6% violation); it is one env var away (F450_D_SAFE) if 1.0 proves too hot.
+        #
+        # The altitude-tax worry did NOT materialise: the floor is the nearest surface on
+        # only 0.1% of steps (median height above floor 2.25 m), so including it in the
+        # probe costs nothing in practice.
         #
         # Second reason to stay at or below 1.0 m: targets are sampled 0.8 m off a side
         # wall (target_wall_inset) with a 0.4 m arrival ball, and those walls are cullable
@@ -487,16 +499,32 @@ class task_config:
         # substep count cannot silently rescale the term.
         #
         # SIZING RULE, the same one used for lambda_fov: pick the mean per-step penalty
-        # to sit near r_progress's ~0.029/step -- loud enough to attend to, not loud
-        # enough to displace the task. lambda_cbf = 0.029 / mean(max(0, v_close - alpha*h))
-        # measured over every step, which is what analysis/measure_cbf_margin.py reports.
-        # UNMEASURED until that script has run against the validated probe; the value
-        # below is a placeholder to be replaced by the measurement, not a sized weight.
-        # *** CANNOT BE ENABLED YET. *** Setting this non-zero builds ProximityProbe,
-        # whose mesh_query_point_no_sign faults with CUDA error 700 on this env's
-        # populated warp meshes under Warp 1.0.0 -- at every radius tried, at every
-        # curriculum level above 0. See env_manager/proximity_probe.py for the evidence.
-        # The arithmetic below is implemented and unit-tested; only d_obstacle is missing.
+        # to sit near r_progress's, which the p_fov baseline measures at 0.0255/step --
+        # loud enough to attend to, not loud enough to displace the task. So
+        # lambda_cbf = 0.0255 / mean(max(0, v_close - alpha*h)).
+        #
+        # MEASURED on the p_fov baseline at level 30, 1500 steps x 256 envs, 381,798 paired
+        # steps (analysis/data/cbf_margin_p_fov_l30.json):
+        #     d_safe  alpha   violation   mean excess   lambda_cbf
+        #       0.70   0.50       41.6%      0.303 m/s      0.0843
+        #       0.70   4.00       19.8%      0.156          0.1637
+        #       1.00   0.50       51.0%      0.372          0.0686   <-- shipped pair
+        #       1.00   4.00       45.5%      0.544          0.0468
+        #       1.25   0.50       58.6%      0.440          0.0579
+        #       1.50   0.50       65.7%      0.518          0.0492
+        # => 0.0686 at the shipped (d_safe 1.0, alpha 0.5).
+        #
+        # NOTE THE NON-MONOTONICITY at d_safe >= 1.0: raising alpha there does NOT reduce
+        # the violation rate, it inflates the mean excess (0.372 -> 0.891 m/s from alpha
+        # 0.5 to 8.0). That is the h < 0 regime showing itself -- below d_safe the
+        # allowance alpha*h is NEGATIVE, so a larger alpha demands a faster retreat and
+        # violations get bigger, not rarer. At d_safe = 0.70, where h < 0 is uncommon,
+        # alpha behaves as intended and does cut the rate (41.6% -> 15.8%).
+        # Non-zero builds RaySphereProbe, which costs a measured 19.3 ms/step at 128
+        # envs x 16384 rays -- rays here are maximally incoherent, so this is far more than
+        # the same count of camera rays would suggest. Budget it: F450_CBF_RAYS trades
+        # accuracy for that time, linearly. (The exact closest-point query this replaces
+        # faults outright under Warp 1.0.0; see env_manager/proximity_probe.py.)
         "lambda_cbf": float(os.environ.get("F450_LAMBDA_CBF", 0.0)),  # 0.0 = inert
         #
         # Probe range. The query cost grows with it, and it need only exceed the largest
@@ -505,6 +533,31 @@ class task_config:
         # env whose previous h sat at this limit is exempt from the penalty anyway (see
         # the task), since a truncated DF understates the allowed closing speed.
         "cbf_max_range": float(os.environ.get("F450_CBF_MAX_RANGE", 6.0)),  # m
+        #
+        # --- cbf_rays: how many directions the clearance sphere samples ----------------
+        # DF is measured by ray casting, not by an exact closest-point query -- not by
+        # choice: Warp 1.0.0's mesh_query_point faults on this env's 73k-triangle meshes at
+        # every curriculum level above 0. Ray queries over the same meshes are fine (the
+        # depth camera casts 320x180 = 57,600 of them per env per step).
+        #
+        # THE RAY COUNT IS SET BY THIN GEOMETRY, NOT BY SURFACES. A large surface is read
+        # almost exactly: a ray missing the true nearest point by angle a gives d/cos(a),
+        # an overestimate of ~d*a^2/2, which is 1.5 mm at 2 m even at 2048 rays. What the
+        # count buys is detection of THIN things -- a cylinder of radius r at distance d is
+        # only caught if a ray passes within its angular radius r/d. With n directions the
+        # spacing is ~sqrt(4*pi/n):
+        #      2048 -> 4.5 deg -> catches r >= 7.8 cm at 2 m   (3.6% of camera ray cost)
+        #      8192 -> 2.2 deg -> catches r >= 3.9 cm at 2 m   (14%)
+        #     16384 -> 1.6 deg -> catches r >= 2.8 cm at 2 m   (28%)
+        #     32768 -> 1.1 deg -> catches r >= 2.0 cm at 2 m   (57%)
+        # 16384 is the default because tree branches -- 26 per tree, and the geometry that
+        # argued for an exact query in the first place -- sit in the few-centimetre range.
+        #
+        # THE ERROR IS SIGNED THE UNSAFE WAY: a missed feature makes clearance read LARGER
+        # than it is, and the barrier then permits a higher closing speed than it should.
+        # That is the reason to spend rays here rather than economise. Raise via
+        # F450_CBF_RAYS; the init log prints the spacing and the feature size it resolves.
+        "cbf_rays": int(os.environ.get("F450_CBF_RAYS", 16384)),
     }
 
 

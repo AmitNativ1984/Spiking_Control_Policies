@@ -7,8 +7,8 @@ is identical between the two stubs that get differenced, so it cancels.
 
 The probe itself is stubbed out: _clearance() is the seam. These tests are about the
 barrier arithmetic and can run anywhere; whether the probe returns the true distance to
-the nearest surface is a different question, answered by
-analysis/validate_proximity_probe.py against the depth image and the altitude.
+the nearest surface is a different question, answered by analysis/validate_ray_probe.py
+against the exact query at level 0 and against the rendered depth image at level 30.
 
 The property that motivates the term is test_the_allowance_scales_with_clearance: the
 same closing speed is free with room to spare and expensive without it. No other term in
@@ -63,6 +63,13 @@ def _stub(h_prev, h_next, lam=LAMBDA_CBF, alpha=ALPHA, dt=DT, max_range=MAX_RANG
     stub._env_step_dt = dt
     stub._cbf_d_ema = 0.0
     stub._cbf_viol_ema = 0.0
+    # The REAL _cbf_step_dt is bound to the stub rather than replaced, so its fallback
+    # branch is exercised rather than mocked away. With no IMU accumulator it returns
+    # _env_step_dt, which is how these tests control dt. The true-per-step-count branch
+    # needs a live sim; what it changes is only which dt reaches the same arithmetic, and
+    # test_the_rate_form_is_dt_independent pins that arithmetic.
+    stub._imu_gyro_accum = None
+    stub._cbf_step_dt = lambda: NavigationWithObstaclesTask._cbf_step_dt(stub)
     stub.prev_h = torch.as_tensor(h_prev, dtype=torch.float32).reshape(-1)
     h_n = torch.as_tensor(h_next, dtype=torch.float32).reshape(-1)
     stub._clearance = lambda: h_n

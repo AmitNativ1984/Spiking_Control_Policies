@@ -28,36 +28,53 @@
 #
 # --- BLOCKING PREREQUISITES. Do not submit before both are done. ---------------------
 #
-#   1. *** BLOCKED. THE PROBE DOES NOT WORK. *** ProximityProbe's
-#      mesh_query_point_no_sign faults with CUDA error 700 on this env's populated warp
-#      meshes -- at every search radius tried (1.5 / 2.0 / 2.5 m), at levels 15 and 30,
-#      immediately at the first launch. Level 0, which has only the floor and walls, is
-#      the sole configuration that survives. The kernel is correct (it point-queries a
-#      mesh built in-script exactly); the limit is Warp 1.0.0's fixed-size closest-point
-#      traversal stack against 73,220 triangles per env. Full evidence and the ruled-out
-#      hypotheses are in env_manager/proximity_probe.py's module docstring.
+#   1. DONE -- python analysis/validate_ray_probe.py --phase exact, then --phase field
+#      d_obstacle comes from RaySphereProbe (16,384 ray casts over a sphere), NOT from the
+#      exact closest-point query: that query faults with CUDA error 700 on these
+#      73k-triangle meshes at every curriculum level above 0 and at every search radius,
+#      under Warp 1.0.0. Ray queries over the same meshes are fine, which is why the depth
+#      camera works. Validation, measured: error +0.0001 m against the exact query at
+#      level 0 (the one level it survives), never negative; no faults over 100 steps x 128
+#      envs at level 30; 19.3 ms/step at 128 envs.
 #
-#      Until d_obstacle comes from somewhere that works -- a ray-sphere probe, a
-#      depth-image reduction, or a newer Warp in the container image -- p_cbf cannot be
-#      enabled, and F450_LAMBDA_CBF MUST stay 0.0. The reward arithmetic itself is
-#      implemented and unit-tested (tests/test_reward_cbf.py, 21 tests); only the
-#      distance source is missing.
+#      KNOWN BIAS, and it is signed the unsafe way: 27% of samples read more than 0.10 m
+#      ABOVE the depth image's minimum (p99 +0.56 m), because the image is ~33x denser per
+#      steradian inside its cone than a 16,384-ray sphere is anywhere. Clearance therefore
+#      reads optimistic by order 0.1-0.3 m near thin geometry, which permits slightly more
+#      closing speed than it should. Tolerable for a shaping term on top of an already
+#      conservative alpha; NOT tolerable if p_cbf is ever promoted to a hard filter.
 #
-#   2. python analysis/measure_cbf_margin.py \
+#   2. DONE -- analysis/measure_cbf_margin.py on this very checkpoint, 1500 steps x 256
+#      envs, 381,798 paired steps (analysis/data/cbf_margin_p_fov_l30.json). At the shipped
+#      d_safe = 1.0 / alpha = 0.5 the mean excess closing speed is 0.372 m/s, so the
+#      0.0255/step target (r_progress on this baseline) gives
+#          F450_LAMBDA_CBF = 0.0255 / 0.372 = 0.0686
+#      the same sizing rule lambda_fov was set by. Superseded lines follow, kept as the
+#      command that produced it:
+#      python analysis/measure_cbf_margin.py \
 #        runs/f450_nav_p_fov/2026-09-16_19-45-47/nn/last_f450_nav_p_fov_ep_2000_rew_11.048738.pth \
 #        30 analysis/data/cbf_margin_p_fov_l30.json
-#      F450_LAMBDA_CBF below is UNSIZED -- there is no measurement of the mean excess
-#      closing speed yet, so any weight would be a guess. Take lambda from that script's
-#      table at d_safe=1.0, alpha=0.5, target 0.0255/step (r_progress on this baseline),
-#      which is the same sizing rule lambda_fov was set by.
+#
+#      EXPECT A 51% VIOLATION RATE from step one: at alpha = 0.5 the barrier is violated on
+#      just over half of all steps. Tight, as chosen, but not degenerate -- the other 49%
+#      are compliant, so the gradient still has structure. The measured full-sphere
+#      clearance distribution is p25 0.85 / p50 1.10 / p75 1.40 m, so d_safe = 1.0 sits just
+#      under the MEDIAN and h < 0 on roughly 40% of steps. If that proves too hot,
+#      F450_D_SAFE=0.7 (13% of steps inside, 41.6% violation) and a larger F450_ALPHA_CBF
+#      are each one env var away. Watch metrics/cbf_violation_rate.
 #
 # Submit (lambda_cbf from step 2; p_fov held at the base run's weight, p_blind off):
 #   sbatch --export=ALL,CONFIG_FILE=rl_training/rl_games/cfg/ppo_mlp_p_cbf_finetune_cluster.yaml \
 #     ,CHECKPOINT=runs/f450_nav_p_fov/2026-09-16_19-45-47/nn/last_f450_nav_p_fov_ep_2000_rew_11.048738.pth \
 #     ,EXPERIMENT=f450_nav_p_cbf_ft,CURRICULUM_LEVEL=30 \
 #     ,F450_LAMBDA_FOV=0.015,F450_LAMBDA_BLIND=0.0 \
-#     ,F450_LAMBDA_CBF=<sized>,F450_D_SAFE=1.0,F450_ALPHA_CBF=0.5 \
+#     ,F450_LAMBDA_CBF=0.0686,F450_D_SAFE=1.0,F450_ALPHA_CBF=0.5 \
 #     slurm/train_navigation.sbatch
+#
+# COST. The clearance probe casts 16,384 rays per env per step, measured at 19.3 ms/step at
+# 128 envs, so roughly 154 ms/step at this config's 1024 actors -- about +20 s on a ~56 s
+# epoch, i.e. expect ~21 h for the 1000 epochs rather than ~16 h. F450_CBF_RAYS trades that
+# back linearly, against the thin-geometry detection limit (see the task config).
 #
 # --- WHAT TO WATCH ---------------------------------------------------------------------
 # metrics/cbf_violation_rate FIRST. alpha = 0.5 /s permits only alpha*h of closing speed:

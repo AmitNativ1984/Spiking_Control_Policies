@@ -25,7 +25,7 @@ from aerial_gym.utils.logging import CustomLogger
 from aerial_gym.registry.robot_registry import robot_registry
 
 from env_manager.poisson_asset_manager import PoissonAssetManager
-from env_manager.proximity_probe import ProximityProbe, find_mesh_ids
+from env_manager.proximity_probe import RaySphereProbe, find_mesh_ids
 from env_manager import warp_bvh_patch
 from env_manager import asset_placement_patch
 from env_manager import warp_bvh_rebuild_patch
@@ -280,18 +280,27 @@ class NavigationWithObstaclesTask(BaseTask):
 
         # --- p_cbf: discrete-time control barrier function on obstacle clearance ---
         #
-        # h(x) = DF(p) - d_safe, where DF is the EXACT distance to the nearest point on
-        # any triangle in the env's warp mesh -- obstacles, side walls and the floor
-        # alike (env_manager/proximity_probe.py). NOT a depth-image reduction: the probe
-        # is a full sphere, so it sees the geometry abeam and behind the drone that the
-        # camera cannot, which is where the measured crash geometry actually sits
-        # (median 91 deg off the direction of travel, 51% already past). A reward may
-        # read privileged state; only the OBSERVATION has to be sensor-realisable, and
-        # p_cbf adds nothing to the observation.
+        # h(x) = DF(p) - d_safe, where DF is the distance to the nearest surface in ANY
+        # direction, measured against the env's warp mesh -- obstacles, side walls and the
+        # floor alike (env_manager/proximity_probe.py). NOT a depth-image reduction: the
+        # probe is a full sphere, so it sees the geometry abeam and behind the drone that
+        # the camera cannot, which is where the measured crash geometry actually sits
+        # (median 91 deg off the direction of travel, 51% already past). A reward may read
+        # privileged state; only the OBSERVATION has to be sensor-realisable, and p_cbf
+        # adds nothing to the observation.
         #
-        # The probe is built ONLY when the term is live: it costs one extra warp kernel
-        # launch per step, and no other training arm should pay for a reward it does not
-        # use.
+        # RAY-CAST, NOT AN EXACT CLOSEST-POINT QUERY, and not by choice: Warp 1.0.0's
+        # mesh_query_point faults on these 73k-triangle meshes at every curriculum level
+        # above 0 (the evidence is in the probe module's docstring). Ray queries over the
+        # same meshes are fine, which is why the depth camera works. The cost is that
+        # geometry thinner than the ray spacing can be missed, and a miss can only
+        # OVER-estimate clearance, which lets the barrier permit a higher closing speed
+        # than it should -- so cbf_rays is sized against the thin-branch case, not against
+        # walls. See the config.
+        #
+        # The probe is built ONLY when the term is live: it allocates the ray table and
+        # costs one extra warp launch per step, and no other training arm should pay for a
+        # reward it does not use.
         rparams = self.task_config.reward_parameters
         self._cbf_lambda = rparams["lambda_cbf"]
         self._cbf_active = self._cbf_lambda != 0.0
@@ -312,8 +321,11 @@ class NavigationWithObstaclesTask(BaseTask):
                 f"discrete barrier is well-posed only inside it "
                 f"(alpha <= {1.0 / self._env_step_dt:.1f} /s)."
             )
-            self._proximity_probe = ProximityProbe(
-                self.sim_env.num_envs, self.device, max_dist=rparams["cbf_max_range"]
+            self._proximity_probe = RaySphereProbe(
+                self.sim_env.num_envs,
+                self.device,
+                max_dist=rparams["cbf_max_range"],
+                num_rays=int(rparams["cbf_rays"]),
             )
             self._cbf_mesh_ids = find_mesh_ids(self.sim_env)
             if self._cbf_mesh_ids is None:
@@ -324,8 +336,8 @@ class NavigationWithObstaclesTask(BaseTask):
                 # nothing at all.
                 raise RuntimeError(
                     "lambda_cbf != 0 but the warp mesh ids could not be found: "
-                    "ProximityProbe would report max_range for every env and p_cbf "
-                    "would be silently inert. Is use_warp=True and the sim built?"
+                    "the probe would report max_range for every env and p_cbf would be "
+                    "silently inert. Is use_warp=True and the sim built?"
                 )
             # What the barrier actually permits, so the run's own log states it rather
             # than leaving it to be recovered from alpha and d_safe after the fact.
@@ -333,11 +345,16 @@ class NavigationWithObstaclesTask(BaseTask):
                 f"{d:.1f}->{rparams['alpha_cbf'] * (d - rparams['d_safe']):.2f}"
                 for d in (rparams["d_safe"], 1.5, 2.0, 3.0)
             )
+            # Ray spacing, and the thinnest feature it can still catch at 2 m: the
+            # number that decides whether a tree branch is measured or missed.
+            spacing = math.degrees(math.sqrt(4.0 * math.pi / float(rparams["cbf_rays"])))
+            r_min = 2.0 * math.radians(spacing) / 2.0
             logger.info(
                 f"p_cbf: d_safe={rparams['d_safe']} m, alpha={rparams['alpha_cbf']} /s "
                 f"(alpha*dt={alpha_dt:.3f}), lambda_cbf={self._cbf_lambda}, "
-                f"range={rparams['cbf_max_range']} m. Allowed closing speed "
-                f"[clearance m -> m/s]: {allowed}"
+                f"range={rparams['cbf_max_range']} m, rays={int(rparams['cbf_rays'])} "
+                f"({spacing:.2f} deg spacing, catches r>={r_min:.3f} m at 2 m). "
+                f"Allowed closing speed [clearance m -> m/s]: {allowed}"
             )
 
         # One throwaway physics step BEFORE the reset below, and it is load-bearing.
@@ -618,6 +635,9 @@ class NavigationWithObstaclesTask(BaseTask):
         self._env_step_dt = (
             self.obs_dict["dt"] * self.sim_env.cfg.env.num_physics_steps_per_env_step_mean
         )
+        # The single-substep dt, kept so p_cbf can reconstruct the TRUE length of each env
+        # step rather than assume the mean -- see _cbf_step_dt().
+        self._sim_dt = float(self.obs_dict["dt"])
 
         n = self.sim_env.num_envs
         self._est_pos_bias = torch.zeros((n, 3), device=self.device, requires_grad=False)
@@ -1090,13 +1110,45 @@ class NavigationWithObstaclesTask(BaseTask):
             self.infos,
         )
 
+    def _cbf_step_dt(self):
+        """The ACTUAL length of the env step just simulated, per env, in seconds.
+
+        num_physics_steps_per_env_step is a Gaussian draw (mean 3, std 1), so an env step
+        is really 2-4 physics steps: 0.02-0.04 s against a nominal 0.03. p_cbf divides a
+        change in clearance by this to get a closing speed, so using the mean would put a
+        +/-33% error straight into the dominant term of the barrier -- and it is not
+        zero-mean noise on the penalty, because max(0, .) rectifies it.
+
+        self._imu_substep_count is exactly the count needed and is already maintained: the
+        IMU accumulator increments it once per physics substep (see
+        _install_imu_substep_accumulator), and _consume_imu_gyro does not zero it until
+        get_return_tuple(), which runs AFTER the reward. So at reward time it holds the
+        number of substeps this step actually ran.
+
+        Falls back to the nominal dt where the count is 0, which happens for real rather
+        than defensively: the Gaussian draw can legitimately be zero, and envs that reset
+        this step were zeroed by reset_idx. A zero-length step cannot yield a closing
+        speed, and those envs are excluded from the penalty anyway (they terminated).
+        """
+        if self._imu_gyro_accum is None:
+            # enable_imu = False: no per-substep hook exists, so the mean is all there is.
+            return self._env_step_dt
+        n = self._imu_substep_count
+        return torch.where(
+            n > 0, n * self._sim_dt, torch.full_like(n, self._env_step_dt)
+        )
+
     def _clearance(self):
         """h(x) = DF(p) - d_safe for every env, at the CURRENT robot position.
 
-        Single source of truth for the barrier function. DF is the exact distance to the
-        nearest point on any triangle in the env's warp mesh -- obstacles, side walls
-        and the floor alike -- so DF = min(altitude, nearest obstacle), and over clear
-        ground it simply reports the height above the floor. h >= 0 is the safe set.
+        Single source of truth for the barrier function. DF is the distance to the nearest
+        surface in any direction -- obstacles, side walls and the floor alike -- so
+        DF = min(altitude, nearest obstacle), and over clear ground it simply reports the
+        height above the floor. h >= 0 is the safe set.
+
+        Measured by a sphere of ray casts (RaySphereProbe), because the exact closest-point
+        query faults under this Warp version. It can over-estimate when geometry is thinner
+        than the ray spacing, never under-estimate.
 
         FULL 3D GEOMETRY, NOT THE DEPTH IMAGE. The probe is a sphere; the camera is an
         87 x 56 deg cone. The difference is the point: minimum clearance during a pass
@@ -1591,6 +1643,10 @@ class NavigationWithObstaclesTask(BaseTask):
         #     h(x_{t+1}) >= (1 - alpha*dt) * h(x_t)
         # p_cbf charges for the shortfall, written in RATE form so that it reads in m/s:
         #     v_close = (h_t - h_{t+1}) / dt   closing speed on the nearest surface
+        # dt is the step's TRUE length, not the nominal 0.03 s: the substep count is a
+        # Gaussian draw, so an env step is really 0.02-0.04 s, and dividing by the mean
+        # would inject +/-33% into the dominant term -- which max(0, .) then rectifies into
+        # a bias rather than averaging out. See _cbf_step_dt().
         #     v_allow = alpha * h_t            what the barrier permits at THIS clearance
         #     p_cbf   = -lambda_cbf * max(0, v_close - v_allow)
         # Algebraically identical to -lambda * max(0, (1-alpha*dt)*h_t - h_{t+1}) with
@@ -1615,7 +1671,7 @@ class NavigationWithObstaclesTask(BaseTask):
         # bounds the penalty, and the magnitude needs no clamp of its own.
         if self._cbf_active:
             h_next = self._clearance()
-            v_close = (self.prev_h - h_next) / self._env_step_dt
+            v_close = (self.prev_h - h_next) / self._cbf_step_dt()
             v_allow = params["alpha_cbf"] * self.prev_h
             # Envs whose PREVIOUS clearance sat at the probe's range limit are exempt.
             # The probe reports max_range when it found nothing inside it, which
