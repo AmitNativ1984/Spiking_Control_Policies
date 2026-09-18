@@ -85,6 +85,58 @@
 # value; sizing alpha ~ v_cruise / h_typical would give 2-6 /s instead. Sweep with
 # F450_ALPHA_CBF, no file edit needed.
 #
+# --- ARM 2: f450_nav_p_cbf_ft_hot -- a reachable barrier, weighted to DOMINATE ---------
+#
+# Same base checkpoint, same hyperparameters, three constants changed:
+#   sbatch --export=ALL,CONFIG_FILE=<this>,CHECKPOINT=<the same p_fov ep_2000> \
+#     ,EXPERIMENT=f450_nav_p_cbf_ft_hot,CURRICULUM_LEVEL=30 \
+#     ,F450_LAMBDA_FOV=0.015,F450_LAMBDA_BLIND=0.0 \
+#     ,F450_LAMBDA_CBF=0.5,F450_D_SAFE=0.7,F450_ALPHA_CBF=4.0 \
+#     slurm/train_navigation.sbatch
+#
+# WHY d_safe 0.7 / alpha 4.0. Arm 1's (1.0, 0.5) is not reachable: at the measured median
+# clearance of 1.10 m it leaves h = 0.10 and an allowance of alpha*h = 0.05 m/s against a
+# 2.4 m/s cruise, and earning a 2 m/s allowance would need 5 m of clearance, which does not
+# exist at level 30 (p90 is 1.65 m). It also sits below the median, so h < 0 on ~40% of
+# steps -- the regime where the barrier demands RETREAT and where a larger alpha makes the
+# violation worse, not rarer (mean excess 0.372 -> 0.891 m/s from alpha 0.5 to 8.0).
+# (0.7, 4.0) inverts all of that: the baseline policy is already compliant on 80.2% of
+# steps, and the allowance is 3.20 m/s at 1.5 m of clearance and 5.20 m/s at 2.0 m, so
+# ordinary cruise is compliant and the term binds on the risky minority.
+#
+# WHY lambda 0.5, from the reward budget rather than from taste. The design goal is that
+# the policy must not prefer to make progress in a direction that violates the barrier; if
+# it genuinely cannot move safely, a timeout is the acceptable outcome. At level 30 the
+# terminal rewards are arrive +15 (progress fraction is 30/30 = 1.0), collision -10,
+# timeout -2, and every non-p_cbf dense term very nearly cancels (+0.0255 r_progress
+# -0.0128 p_fov -0.0026 p_jerk -0.0110 p_action_mag -0.0002 p_speed = -0.001/step), so an
+# episode's return is essentially its terminal reward plus the p_cbf integral. With the
+# measured mean excess Ebar = 0.2295 m/s and N ~ 175 steps:
+#
+#     compliant flight -> arrive   +15            (lambda-INDEPENDENT: p_cbf is exactly 0
+#                                                  when v_close <= alpha*h)
+#     violating flight -> arrive   15 - lambda*Ebar*N
+#     hover -> timeout              -2
+#     crash                        -10
+#
+#   violating progress must lose to a timeout:  15 - lambda*Ebar*N < -2  ->  lambda > 0.42
+#   arriving must still beat crashing, or the
+#   cheapest way to stop the penalty accruing
+#   is to hit something early:                  15 - lambda*Ebar*N > -10 ->  lambda < 0.58
+#
+# => lambda in [0.42, 0.58]; 0.5 is the midpoint. That yields +15 / -2 / -5.1 / -10 for the
+# four outcomes, i.e. compliant progress best, timeout preferred over violating progress,
+# crashing still worst. Per step it is 0.115, about 4.5x r_progress -- dominant over
+# progress, with the ceiling set by the crash ordering rather than by preference.
+#
+# x10 (lambda 1.111) was launched and CANCELLED (job 271785) for exactly that ceiling:
+# it gives violating-arrive = -29.7, twenty points WORSE than crashing instantly, so every
+# exploratory step toward the goal would be punished harder than a collision.
+#
+# Ebar is measured on the UN-ADAPTED baseline, so these are worst-case-at-launch numbers.
+# As the policy learns to comply, Ebar falls, the integral shrinks, and violating-arrive
+# drifts back above the timeout line -- which is the signal that it worked.
+#
 # metrics/d_obstacle says whether the policy is buying clearance or merely slowing down.
 # Watch the mean altitude too: the floor is in the probe's mesh and top_wall is off, so
 # climbing buys clearance for free and pinning to the upper bound would be the term being
