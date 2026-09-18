@@ -1,0 +1,878 @@
+<title>Crash Heading Atlas</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #10131a;
+    --surface: #171c24;
+    --surface-2: #1d232c;
+    --border: #2a313c;
+    --text: #e7ebf1;
+    --text-dim: #98a1b0;
+    --text-faint: #5c6675;
+    --b4: #12a6ac;
+    --pblind: #df6a20;
+    --pfov: #8168d8;
+    --good: #12a6ac;
+    --bad: #df6a20;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body { background: var(--bg); color: var(--text); }
+
+  body {
+    margin: 0;
+    font-family: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+    font-size: 15px;
+    line-height: 1.6;
+    padding-inline: 20px;
+    padding-block: max(28px, env(safe-area-inset-top, 0px)) max(48px, env(safe-area-inset-bottom, 0px));
+  }
+
+  .page { max-width: 880px; margin: 0 auto; }
+
+  .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; }
+  .tnum { font-variant-numeric: tabular-nums; }
+
+  header {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding-bottom: 28px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 28px;
+  }
+
+  .eyebrow {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 11.5px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--pfov);
+  }
+
+  h1 {
+    font-family: "IBM Plex Mono", monospace;
+    font-weight: 700;
+    font-size: clamp(28px, 5vw, 40px);
+    line-height: 1.08;
+    margin: 0;
+    text-wrap: balance;
+    letter-spacing: -0.01em;
+  }
+
+  .dek { color: var(--text-dim); max-width: 64ch; font-size: 15.5px; }
+  .dek a { color: var(--b4); }
+  .dek strong { color: var(--text); font-weight: 600; }
+
+  .runstrip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 18px;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 12px;
+    color: var(--text-faint);
+    margin-top: 4px;
+  }
+  .runstrip b { color: var(--text-dim); font-weight: 500; }
+
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 44px;
+  }
+  @media (max-width: 640px) { .tiles { grid-template-columns: repeat(2, 1fr); } }
+
+  .tile {
+    background: var(--surface);
+    padding: 18px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .tile .label {
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+  }
+  .tile .value {
+    font-family: "IBM Plex Mono", monospace;
+    font-weight: 700;
+    font-size: 27px;
+    color: var(--text);
+  }
+  .tile .value small { font-size: 14px; color: var(--text-dim); font-weight: 500; }
+  .tile .sub { font-size: 12px; color: var(--text-dim); }
+  .tile .delta { font-size: 11.5px; font-family: "IBM Plex Mono", monospace; margin-top: 2px; }
+  .tile .delta.up { color: var(--bad); }
+  .tile .delta.down { color: var(--good); }
+  .tile .delta.flat { color: var(--text-faint); }
+  .tile.win .value { color: var(--pfov); }
+
+  section { margin-bottom: 54px; }
+
+  .sec-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px; }
+  .sec-num {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 13px;
+    color: var(--text-faint);
+    letter-spacing: 0.04em;
+  }
+  h2 {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 19px;
+    font-weight: 600;
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  .finding { color: var(--text-dim); max-width: 68ch; margin: 10px 0 20px; }
+  .finding strong { color: var(--text); font-weight: 600; }
+  .finding code {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 13px;
+    color: var(--text);
+    background: var(--surface-2);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+
+  .chart-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px 14px;
+    margin-bottom: 16px;
+  }
+  .chart-card .chart-title {
+    font-size: 12px;
+    color: var(--text-faint);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    margin-bottom: 12px;
+  }
+  .chart-wrap { position: relative; height: 250px; }
+
+  /* ---------- the three density panels ---------- */
+  .maps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  @media (max-width: 760px) { .maps { grid-template-columns: 1fr; } }
+
+  .map {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 12px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .map .map-head { display: flex; align-items: baseline; gap: 8px; }
+  .map .map-name {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .map .map-n { font-family: "IBM Plex Mono", monospace; font-size: 11.5px; color: var(--text-faint); }
+  .map canvas { width: 100%; height: auto; display: block; max-width: 100%; }
+  .map .readout {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 11.5px;
+    color: var(--text-dim);
+    min-height: 2.6em;
+    border-top: 1px solid var(--border);
+    padding-top: 7px;
+  }
+  .map .readout .hint { color: var(--text-faint); }
+  .rule { height: 3px; border-radius: 2px; }
+
+  .ramp-legend {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 11.5px;
+    color: var(--text-faint);
+    margin-top: 14px;
+    flex-wrap: wrap;
+  }
+  .ramp-bar {
+    width: 160px; height: 9px; border-radius: 2px;
+    background: linear-gradient(90deg, #1b2230 0%, #2f5c72 40%, #4e8fa8 68%, #a9d6e5 88%, #d7ecf2 100%);
+    border: 1px solid var(--border);
+  }
+  .ramp-legend .key { display: inline-flex; align-items: center; gap: 6px; }
+  .dash-key { width: 20px; height: 0; border-top: 1.5px dashed #e7ebf1; opacity: 0.75; }
+  .solid-key { width: 20px; height: 0; border-top: 1.5px solid #98a1b0; }
+
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 10px 18px;
+    font-size: 12.5px; color: var(--text-dim); margin: 12px 2px 0;
+    font-family: "IBM Plex Mono", monospace;
+  }
+  .legend span { display: inline-flex; align-items: center; }
+  .swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 7px; }
+
+  .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 560px; }
+  thead th {
+    text-align: left;
+    font-family: "IBM Plex Mono", monospace;
+    font-weight: 500; font-size: 11px;
+    letter-spacing: 0.05em; text-transform: uppercase;
+    color: var(--text-faint); background: var(--surface-2);
+    padding: 10px 14px; border-bottom: 1px solid var(--border); white-space: nowrap;
+  }
+  tbody td {
+    padding: 10px 14px; border-bottom: 1px solid var(--border);
+    color: var(--text-dim); white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:nth-child(odd) { background: var(--surface); }
+  tbody tr:nth-child(even) { background: var(--surface-2); }
+  td.name { color: var(--text); font-weight: 500; white-space: normal; }
+  td.num { font-family: "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums; }
+  td.best { color: var(--pfov); font-weight: 600; }
+
+  .callout {
+    border-left: 3px solid var(--pfov);
+    background: var(--surface);
+    border-radius: 0 10px 10px 0;
+    padding: 16px 18px;
+    margin: 22px 0 0;
+    color: var(--text-dim);
+    max-width: 72ch;
+  }
+  .callout h3 {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--text); margin: 0 0 8px;
+  }
+  .callout strong { color: var(--text); font-weight: 600; }
+
+  footer { border-top: 1px solid var(--border); padding-top: 24px; margin-top: 8px; }
+  footer h3 {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--text-faint); margin: 0 0 12px;
+  }
+  footer ul { margin: 0 0 22px; padding-left: 18px; color: var(--text-dim); font-size: 13px; }
+  footer li { margin-bottom: 8px; }
+  footer .kv {
+    font-family: "IBM Plex Mono", monospace; font-size: 12px; color: var(--text-faint);
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(215px, 1fr));
+    gap: 6px 20px; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 16px;
+  }
+  footer .kv b { color: var(--text-dim); font-weight: 500; }
+
+  a { color: var(--b4); }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+
+<div class="page">
+
+  <header>
+    <div class="eyebrow">F450 &middot; Navigation-with-Obstacles &middot; Crash Diagnostic 03 &middot; Companions:
+      <a href="https://claude.ai/artifact/1MFQ1KPtAwuP8fJzBCw85V">Collision Autopsy</a> &middot;
+      <a href="https://claude.ai/artifact/NDtEcouhApavxgnGYk19du">p_blind Autopsy</a></div>
+    <h1>Crash Heading Atlas</h1>
+    <p class="dek">Where the velocity vector was pointing, in the drone's own body frame, at the
+      instant of every collision &mdash; the same coordinates the <span class="mono">p_fov</span>
+      penalty is defined in. Three rewards, one protocol, curriculum level 30.
+      <strong>p_fov cut the crash rate by a third. It did so without moving the aiming
+      statistic it was built to move.</strong></p>
+    <div class="runstrip">
+      <span><b>runs</b> b4 &middot; p_blind &middot; p_fov</span>
+      <span><b>epoch</b> 2000 each</span>
+      <span><b>level</b> 30 / 30 pinned</span>
+      <span><b>envs</b> 256</span>
+      <span><b>steps</b> 6,000</span>
+      <span><b>collisions</b> 4,660 total</span>
+    </div>
+  </header>
+
+  <div class="tiles">
+    <div class="tile win">
+      <div class="label">p_fov crash rate</div>
+      <div class="value tnum">12.2<small>%</small></div>
+      <div class="sub">988 / 8,128 episodes</div>
+      <div class="delta down">&#9660; 5.6pp vs b4 (17.8%)</div>
+    </div>
+    <div class="tile">
+      <div class="label">Median |azimuth|</div>
+      <div class="value tnum">41.1<small>&deg;</small></div>
+      <div class="sub">against a 43.5&deg; half-cone</div>
+      <div class="delta flat">&#9660; 2.8&deg; vs b4 (43.9&deg;)</div>
+    </div>
+    <div class="tile">
+      <div class="label">Outside the frustum</div>
+      <div class="value tnum">65.8<small>%</small></div>
+      <div class="sub">velocity beyond r_fov = 1</div>
+      <div class="delta flat">&#9660; 0.8pp vs b4 (66.6%)</div>
+    </div>
+    <div class="tile">
+      <div class="label">Beyond the vertical cone</div>
+      <div class="value tnum">36.3<small>%</small></div>
+      <div class="sub">|elevation| &gt; 28.1&deg;</div>
+      <div class="delta up">&#9650; 2.0pp vs b4 (34.3%)</div>
+    </div>
+  </div>
+
+  <section id="s1">
+    <div class="sec-head"><span class="sec-num">01</span><h2>The atlas</h2></div>
+    <p class="finding">
+      Each panel is every collision in one run, binned by the body-frame direction of travel at
+      impact: azimuth left-to-right, elevation bottom-to-top, boresight dead centre. Cells are a
+      percentage of <em>that run's</em> crashes, on one shared scale, so the three panels are
+      directly comparable. The dashed box is the real camera frustum
+      (&plusmn;43.5&deg; &times; &plusmn;28.1&deg;); the inscribed ellipse is
+      <code>r_fov = 1</code>, the contour p_fov's penalty is anchored to.
+      <strong>All three maps have the same shape</strong>: two lobes straddling boresight in
+      azimuth, centred slightly below the horizon, with a long tail running out past
+      &plusmn;90&deg;. Adding a reward term changed how many crashes there were, not where they
+      pointed.
+    </p>
+    <div class="maps" id="maps"></div>
+    <div class="ramp-legend">
+      <span class="key">share of run's crashes <span class="ramp-bar"></span> 0 &rarr; 4.5%</span>
+      <span class="key"><span class="dash-key"></span> camera frustum</span>
+      <span class="key"><span class="solid-key"></span> r_fov = 1, 2, 3</span>
+      <span class="key hint">hover a cell for its numbers</span>
+    </div>
+  </section>
+
+  <section id="s2">
+    <div class="sec-head"><span class="sec-num">02</span><h2>Azimuth: the term that moved it, and the term that worked</h2></div>
+    <p class="finding">
+      This is the awkward result. <strong>p_blind</strong> moved the azimuth distribution most &mdash;
+      median |azimuth| 43.9&deg; &rarr; <strong>32.0&deg;</strong>, crashes with the obstacle behind
+      the drone 24.8% &rarr; 16.4% &mdash; and its crash rate did not improve at all (18.1% vs b4's
+      17.8%). <strong>p_fov</strong> barely moved it (43.9&deg; &rarr; 41.1&deg;) and cut the crash
+      rate by <strong>32% relative</strong>. Whatever p_fov bought, it did not buy it by making the
+      drone fly where the camera looks, which is the mechanism it was designed around. Both terms
+      have a peak at zero azimuth that no term removes: flying straight ahead and hitting something
+      straight ahead is a sizeable share of every run.
+    </p>
+    <div class="chart-card">
+      <div class="chart-title">Crash share by body-frame azimuth of travel (15&deg; bins)</div>
+      <div class="chart-wrap"><canvas id="chartAz"></canvas></div>
+    </div>
+    <div class="legend" id="legendAz"></div>
+  </section>
+
+  <section id="s3">
+    <div class="sec-head"><span class="sec-num">03</span><h2>Elevation: nothing touched it</h2></div>
+    <p class="finding">
+      The vertical half-angle is <strong>28.1&deg;</strong>, tighter than the horizontal 43.5&deg;
+      because the sensor is 320&times;180. Across all three rewards the share of crashes whose
+      velocity lay beyond it sits at <strong>34&ndash;37%</strong> and median |elevation| at
+      <strong>19&ndash;21&deg;</strong> &mdash; flat to within noise. p_blind excludes the vertical
+      channel by construction (yaw cannot fix vertical blindness), and p_fov, which does include it,
+      moved it 2pp in the wrong direction. The distribution also leans consistently
+      <em>below</em> the horizon, which is where the floor and the trunks are.
+    </p>
+    <div class="chart-card">
+      <div class="chart-title">Crash share by body-frame elevation of travel (15&deg; bins)</div>
+      <div class="chart-wrap"><canvas id="chartEl"></canvas></div>
+    </div>
+    <div class="legend" id="legendEl"></div>
+  </section>
+
+  <section id="s4">
+    <div class="sec-head"><span class="sec-num">04</span><h2>Where the crashes sit on the penalty surface</h2></div>
+    <p class="finding">
+      Collapsing both angles into p_fov's own radial coordinate,
+      <code>r_fov = &radic;((&psi;/43.5&deg;)&sup2; + (&theta;/28.1&deg;)&sup2;)</code>, puts every
+      crash on one axis: 1.0 is the frustum edge, and the penalty grows as
+      <code>r_fov&sup2;</code> beyond it. The three curves are nearly superimposed. Median
+      <code>r_fov</code> is <strong>1.45 / 1.32 / 1.41</strong> for b4 / p_blind / p_fov, and
+      roughly two thirds of all crashes in every run happen with the velocity vector already
+      <em>outside</em> the cone. A term that charges for exactly this quantity ran for 2,000 epochs
+      and left the quantity where it found it.
+    </p>
+    <div class="chart-card">
+      <div class="chart-title">Cumulative share of crashes at or below a given r_fov</div>
+      <div class="chart-wrap"><canvas id="chartRf"></canvas></div>
+    </div>
+    <div class="legend" id="legendRf"></div>
+
+    <div class="callout">
+      <h3>What this implies for the next term</h3>
+      p_blind raised the aiming metric and bought nothing; p_fov bought a third of the crash rate
+      without raising it. Together that is evidence the binding constraint is not
+      <em>where the camera points</em> &mdash; it is how much room is left and how fast the gap is
+      closing. Median impact distance to the struck obstacle is
+      <strong>1.11&ndash;1.20 m</strong> in all three runs and median impact speed
+      <strong>1.24&ndash;2.14 m/s</strong>: these are close-quarters, low-speed contacts in clutter,
+      not high-speed runs into something off-axis. That is the case for a clearance term that
+      couples speed to remaining distance rather than to direction.
+    </div>
+  </section>
+
+  <section id="s5">
+    <div class="sec-head"><span class="sec-num">05</span><h2>Three runs, side by side</h2></div>
+    <p class="finding">
+      One seed per checkpoint, so read the deltas as directional rather than significance-tested.
+      The crash-rate column is the one that separates the runs; every angular column is flat.
+    </p>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Metric</th><th>b4</th><th>p_blind</th><th>p_fov</th></tr>
+        </thead>
+        <tbody id="cmpBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>
+    <h3>Method</h3>
+    <ul>
+      <li>Each checkpoint's actor was rebuilt from its saved weights and run deterministically
+        (no exploration noise, no gradient updates) for 6,000 physics steps across 256 parallel
+        environments, with the curriculum pinned at
+        <span class="mono">min_level = max_level = 30</span>
+        (<span class="mono">analysis/crash_cause_eval.py</span>).</li>
+      <li>A crash is the task's own collision buffer &mdash; a contact-force threshold on the
+        airframe &mdash; firing outside an arrival or out-of-bounds event.</li>
+      <li><b>Azimuth</b> is <span class="mono">atan2(v_y, v_x)</span> and <b>elevation</b> is
+        <span class="mono">atan2(v_z, |v_xy|)</span> of the velocity in the <b>body</b> frame, the
+        frame the camera is bolted to &mdash; so a nose-down attitude tilts the frustum with the
+        airframe, exactly as p_fov sees it. This is the direction of travel, not the direction to
+        the obstacle.</li>
+      <li>The vertical half-angle is not configured upstream; it follows from the 87&deg;
+        horizontal FOV and the 320&times;180 pixel aspect under the square-pixel pinhole
+        assumption, which is standard but unverified against aerial_gym's actual projection.</li>
+      <li>b4's numbers here come from the re-run that added the azimuth/elevation fields, so its
+        crash rate reads 17.8% against the 16.4% quoted in the first report &mdash; a different
+        6,000-step sample of the same checkpoint, not a different policy.</li>
+      <li>p_fov ran with <span class="mono">lambda_fov = 0.015</span> and p_blind disabled; p_blind
+        ran with <span class="mono">lambda_blind</span> active and r_bearing deleted. Both descend
+        from b4, which still had r_bearing &mdash; so each comparison against b4 moves more than one
+        term. Unavoidable given the lineage.</li>
+      <li>p_fov completed 8,128 episodes against b4's 10,097 in the same step budget: its episodes
+        last longer, which is itself consistent with fewer early terminations.</li>
+    </ul>
+    <div class="kv">
+      <div><b>obstacle density</b> 0.0804 /m&sup3; (level 30)</div>
+      <div><b>env bounds</b> 20&times;20&times;[4&ndash;6] m</div>
+      <div><b>camera FOV</b> 87&deg; H / 56.2&deg; V</div>
+      <div><b>frustum half-angles</b> 43.5&deg; / 28.1&deg;</div>
+      <div><b>env step</b> 0.03 s (33 Hz)</div>
+      <div><b>v_max</b> 5.0 m/s</div>
+    </div>
+  </footer>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var DATA = {"az_bin":15.0,"el_bin":15.0,"n_az":24,"n_el":12,"rf_x":[0.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,1.1,1.2,1.3,1.4,1.5,1.6,1.7,1.8,1.9,2.0,2.1,2.2,2.3,2.4,2.5,2.6,2.7,2.8,2.9,3.0,3.1,3.2,3.3,3.4,3.5,3.6,3.7,3.8,3.9,4.0,4.1,4.2,4.3,4.4,4.5],"runs":[{"name":"b4","color":"#12a6ac","checkpoint":"last_f450_nav_b4_combined_ep_2000_rew_25.875937.pth","n":1795,"episodes":10097,"crash_rate":17.78,"half_h":43.5,"half_v":28.092968347332782,"grid":[[0.0,0.0,0.0,0.0,0.0,0.0,0.056,0.111,0.0,0.056,0.0,0.056,0.056,0.111,0.0,0.0,0.056,0.056,0.0,0.0,0.0,0.0,0.0,0.111],[0.0,0.0,0.056,0.056,0.111,0.167,0.056,0.0,0.056,0.056,0.056,0.056,0.056,0.056,0.111,0.0,0.056,0.111,0.0,0.056,0.056,0.0,0.0,0.056],[0.111,0.111,0.111,0.111,0.0,0.167,0.223,0.167,0.223,0.111,0.111,0.111,0.167,0.223,0.167,0.223,0.056,0.279,0.334,0.056,0.056,0.0,0.056,0.111],[0.0,0.056,0.111,0.279,0.223,0.056,0.334,0.223,0.279,0.334,0.167,0.891,0.501,0.223,0.223,0.334,0.223,0.111,0.167,0.111,0.056,0.0,0.056,0.111],[0.111,0.056,0.39,0.111,0.056,0.279,0.279,0.501,0.947,0.724,1.058,2.006,1.448,0.613,0.279,0.334,0.334,0.334,0.111,0.056,0.334,0.111,0.223,0.167],[0.111,0.334,0.111,0.334,0.334,0.39,0.223,0.613,1.17,1.337,1.838,2.451,2.228,1.337,0.724,0.836,0.613,0.501,0.279,0.223,0.223,0.446,0.613,0.167],[0.167,0.279,0.557,0.334,0.724,0.557,0.39,0.446,0.891,1.17,2.73,3.844,3.51,1.448,1.337,1.114,0.947,0.223,0.334,0.39,0.613,0.446,0.334,0.111],[0.39,0.334,0.279,0.167,0.334,0.167,0.724,0.78,0.891,0.613,1.448,2.953,2.284,1.114,0.724,0.891,0.891,0.446,0.167,0.223,0.279,0.613,0.334,0.501],[0.111,0.111,0.501,0.39,0.111,0.056,0.446,0.279,0.557,0.557,0.613,0.724,1.003,0.613,0.836,0.446,0.334,0.39,0.279,0.0,0.223,0.279,0.223,0.111],[0.279,0.167,0.223,0.39,0.111,0.334,0.223,0.334,0.501,0.334,0.39,0.446,0.167,0.39,0.446,0.39,0.223,0.279,0.056,0.0,0.446,0.223,0.0,0.111],[0.167,0.056,0.446,0.279,0.111,0.056,0.167,0.056,0.056,0.111,0.056,0.056,0.39,0.056,0.111,0.501,0.111,0.111,0.223,0.167,0.223,0.0,0.111,0.056],[0.056,0.0,0.056,0.0,0.111,0.056,0.056,0.056,0.0,0.111,0.0,0.167,0.056,0.056,0.167,0.056,0.056,0.0,0.167,0.056,0.279,0.056,0.056,0.0]],"az":[1.5,1.5,2.84,2.45,2.23,2.28,3.18,3.57,5.57,5.52,8.47,13.76,11.87,6.24,5.13,5.13,3.9,2.84,2.12,1.34,2.79,2.17,2.01,1.62],"el":[0.67,1.23,3.29,5.07,10.86,17.44,22.9,17.55,9.19,6.46,3.68,1.67],"rf_cdf":[0.0,0.45,2.45,4.96,8.58,12.65,17.05,21.56,25.18,29.25,33.43,37.27,41.28,44.46,47.74,51.48,54.21,56.77,59.16,61.62,63.57,65.68,68.13,69.92,72.03,73.59,75.21,76.88,78.55,80.5,81.84,83.34,84.96,86.13,87.86,89.64,91.09,92.65,94.21,95.54,96.82,97.38,98.22,98.94,99.22,99.5],"med_abs_az":43.9,"med_abs_el":19.3,"med_rf":1.45,"p90_rf":3.52,"outside":66.6,"outside_az":50.6,"outside_el":34.3,"med_speed":1.24,"behind":24.8,"max_cell":3.844},{"name":"p_blind","color":"#df6a20","checkpoint":"last_f450_nav_p_blind_ep_2000_rew_11.54345.pth","n":1877,"episodes":10392,"crash_rate":18.06,"half_h":43.5,"half_v":28.092968347332782,"grid":[[0.053,0.0,0.0,0.107,0.0,0.0,0.0,0.0,0.0,0.053,0.0,0.053,0.0,0.053,0.0,0.0,0.0,0.0,0.0,0.053,0.0,0.053,0.107,0.0],[0.107,0.053,0.0,0.0,0.053,0.0,0.107,0.0,0.053,0.053,0.053,0.107,0.0,0.16,0.107,0.107,0.107,0.107,0.0,0.107,0.107,0.0,0.16,0.0],[0.0,0.107,0.0,0.0,0.107,0.213,0.107,0.107,0.0,0.053,0.053,0.107,0.107,0.266,0.213,0.107,0.107,0.053,0.213,0.053,0.053,0.213,0.053,0.107],[0.107,0.16,0.0,0.0,0.107,0.107,0.266,0.266,0.266,0.213,0.32,0.746,1.066,0.32,0.266,0.479,0.373,0.213,0.213,0.107,0.107,0.107,0.107,0.053],[0.053,0.213,0.16,0.16,0.053,0.479,0.213,0.479,0.906,0.426,0.906,2.504,2.611,0.799,0.266,0.586,0.533,0.32,0.107,0.0,0.107,0.16,0.16,0.053],[0.0,0.053,0.0,0.107,0.16,0.213,0.32,0.693,1.332,0.533,2.131,3.25,4.102,1.385,0.479,1.172,0.533,0.16,0.213,0.107,0.32,0.107,0.107,0.107],[0.213,0.053,0.213,0.213,0.107,0.16,0.32,0.959,1.598,0.746,2.238,4.369,4.315,1.598,0.586,1.012,0.639,0.32,0.0,0.107,0.266,0.16,0.213,0.107],[0.107,0.053,0.16,0.16,0.053,0.16,0.0,0.959,1.012,0.586,1.598,2.664,2.77,1.066,0.906,0.799,0.799,0.479,0.213,0.213,0.053,0.213,0.107,0.053],[0.16,0.16,0.16,0.053,0.266,0.373,0.107,0.906,0.586,1.119,0.959,1.066,1.332,0.479,0.586,0.799,0.533,0.32,0.053,0.107,0.213,0.053,0.107,0.32],[0.16,0.373,0.266,0.213,0.213,0.266,0.32,0.533,0.32,0.266,0.479,0.479,0.32,0.479,0.426,0.639,0.533,0.373,0.107,0.213,0.0,0.16,0.16,0.053],[0.107,0.107,0.053,0.16,0.16,0.16,0.213,0.053,0.053,0.32,0.32,0.32,0.16,0.266,0.107,0.266,0.266,0.107,0.107,0.373,0.053,0.107,0.16,0.16],[0.107,0.107,0.053,0.053,0.053,0.0,0.107,0.0,0.16,0.107,0.107,0.053,0.0,0.16,0.107,0.053,0.0,0.16,0.0,0.16,0.053,0.053,0.053,0.0]],"az":[1.17,1.44,1.07,1.23,1.33,2.13,2.08,4.95,6.29,4.48,9.16,15.72,16.78,7.03,4.05,6.02,4.42,2.61,1.23,1.6,1.33,1.39,1.49,1.01],"el":[0.53,1.55,2.4,5.97,12.25,17.58,20.51,15.18,10.82,7.35,4.16,1.7],"rf_cdf":[0.0,0.59,3.14,6.02,10.66,16.2,21.9,25.84,29.83,33.56,37.77,41.61,45.23,49.17,53.01,57.38,60.84,63.99,66.86,69.63,72.03,73.95,75.97,77.46,79.22,81.19,82.74,83.75,84.71,86.09,87.85,89.03,89.66,90.57,91.48,91.9,93.02,94.25,95.1,95.79,96.22,96.8,97.76,98.35,98.77,99.2],"med_abs_az":32.0,"med_abs_el":20.9,"med_rf":1.32,"p90_rf":3.24,"outside":62.2,"outside_az":43.6,"outside_el":37.0,"med_speed":2.14,"behind":16.4,"max_cell":4.369},{"name":"p_fov","color":"#8168d8","checkpoint":"last_f450_nav_p_fov_ep_2000_rew_11.048738.pth","n":988,"episodes":8128,"crash_rate":12.16,"half_h":43.5,"half_v":28.092968347332782,"grid":[[0.0,0.101,0.0,0.0,0.101,0.0,0.0,0.0,0.101,0.0,0.0,0.101,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0],[0.0,0.0,0.202,0.0,0.101,0.0,0.101,0.0,0.101,0.101,0.0,0.0,0.0,0.0,0.0,0.0,0.101,0.202,0.0,0.101,0.0,0.101,0.0,0.101],[0.0,0.101,0.0,0.304,0.202,0.202,0.101,0.101,0.202,0.304,0.0,0.101,0.405,0.101,0.0,0.304,0.101,0.101,0.101,0.101,0.0,0.0,0.405,0.101],[0.0,0.405,0.101,0.202,0.0,0.101,0.405,0.101,0.304,0.304,0.101,0.709,0.405,0.405,0.101,0.304,0.202,0.202,0.202,0.202,0.101,0.304,0.101,0.0],[0.0,0.0,0.0,0.202,0.101,0.202,0.304,0.81,1.215,0.304,0.709,2.53,4.15,0.506,1.113,1.215,0.405,0.304,0.304,0.0,0.101,0.202,0.101,0.101],[0.101,0.304,0.304,0.304,0.0,0.304,0.202,0.709,1.619,1.316,1.518,3.138,4.453,0.709,0.81,1.518,1.113,0.405,0.304,0.304,0.304,0.101,0.0,0.0],[0.304,0.0,0.0,0.607,0.304,0.405,0.405,0.304,1.923,0.709,1.113,3.239,2.834,0.81,0.506,1.215,0.709,0.405,0.0,0.202,0.0,0.101,0.202,0.202],[0.101,0.304,0.405,0.304,0.101,0.101,0.304,1.012,0.911,0.506,1.012,3.239,2.632,0.911,0.405,0.911,1.012,0.202,0.101,0.101,0.0,0.202,0.101,0.0],[0.101,0.0,0.101,0.405,0.405,0.304,0.0,0.709,0.911,0.405,1.113,1.113,1.215,0.202,0.405,0.81,0.81,0.202,0.202,0.0,0.101,0.202,0.202,0.101],[0.304,0.0,0.202,0.101,0.101,0.202,0.202,0.709,0.304,0.405,0.607,1.113,0.911,0.304,1.113,0.101,0.607,0.607,0.202,0.101,0.101,0.101,0.101,0.0],[0.101,0.202,0.101,0.101,0.101,0.101,0.101,0.304,0.405,0.101,0.101,0.0,0.405,0.0,0.202,0.101,0.101,0.101,0.101,0.101,0.0,0.101,0.0,0.0],[0.101,0.304,0.0,0.0,0.202,0.0,0.101,0.0,0.0,0.101,0.101,0.202,0.101,0.0,0.0,0.0,0.202,0.101,0.202,0.202,0.202,0.0,0.101,0.0]],"az":[1.11,1.72,1.42,2.53,1.72,1.92,2.23,4.76,8.0,4.55,6.38,15.49,17.51,3.95,4.66,6.48,5.36,2.83,1.72,1.42,0.91,1.42,1.32,0.61],"el":[0.4,1.21,3.34,5.26,14.88,19.84,16.5,14.88,10.02,8.5,2.94,2.23],"rf_cdf":[0.0,0.71,3.24,5.36,9.51,13.46,17.41,21.15,26.52,30.47,34.21,38.46,40.89,45.95,49.7,54.25,57.39,60.73,64.37,67.21,70.04,72.57,74.9,76.11,77.43,79.35,80.97,82.39,84.62,85.63,86.74,88.56,89.98,90.59,91.5,92.21,92.91,93.93,94.94,96.15,96.76,97.87,98.28,98.58,98.99,99.09],"med_abs_az":41.1,"med_abs_el":20.6,"med_rf":1.41,"p90_rf":3.2,"outside":65.8,"outside_az":48.4,"outside_el":36.3,"med_speed":1.33,"behind":17.8,"max_cell":4.453}]};
+
+  var TEXT = "#e7ebf1";
+  var TEXT_DIM = "#98a1b0";
+  var TEXT_FAINT = "#5c6675";
+  var BORDER = "#2a313c";
+  var SURFACE = "#171c24";
+  var FONT = "'IBM Plex Mono', ui-monospace, monospace";
+  var RAMP_MAX = 4.5;   // % of a run's crashes, shared across panels
+
+  var runs = DATA.runs;
+  var N_AZ = DATA.n_az, N_EL = DATA.n_el;
+  var AZ_BIN = DATA.az_bin, EL_BIN = DATA.el_bin;
+
+  // ---------- sequential ramp: one hue family, dark surface -> bright ice ----------
+  var STOPS = [
+    [0.00, [27, 34, 48]],
+    [0.40, [47, 92, 114]],
+    [0.68, [78, 143, 168]],
+    [0.88, [169, 214, 229]],
+    [1.00, [215, 236, 242]]
+  ];
+
+  function ramp(t) {
+    if (t <= 0) return "rgb(23,28,36)";
+    t = Math.min(1, t);
+    for (var i = 1; i < STOPS.length; i++) {
+      if (t <= STOPS[i][0]) {
+        var a = STOPS[i - 1], b = STOPS[i];
+        var f = (t - a[0]) / (b[0] - a[0]);
+        var c = [0, 1, 2].map(function (k) {
+          return Math.round(a[1][k] + f * (b[1][k] - a[1][k]));
+        });
+        return "rgb(" + c[0] + "," + c[1] + "," + c[2] + ")";
+      }
+    }
+    return "rgb(215,236,242)";
+  }
+
+  // ---------- 01: the three density maps ----------
+  var MAP_W = 260, MAP_H = 190;           // logical drawing size
+  var M = { l: 30, r: 8, t: 8, b: 24 };   // margins inside the canvas
+
+  var mapsEl = document.getElementById("maps");
+
+  runs.forEach(function (run) {
+    var card = document.createElement("div");
+    card.className = "map";
+
+    var head = document.createElement("div");
+    head.className = "map-head";
+    head.innerHTML =
+      '<span class="map-name" style="color:' + run.color + '">' + run.name + '</span>' +
+      '<span class="map-n">' + run.n.toLocaleString() + ' crashes &middot; ' +
+      run.crash_rate.toFixed(1) + '%</span>';
+    card.appendChild(head);
+
+    var rule = document.createElement("div");
+    rule.className = "rule";
+    rule.style.background = run.color;
+    card.appendChild(rule);
+
+    var cv = document.createElement("canvas");
+    cv.setAttribute("role", "img");
+    cv.setAttribute("aria-label",
+      run.name + ": collision count by body-frame azimuth and elevation of travel. Median " +
+      "absolute azimuth " + run.med_abs_az + " degrees, " + run.outside +
+      "% outside the camera frustum.");
+    card.appendChild(cv);
+
+    var ro = document.createElement("div");
+    ro.className = "readout";
+    ro.innerHTML = '<span class="hint">median |az| ' + run.med_abs_az + '&deg; &middot; |el| ' +
+      run.med_abs_el + '&deg;<br>' + run.outside + '% outside the frustum</span>';
+    card.appendChild(ro);
+
+    mapsEl.appendChild(card);
+    drawMap(cv, ro, run);
+  });
+
+  function drawMap(cv, readout, run) {
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var cssW = cv.parentNode.clientWidth - 24;
+    if (!(cssW > 40)) cssW = MAP_W;
+    var cssH = Math.round(cssW * (MAP_H / MAP_W));
+    cv.style.width = cssW + "px";
+    cv.style.height = cssH + "px";
+    cv.width = Math.round(cssW * dpr);
+    cv.height = Math.round(cssH * dpr);
+
+    var g = cv.getContext("2d");
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    var pw = cssW - M.l - M.r;
+    var ph = cssH - M.t - M.b;
+    var cw = pw / N_AZ;
+    var chh = ph / N_EL;
+
+    g.clearRect(0, 0, cssW, cssH);
+
+    // cells
+    for (var ie = 0; ie < N_EL; ie++) {
+      for (var ia = 0; ia < N_AZ; ia++) {
+        var v = run.grid[ie][ia];
+        g.fillStyle = ramp(v / RAMP_MAX);
+        // y flips: elevation index 0 is the bottom (-90)
+        var y = M.t + (N_EL - 1 - ie) * chh;
+        g.fillRect(M.l + ia * cw, y, Math.ceil(cw) + 0.5, Math.ceil(chh) + 0.5);
+      }
+    }
+
+    // scales
+    function X(az) { return M.l + (az + 180) / 360 * pw; }
+    function Y(el) { return M.t + (90 - el) / 180 * ph; }
+
+    // r_fov contours (ellipses), drawn under the frustum box
+    g.strokeStyle = "rgba(152,161,176,0.55)";
+    g.lineWidth = 1;
+    [1, 2, 3].forEach(function (k, idx) {
+      g.beginPath();
+      for (var i = 0; i <= 96; i++) {
+        var th = i / 96 * Math.PI * 2;
+        var az = k * run.half_h * Math.cos(th);
+        var el = k * run.half_v * Math.sin(th);
+        if (az < -180 || az > 180 || el < -90 || el > 90) {
+          // let the path clip naturally at the plot edge
+          az = Math.max(-180, Math.min(180, az));
+          el = Math.max(-90, Math.min(90, el));
+        }
+        if (i === 0) g.moveTo(X(az), Y(el)); else g.lineTo(X(az), Y(el));
+      }
+      g.globalAlpha = idx === 0 ? 0.95 : 0.4;
+      g.stroke();
+      g.globalAlpha = 1;
+    });
+
+    // camera frustum box
+    g.strokeStyle = "rgba(231,235,241,0.8)";
+    g.setLineDash([3, 3]);
+    g.lineWidth = 1;
+    g.strokeRect(X(-run.half_h), Y(run.half_v),
+                 X(run.half_h) - X(-run.half_h), Y(-run.half_v) - Y(run.half_v));
+    g.setLineDash([]);
+
+    // boresight cross
+    g.strokeStyle = "rgba(231,235,241,0.35)";
+    g.beginPath();
+    g.moveTo(X(0), Y(0) - 5); g.lineTo(X(0), Y(0) + 5);
+    g.moveTo(X(0) - 5, Y(0)); g.lineTo(X(0) + 5, Y(0));
+    g.stroke();
+
+    // plot border
+    g.strokeStyle = BORDER;
+    g.lineWidth = 1;
+    g.strokeRect(M.l + 0.5, M.t + 0.5, pw - 1, ph - 1);
+
+    // axes
+    g.fillStyle = TEXT_FAINT;
+    g.font = "10px " + FONT;
+    g.textAlign = "center";
+    g.textBaseline = "top";
+    [-180, -90, 0, 90, 180].forEach(function (az) {
+      g.fillText(az + "°", X(az), M.t + ph + 5);
+    });
+    g.textAlign = "right";
+    g.textBaseline = "middle";
+    [-90, -45, 0, 45, 90].forEach(function (el) {
+      g.fillText(el + "°", M.l - 5, Y(el));
+    });
+
+    // hover
+    function locate(ev) {
+      var rect = cv.getBoundingClientRect();
+      var px = ev.clientX - rect.left, py = ev.clientY - rect.top;
+      if (px < M.l || px > M.l + pw || py < M.t || py > M.t + ph) return null;
+      var ia = Math.min(N_AZ - 1, Math.floor((px - M.l) / cw));
+      var ieTop = Math.min(N_EL - 1, Math.floor((py - M.t) / chh));
+      var ie = N_EL - 1 - ieTop;
+      return { ia: ia, ie: ie };
+    }
+
+    function show(ev) {
+      var c = locate(ev);
+      if (!c) { reset(); return; }
+      var az0 = -180 + c.ia * AZ_BIN, el0 = -90 + c.ie * EL_BIN;
+      var v = run.grid[c.ie][c.ia];
+      var cnt = Math.round(v / 100 * run.n);
+      var azc = az0 + AZ_BIN / 2, elc = el0 + EL_BIN / 2;
+      var rf = Math.sqrt(Math.pow(azc / run.half_h, 2) + Math.pow(elc / run.half_v, 2));
+      readout.innerHTML =
+        "az " + az0 + "–" + (az0 + AZ_BIN) + "° &middot; el " +
+        el0 + "–" + (el0 + EL_BIN) + "°<br>" +
+        cnt + " crashes (" + v.toFixed(2) + "%) &middot; r_fov " + rf.toFixed(2);
+    }
+
+    function reset() {
+      readout.innerHTML = '<span class="hint">median |az| ' + run.med_abs_az +
+        '&deg; &middot; |el| ' + run.med_abs_el + '&deg;<br>' + run.outside +
+        '% outside the frustum</span>';
+    }
+
+    cv.addEventListener("mousemove", show);
+    cv.addEventListener("mouseleave", reset);
+  }
+
+  window.addEventListener("resize", function () {
+    var cards = mapsEl.querySelectorAll(".map");
+    for (var i = 0; i < cards.length; i++) {
+      drawMap(cards[i].querySelector("canvas"),
+              cards[i].querySelector(".readout"), runs[i]);
+    }
+  });
+
+  // ---------- Chart.js shared config ----------
+  Chart.defaults.color = TEXT_DIM;
+  Chart.defaults.font.family = FONT;
+  Chart.defaults.font.size = 11;
+  Chart.defaults.borderColor = BORDER;
+
+  function grid() { return { color: "rgba(255,255,255,0.06)", drawTicks: false }; }
+  function axisLabel(t) {
+    return { display: true, text: t, color: TEXT_FAINT, font: { family: FONT, size: 11 } };
+  }
+  function lineSets(key, xs) {
+    return runs.map(function (r) {
+      return {
+        label: r.name,
+        data: r[key].map(function (v, i) { return { x: xs[i], y: v }; }),
+        borderColor: r.color,
+        backgroundColor: r.color,
+        borderWidth: 2,
+        pointRadius: 0,
+        pointHoverRadius: 4,
+        tension: 0.25,
+        fill: false
+      };
+    });
+  }
+  function legendInto(id) {
+    document.getElementById(id).innerHTML = runs.map(function (r) {
+      return '<span><span class="swatch" style="background:' + r.color + '"></span>' +
+        r.name + '</span>';
+    }).join("");
+  }
+
+  // ---------- 02: azimuth marginal ----------
+  var azX = [];
+  for (var i = 0; i < N_AZ; i++) azX.push(-180 + i * AZ_BIN + AZ_BIN / 2);
+
+  new Chart(document.getElementById("chartAz"), {
+    type: "line",
+    data: { datasets: lineSets("az", azX) },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: "nearest", axis: "x", intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title: function (it) { return "azimuth " + it[0].parsed.x + "°"; },
+            label: function (c) { return c.dataset.label + "  " + c.parsed.y.toFixed(2) + "%"; }
+          }
+        }
+      },
+      scales: {
+        x: {
+          type: "linear", min: -180, max: 180,
+          grid: grid(), title: axisLabel("body-frame azimuth of travel, degrees"),
+          ticks: { stepSize: 45, callback: function (v) { return v + "°"; } }
+        },
+        y: { grid: grid(), title: axisLabel("% of run's crashes"), beginAtZero: true }
+      }
+    }
+  });
+  legendInto("legendAz");
+
+  // ---------- 03: elevation marginal ----------
+  var elX = [];
+  for (var j = 0; j < N_EL; j++) elX.push(-90 + j * EL_BIN + EL_BIN / 2);
+
+  new Chart(document.getElementById("chartEl"), {
+    type: "line",
+    data: { datasets: lineSets("el", elX) },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: "nearest", axis: "x", intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title: function (it) { return "elevation " + it[0].parsed.x + "°"; },
+            label: function (c) { return c.dataset.label + "  " + c.parsed.y.toFixed(2) + "%"; }
+          }
+        }
+      },
+      scales: {
+        x: {
+          type: "linear", min: -90, max: 90,
+          grid: grid(), title: axisLabel("body-frame elevation of travel, degrees (negative = descending)"),
+          ticks: { stepSize: 30, callback: function (v) { return v + "°"; } }
+        },
+        y: { grid: grid(), title: axisLabel("% of run's crashes"), beginAtZero: true }
+      }
+    }
+  });
+  legendInto("legendEl");
+
+  // ---------- 04: r_fov CDF ----------
+  new Chart(document.getElementById("chartRf"), {
+    type: "line",
+    data: { datasets: lineSets("rf_cdf", DATA.rf_x) },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: "nearest", axis: "x", intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title: function (it) { return "r_fov ≤ " + it[0].parsed.x.toFixed(1); },
+            label: function (c) { return c.dataset.label + "  " + c.parsed.y.toFixed(1) + "%"; }
+          }
+        },
+        annotationLike: false
+      },
+      scales: {
+        x: {
+          type: "linear", min: 0, max: 4.5,
+          grid: grid(), title: axisLabel("r_fov  (1.0 = frustum edge)")
+        },
+        y: {
+          grid: grid(), min: 0, max: 100,
+          title: axisLabel("cumulative % of crashes"),
+          ticks: { callback: function (v) { return v + "%"; } }
+        }
+      }
+    },
+    plugins: [{
+      id: "edgeMark",
+      afterDatasetsDraw: function (chart) {
+        var xs = chart.scales.x, ys = chart.scales.y;
+        var x = xs.getPixelForValue(1.0);
+        var c = chart.ctx;
+        c.save();
+        c.strokeStyle = "rgba(231,235,241,0.45)";
+        c.setLineDash([4, 4]);
+        c.lineWidth = 1;
+        c.beginPath();
+        c.moveTo(x, ys.top); c.lineTo(x, ys.bottom);
+        c.stroke();
+        c.setLineDash([]);
+        c.fillStyle = TEXT_FAINT;
+        c.font = "10px " + FONT;
+        c.textAlign = "left";
+        c.fillText("frustum edge", x + 5, ys.top + 11);
+        c.restore();
+      }
+    }]
+  });
+  legendInto("legendRf");
+
+  // ---------- 05: comparison table ----------
+  var ROWS = [
+    ["Crash rate", function (r) { return r.crash_rate.toFixed(2) + "%"; }, "low"],
+    ["Collisions / episodes", function (r) { return r.n.toLocaleString() + " / " + r.episodes.toLocaleString(); }, null],
+    ["Median |azimuth|", function (r) { return r.med_abs_az.toFixed(1) + "°"; }, null],
+    ["Median |elevation|", function (r) { return r.med_abs_el.toFixed(1) + "°"; }, null],
+    ["Median r_fov", function (r) { return r.med_rf.toFixed(2); }, null],
+    ["p90 r_fov", function (r) { return r.p90_rf.toFixed(2); }, null],
+    ["Outside frustum (r_fov > 1)", function (r) { return r.outside.toFixed(1) + "%"; }, null],
+    ["Beyond horizontal half-angle", function (r) { return r.outside_az.toFixed(1) + "%"; }, null],
+    ["Beyond vertical half-angle", function (r) { return r.outside_el.toFixed(1) + "%"; }, null],
+    ["Travelling backwards (|az| > 90°)", function (r) { return r.behind.toFixed(1) + "%"; }, null],
+    ["Median impact speed", function (r) { return r.med_speed.toFixed(2) + " m/s"; }, null]
+  ];
+
+  var body = document.getElementById("cmpBody");
+  ROWS.forEach(function (row) {
+    var tr = document.createElement("tr");
+    var cells = '<td class="name">' + row[0] + "</td>";
+    var vals = runs.map(row[1]);
+    var bestIdx = -1;
+    if (row[2] === "low") {
+      var nums = runs.map(function (r) { return r.crash_rate; });
+      bestIdx = nums.indexOf(Math.min.apply(null, nums));
+    }
+    vals.forEach(function (v, i) {
+      cells += '<td class="num' + (i === bestIdx ? " best" : "") + '">' + v + "</td>";
+    });
+    tr.innerHTML = cells;
+    body.appendChild(tr);
+  });
+})();
+</script>

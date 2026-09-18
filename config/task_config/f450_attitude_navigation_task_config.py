@@ -419,6 +419,92 @@ class task_config:
         # clipping that dominates today, and should not be expected to fix that mode.
         "lambda_fov": float(os.environ.get("F450_LAMBDA_FOV", 0.0)),  # 0.0 = inert; 0.0069 to enable
         "fov_power": float(os.environ.get("F450_FOV_POWER", 2.0)),    # 4 = quartic
+
+        # --- p_cbf: discrete-time control barrier function on obstacle clearance -----
+        #
+        #   h(x)    = DF(p) - d_safe              margin to the nearest surface
+        #   barrier   h(x_{t+1}) >= (1 - alpha*dt) * h(x_t)
+        #   p_cbf   = -lambda_cbf * max(0, v_close - alpha*h_t),  v_close = -dh/dt
+        #
+        # DF is the EXACT distance to the nearest point on any triangle in the env's warp
+        # mesh, queried per env per step (env_manager/proximity_probe.py) -- full 3D
+        # geometry, not a depth-image reduction, so it includes the surfaces abeam and
+        # behind the drone that the camera cannot see. The floor and the side walls are
+        # in that mesh too, so DF = min(altitude, nearest obstacle).
+        #
+        # WHAT IT ADDS over the terms already here: alpha*h is an allowed closing speed
+        # PROPORTIONAL TO REMAINING CLEARANCE. p_speed charges against a fixed v_max
+        # wherever the drone is; p_fov charges for where the velocity points. Neither
+        # knows how much room is left, and "3 m/s with 4 m of room" versus "3 m/s with
+        # 0.6 m of room" is precisely the distinction the crash data says is missing.
+        #
+        # --- d_safe = 1.0 m, SIZED FROM MEASUREMENT, NOT FROM THE AIRFRAME ------------
+        # The obvious choice is "collision radius plus margin", which argues for 1.5 m.
+        # The env refutes it. Measured on b4 at level 30 over 256k steps, nearest surface
+        # IN VIEW (analysis/data/freespace_b4_l30.json):
+        #   p10 0.94 m | p25 1.09 m | median 1.56 m | p75 2.03 m | p90 2.50 m
+        #   45.2% of ALL steps below 1.5 m | 17.4% below 1.0 m | 4.3% below 0.7 m
+        # and that is an UPPER bound on what the probe reports, because the probe is a
+        # full sphere including the floor and can only ever find something closer than
+        # the forward cone does.
+        #
+        # So d_safe = 1.5 m would put h < 0 on at least half of all steps. In that regime
+        # the barrier does not ask for a slower approach, it demands clearance be REGAINED
+        # at alpha*|h| -- retreat -- which is not achievable while traversing clutter at
+        # this density. The term would stop being a closing-speed signal and become a
+        # near-constant tax competing with r_progress. 1.0 m is the largest value this env
+        # actually affords: still 2.9x the ~0.35 m collision radius, with ~17% of steps
+        # inside the bubble rather than ~45%.
+        #
+        # Second reason to stay at or below 1.0 m: targets are sampled 0.8 m off a side
+        # wall (target_wall_inset) with a 0.4 m arrival ball, and those walls are cullable
+        # pool members that are meshed on some resets. Any d_safe > 0.8 m means the final
+        # approach of a SUCCESSFUL flight is unavoidably inside the bubble, so the term
+        # charges for arriving.
+        "d_safe": float(os.environ.get("F450_D_SAFE", 1.0)),  # m; safe set is DF >= d_safe
+        #
+        # --- alpha = 0.5 /s: DELIBERATELY TIGHT, AND EXPECTED TO BIND ------------------
+        # alpha is a RATE (1/s) and sets the allowed closing speed v_allow = alpha*h.
+        # NOTE the [0, 1] bound often quoted for alpha belongs to the dimensionless decay
+        # factor alpha*dt, NOT to alpha: at dt = 0.03 s the discrete barrier is well-posed
+        # for alpha up to ~33 /s. The task asserts alpha*dt <= 1 at init.
+        #
+        # At 0.5 /s the drone may close on a surface 2.0 m away (h = 1.0) at 0.5 m/s, and
+        # on one 1.5 m away at 0.25 m/s, against a measured cruise of 2.6 m/s. That is
+        # far tighter than the policy currently flies and the violation rate should start
+        # near 1 -- this is a chosen starting point, to see what the term does before
+        # loosening it, not a sized value. Sizing alpha ~ v_cruise / h_typical would give
+        # 2-6 /s instead. metrics/cbf_violation_rate is the number to watch: if it sits
+        # at ~1.0 the barrier is being violated on every step and p_cbf has degenerated
+        # into a flat speed tax with no gradient structure, which is the signal to raise
+        # alpha. Sweep with F450_ALPHA_CBF, no file edit needed.
+        "alpha_cbf": float(os.environ.get("F450_ALPHA_CBF", 0.5)),  # 1/s
+        #
+        # --- lambda_cbf: per (m/s) of EXCESS closing speed -----------------------------
+        # 0.0 = inert (identical to not having the term), same convention as lambda_fov
+        # and lambda_action_mag. The rate form means this weight is dt-INDEPENDENT: it is
+        # the cost of one m/s of excess closing speed, so changing the sim rate or the
+        # substep count cannot silently rescale the term.
+        #
+        # SIZING RULE, the same one used for lambda_fov: pick the mean per-step penalty
+        # to sit near r_progress's ~0.029/step -- loud enough to attend to, not loud
+        # enough to displace the task. lambda_cbf = 0.029 / mean(max(0, v_close - alpha*h))
+        # measured over every step, which is what analysis/measure_cbf_margin.py reports.
+        # UNMEASURED until that script has run against the validated probe; the value
+        # below is a placeholder to be replaced by the measurement, not a sized weight.
+        # *** CANNOT BE ENABLED YET. *** Setting this non-zero builds ProximityProbe,
+        # whose mesh_query_point_no_sign faults with CUDA error 700 on this env's
+        # populated warp meshes under Warp 1.0.0 -- at every radius tried, at every
+        # curriculum level above 0. See env_manager/proximity_probe.py for the evidence.
+        # The arithmetic below is implemented and unit-tested; only d_obstacle is missing.
+        "lambda_cbf": float(os.environ.get("F450_LAMBDA_CBF", 0.0)),  # 0.0 = inert
+        #
+        # Probe range. The query cost grows with it, and it need only exceed the largest
+        # clearance that can occur: the floor is always beneath the drone and the env is
+        # 4-6 m tall, so DF <= ~6 m always and nothing is ever truncated in practice. An
+        # env whose previous h sat at this limit is exempt from the penalty anyway (see
+        # the task), since a truncated DF understates the allowed closing speed.
+        "cbf_max_range": float(os.environ.get("F450_CBF_MAX_RANGE", 6.0)),  # m
     }
 
 

@@ -25,6 +25,7 @@ from aerial_gym.utils.logging import CustomLogger
 from aerial_gym.registry.robot_registry import robot_registry
 
 from env_manager.poisson_asset_manager import PoissonAssetManager
+from env_manager.proximity_probe import ProximityProbe, find_mesh_ids
 from env_manager import warp_bvh_patch
 from env_manager import asset_placement_patch
 from env_manager import warp_bvh_rebuild_patch
@@ -277,6 +278,68 @@ class NavigationWithObstaclesTask(BaseTask):
             f"lambda_fov={self.task_config.reward_parameters['lambda_fov']}"
         )
 
+        # --- p_cbf: discrete-time control barrier function on obstacle clearance ---
+        #
+        # h(x) = DF(p) - d_safe, where DF is the EXACT distance to the nearest point on
+        # any triangle in the env's warp mesh -- obstacles, side walls and the floor
+        # alike (env_manager/proximity_probe.py). NOT a depth-image reduction: the probe
+        # is a full sphere, so it sees the geometry abeam and behind the drone that the
+        # camera cannot, which is where the measured crash geometry actually sits
+        # (median 91 deg off the direction of travel, 51% already past). A reward may
+        # read privileged state; only the OBSERVATION has to be sensor-realisable, and
+        # p_cbf adds nothing to the observation.
+        #
+        # The probe is built ONLY when the term is live: it costs one extra warp kernel
+        # launch per step, and no other training arm should pay for a reward it does not
+        # use.
+        rparams = self.task_config.reward_parameters
+        self._cbf_lambda = rparams["lambda_cbf"]
+        self._cbf_active = self._cbf_lambda != 0.0
+        self._cbf_h_max = rparams["cbf_max_range"] - rparams["d_safe"]
+        self.prev_h = torch.zeros(self.sim_env.num_envs, device=self.device)
+        self._proximity_probe = None
+        self._cbf_mesh_ids = None
+        if self._cbf_active:
+            # alpha is a RATE in 1/s. The [0, 1] bound belongs to the per-step decay
+            # factor alpha*dt, NOT to alpha itself -- at dt = 0.03 s that admits alpha up
+            # to ~33 /s. Asserted rather than documented because the failure is silent
+            # and inverted: alpha*dt > 1 makes (1 - alpha*dt) negative, so the barrier
+            # would demand clearance GROW every step at positive h.
+            alpha_dt = rparams["alpha_cbf"] * self._env_step_dt
+            assert 0.0 <= alpha_dt <= 1.0, (
+                f"alpha_cbf={rparams['alpha_cbf']} /s at dt={self._env_step_dt:.4f} s "
+                f"gives a decay factor alpha*dt={alpha_dt:.3f} outside [0, 1]; the "
+                f"discrete barrier is well-posed only inside it "
+                f"(alpha <= {1.0 / self._env_step_dt:.1f} /s)."
+            )
+            self._proximity_probe = ProximityProbe(
+                self.sim_env.num_envs, self.device, max_dist=rparams["cbf_max_range"]
+            )
+            self._cbf_mesh_ids = find_mesh_ids(self.sim_env)
+            if self._cbf_mesh_ids is None:
+                # The silent failure this guards: with no mesh ids the kernel writes
+                # nothing, every env reads max_range, the barrier is never violated, and
+                # p_cbf is identically zero for the whole run -- a term that looks
+                # enabled in the config and logs a clean 0.0 to tensorboard while doing
+                # nothing at all.
+                raise RuntimeError(
+                    "lambda_cbf != 0 but the warp mesh ids could not be found: "
+                    "ProximityProbe would report max_range for every env and p_cbf "
+                    "would be silently inert. Is use_warp=True and the sim built?"
+                )
+            # What the barrier actually permits, so the run's own log states it rather
+            # than leaving it to be recovered from alpha and d_safe after the fact.
+            allowed = ", ".join(
+                f"{d:.1f}->{rparams['alpha_cbf'] * (d - rparams['d_safe']):.2f}"
+                for d in (rparams["d_safe"], 1.5, 2.0, 3.0)
+            )
+            logger.info(
+                f"p_cbf: d_safe={rparams['d_safe']} m, alpha={rparams['alpha_cbf']} /s "
+                f"(alpha*dt={alpha_dt:.3f}), lambda_cbf={self._cbf_lambda}, "
+                f"range={rparams['cbf_max_range']} m. Allowed closing speed "
+                f"[clearance m -> m/s]: {allowed}"
+            )
+
         # One throwaway physics step BEFORE the reset below, and it is load-bearing.
         #
         # This exists to absorb OUR OWN _setup_domain_randomization() call above, not to work
@@ -350,9 +413,17 @@ class NavigationWithObstaclesTask(BaseTask):
         # last step's values, so we use an EMA to smooth across steps.
         self._reward_comp_ema = {
             "r_progress": 0.0, "p_speed": 0.0, "p_jerk": 0.0,
-            "p_action_mag": 0.0, "p_blind": 0.0, "p_fov": 0.0,
+            "p_action_mag": 0.0, "p_blind": 0.0, "p_fov": 0.0, "p_cbf": 0.0,
         }
         self._ema_alpha = 0.02  # smooth over ~50 steps
+
+        # Clearance diagnostics, smoothed on the same alpha. Logged only when the probe
+        # runs: mean distance to the nearest surface, and the fraction of steps where
+        # the barrier is actually violated. Between them they say whether p_cbf is doing
+        # anything -- a violation rate near 0 means the term never fires, near 1 means
+        # alpha is too tight to comply with and it has become a flat tax.
+        self._cbf_d_ema = 0.0
+        self._cbf_viol_ema = 0.0
 
         self._logged_ep_dist_to_target = 0.0
 
@@ -744,6 +815,14 @@ class NavigationWithObstaclesTask(BaseTask):
         # immediately stepping.
         self.prev_dist[env_ids] = self._get_dist_to_target(env_ids)
 
+        # Same for prev_h, redundant for the same reason and kept for the same one. The
+        # whole batch is probed and then indexed, since the probe is a batched kernel --
+        # and the mesh for the envs being reset has already been rebuilt by
+        # post_reward_calculation_step(), so this measures the geometry the new episode
+        # will actually fly in, not the one the last episode ended in.
+        if self._cbf_active:
+            self.prev_h[env_ids] = self._clearance()[env_ids]
+
         # Reset to the neutral transformed command [thrust=0, roll=0, pitch=0, yaw_rate=0].
         # Zeros are neutral only because LeeAttitudeController maps thrust via
         # (cmd + 1) * m * g, so 0 == hover. If that convention changes (e.g. to
@@ -813,6 +892,16 @@ class NavigationWithObstaclesTask(BaseTask):
         transformed_action = self.action_transformation_function(actions)
         current_action = transformed_action.clone()  # snapshot before sim overwrites robot_actions/robot_prev_actions
         self.prev_dist[:] = self._get_dist_to_target()
+        # h(x_t) for p_cbf, snapshot BEFORE the sim advances. Measured fresh every step
+        # rather than carried over from the previous step's h(x_{t+1}): the two are
+        # equal for a surviving env, but WRONG for one that just reset, because
+        # post_reward_calculation_step() teleports the robot AND rebuilds that env's
+        # warp mesh (env_manager/warp_bvh_rebuild_patch.py). A carried value would refer
+        # to a different position in different geometry, and the barrier would read the
+        # teleport as an enormous closing speed. Snapshotting is immune to both, for one
+        # extra probe launch per step.
+        if self._cbf_active:
+            self.prev_h[:] = self._clearance()
 
         # Step the simulation and update the observation dictionary
         self.sim_env.step(actions=transformed_action)
@@ -958,6 +1047,12 @@ class NavigationWithObstaclesTask(BaseTask):
         self.infos["reward/p_action_mag"] = self._reward_comp_ema["p_action_mag"]
         self.infos["reward/p_blind"] = self._reward_comp_ema["p_blind"]
         self.infos["reward/p_fov"] = self._reward_comp_ema["p_fov"]
+        self.infos["reward/p_cbf"] = self._reward_comp_ema["p_cbf"]
+        # Only meaningful when the probe actually ran; logging them inert would put a
+        # flat 0 m clearance on the dashboard, which reads as a crash, not as "off".
+        if self._cbf_active:
+            self.infos["metrics/d_obstacle"] = self._cbf_d_ema
+            self.infos["metrics/cbf_violation_rate"] = self._cbf_viol_ema
 
         # Episode-end distance to target. Only refreshed on steps where something ended,
         # so the cached value carries between those steps.
@@ -994,6 +1089,32 @@ class NavigationWithObstaclesTask(BaseTask):
             self.truncations,
             self.infos,
         )
+
+    def _clearance(self):
+        """h(x) = DF(p) - d_safe for every env, at the CURRENT robot position.
+
+        Single source of truth for the barrier function. DF is the exact distance to the
+        nearest point on any triangle in the env's warp mesh -- obstacles, side walls
+        and the floor alike -- so DF = min(altitude, nearest obstacle), and over clear
+        ground it simply reports the height above the floor. h >= 0 is the safe set.
+
+        FULL 3D GEOMETRY, NOT THE DEPTH IMAGE. The probe is a sphere; the camera is an
+        87 x 56 deg cone. The difference is the point: minimum clearance during a pass
+        happens abeam or slightly behind (the measured crash geometry is a median 91 deg
+        off the direction of travel, 51% already past), which is exactly where a depth
+        reduction stops measuring and a clearance term needs to charge. Using privileged
+        state in a REWARD is free -- only the observation has to be sensor-realisable,
+        and p_cbf adds nothing to the observation.
+
+        Returns:
+            (num_envs,) tensor of h in meters. Valid only when self._cbf_active; the
+            probe is None otherwise. The subtraction allocates, so callers get a fresh
+            tensor rather than an alias of the probe's reused output buffer.
+        """
+        d = self._proximity_probe.measure(
+            self.obs_dict["robot_position"], self._cbf_mesh_ids
+        )
+        return d - self.task_config.reward_parameters["d_safe"]
 
     def _get_dist_to_target(self, env_ids=slice(None)):
         """World-frame distance from robot to target, in raw meters.
@@ -1328,6 +1449,14 @@ class NavigationWithObstaclesTask(BaseTask):
         5. p_blind:    -lambda_blind * horizontal_speed * misalignment^2
                        - PENALIZE speed that is not going where the camera points.
                          The ONLY term carrying yaw information at all; see below.
+        6. p_fov:      -lambda_fov * ||v||^2 * r_fov^fov_power
+                       - PENALIZE velocity pointed outside the camera frustum, in the
+                         BODY frame. r_fov = 1.0 exactly on the cone boundary.
+        7. p_cbf:      -lambda_cbf * max(0, v_close - alpha * h)
+                       - PENALIZE spending clearance faster than a discrete control
+                         barrier function allows, where h = DF - d_safe is the margin
+                         to the nearest surface and v_close is the rate it is being
+                         spent. The ONLY term that knows how much room is left.
 
         Args:
             mask: Boolean tensor indicating which envs get this reward
@@ -1456,6 +1585,53 @@ class NavigationWithObstaclesTask(BaseTask):
         # that faster means more committed, which holds whatever budget is left.
         p_fov = -params["lambda_fov"] * speed.pow(2) * r_fov.pow(params["fov_power"])
 
+        # 7. p_cbf: a discrete-time control barrier function on clearance to the nearest
+        # surface. The safe set is C = {x : h(x) >= 0} with h(x) = DF(p) - d_safe, and
+        # the barrier caps how fast clearance may be spent:
+        #     h(x_{t+1}) >= (1 - alpha*dt) * h(x_t)
+        # p_cbf charges for the shortfall, written in RATE form so that it reads in m/s:
+        #     v_close = (h_t - h_{t+1}) / dt   closing speed on the nearest surface
+        #     v_allow = alpha * h_t            what the barrier permits at THIS clearance
+        #     p_cbf   = -lambda_cbf * max(0, v_close - v_allow)
+        # Algebraically identical to -lambda * max(0, (1-alpha*dt)*h_t - h_{t+1}) with
+        # lambda_cbf = lambda*dt, but lambda_cbf is then dt-INDEPENDENT and reads as the
+        # cost per (m/s) of excess closing speed. With dt folded in instead, changing the
+        # sim rate or the substep count would silently rescale the whole term.
+        #
+        # THIS IS WHAT THE TERM IS FOR: v_allow is PROPORTIONAL TO CLEARANCE, so the
+        # speed permitted with 3 m of room is not the speed permitted with 0.5 m. No
+        # other term knows how much room is left -- p_speed charges against a fixed
+        # v_max wherever the drone happens to be, and p_fov charges for where the
+        # velocity points, not for how much space is in front of it.
+        #
+        # h < 0 -- already inside d_safe -- is NOT special-cased, deliberately. v_allow
+        # goes negative there, so the barrier demands clearance be REGAINED at alpha*|h|
+        # and holding station inside the bubble costs lambda_cbf*alpha*|h| per step.
+        # That is the correct CBF behaviour (exponential recovery into the set) and it
+        # is also the reason d_safe cannot be set above the clearance this env actually
+        # affords -- see the config for the measurement that fixes it at 1.0 m.
+        #
+        # DF is 1-Lipschitz in position, so v_close <= ||v|| exactly: bounded speed
+        # bounds the penalty, and the magnitude needs no clamp of its own.
+        if self._cbf_active:
+            h_next = self._clearance()
+            v_close = (self.prev_h - h_next) / self._env_step_dt
+            v_allow = params["alpha_cbf"] * self.prev_h
+            # Envs whose PREVIOUS clearance sat at the probe's range limit are exempt.
+            # The probe reports max_range when it found nothing inside it, which
+            # UNDERSTATES h_t and so understates v_allow; charging on that would be
+            # charging against a distance that was never measured. With the floor always
+            # beneath the drone and the env only 4-6 m tall, this should never fire at
+            # the default range -- it is an invariant, not a hot path.
+            measured = self.prev_h < (self._cbf_h_max - 1e-3)
+            p_cbf = (
+                -self._cbf_lambda
+                * torch.clamp(v_close - v_allow, min=0.0)
+                * measured
+            )
+        else:
+            p_cbf = torch.zeros_like(speed)
+
         # Apply mask to zero out rewards for envs that had terminal events
         r_progress = r_progress[mask]
         p_speed = p_speed[mask]
@@ -1463,6 +1639,7 @@ class NavigationWithObstaclesTask(BaseTask):
         p_action_mag = p_action_mag[mask]
         p_blind = p_blind[mask]
         p_fov = p_fov[mask]
+        p_cbf = p_cbf[mask]
 
         # Update EMA for tensorboard reward component logging.
         # Guarded: when every env terminates on the same step the mask is empty, and
@@ -1477,5 +1654,13 @@ class NavigationWithObstaclesTask(BaseTask):
             self._reward_comp_ema["p_action_mag"] += a * (float(p_action_mag.mean()) - self._reward_comp_ema["p_action_mag"])
             self._reward_comp_ema["p_blind"] += a * (float(p_blind.mean()) - self._reward_comp_ema["p_blind"])
             self._reward_comp_ema["p_fov"] += a * (float(p_fov.mean()) - self._reward_comp_ema["p_fov"])
+            self._reward_comp_ema["p_cbf"] += a * (float(p_cbf.mean()) - self._reward_comp_ema["p_cbf"])
+            # Clearance diagnostics, over the same non-terminal envs. h_next and v_close
+            # are full-width (only p_cbf was masked above), so they are masked here.
+            if self._cbf_active:
+                d_mean = float(h_next[mask].mean()) + params["d_safe"]
+                viol = float((v_close > v_allow)[mask].float().mean())
+                self._cbf_d_ema += a * (d_mean - self._cbf_d_ema)
+                self._cbf_viol_ema += a * (viol - self._cbf_viol_ema)
 
-        return r_progress + p_speed + p_jerk + p_action_mag + p_blind + p_fov
+        return r_progress + p_speed + p_jerk + p_action_mag + p_blind + p_fov + p_cbf

@@ -20,7 +20,8 @@ from task.attitude_navigation_task import NavigationWithObstaclesTask
 from config.task_config.f450_attitude_navigation_task_config import task_config
 from config.sensor_config.realsense_d435_cam_config import RealSenseD435CamConfig as CAM
 
-EMA_KEYS = ["r_progress", "p_speed", "p_jerk", "p_action_mag", "p_blind", "p_fov"]
+EMA_KEYS = ["r_progress", "p_speed", "p_jerk", "p_action_mag", "p_blind", "p_fov",
+            "p_cbf"]
 
 LAMBDA_BLIND = task_config.reward_parameters["lambda_blind"]
 
@@ -37,6 +38,9 @@ def _stub(**overrides):
     stub.device = "cpu"
     stub._ema_alpha = 0.02
     stub._reward_comp_ema = {k: 0.0 for k in EMA_KEYS}
+    # p_cbf off: this file is not about the barrier, and with lambda_cbf inert the term
+    # contributes an exact zero, so nothing here moves. See tests/test_reward_cbf.py.
+    stub._cbf_active = False
     stub._action_scale = torch.tensor(
         [1.0, math.pi / 4, math.pi / 4, task_config.max_yaw_rate]
     )

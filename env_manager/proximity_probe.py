@@ -18,6 +18,37 @@ first place. mesh_query_point returns the true closest point on any triangle, in
 query per env instead of 256 rays. _no_sign skips the winding-number work, since only the
 distance is wanted, not inside/outside.
 
+*** BLOCKED ON WARP 1.0.0 -- DO NOT WIRE THIS INTO A REWARD YET ***
+
+mesh_query_point_no_sign FAULTS with CUDA error 700 (illegal memory access) on this env's
+populated warp meshes. Measured on an A100, level 30, 16-128 envs, Warp 1.0.0:
+
+    level 30, radius 1.5 / 2.0 / 2.5 m   -> fault, immediately, at the first launch
+    level 15, radius 2.0 m               -> fault, immediately
+    level  0, radius 1.5 / 2.0 m         -> CLEAN over 200 steps x 128 envs
+
+What was ruled out along the way: the kernel and the Warp 1.0.0 signature are correct (the
+same kernel point-queries a mesh built in-script and returns the exact answer); the CUDA
+context is clean before the probe runs; the vertex data is finite and the triangle indices
+are in range; the mesh ids match the live wp.Mesh objects; buffer lifetime is not involved
+(a persistent contiguous points buffer faults identically); and it is not env-specific --
+15 of 16 envs answer correctly in one batched launch, and which env fails moves with the
+search radius.
+
+What remains is mesh COMPLEXITY. Each per-env mesh here is 37,156 points / 73,220
+triangles (the whole preallocated asset pool, with culled assets parked ~1000 m away), and
+Warp's closest-point traversal keeps pending BVH nodes on a fixed-size stack. Level 0 --
+floor and walls only -- is the only configuration that survives, at any radius. Ray
+queries over the SAME meshes are unaffected, which is why the depth camera has always
+worked: a ray keeps far fewer nodes pending.
+
+So exact closest-point distance is not available on this stack. The alternatives, in the
+order they were considered: a ray-sphere probe (works today, quantises -- N rays over a
+sphere give ~sqrt(4*pi/N) rad spacing, so 2048 rays is ~4.5 deg and resolves 0.16 m at
+2 m, and it can only OVER-estimate clearance, which is the unsafe direction); a depth-image
+reduction (already implemented in analysis/measure_freespace.py, but in-FOV only); or
+upgrading Warp in the container image, which fixes the root cause and touches every run.
+
 THE FLOOR IS INCLUDED and treated like any other obstacle -- it is a real collision
 surface. Consequence when tuning: d_obstacle is then min(altitude, nearest obstacle), so
 at low altitude it simply reports the height above ground, and a large d_ref turns p_prox
