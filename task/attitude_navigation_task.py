@@ -308,6 +308,23 @@ class NavigationWithObstaclesTask(BaseTask):
         self.prev_h = torch.zeros(self.sim_env.num_envs, device=self.device)
         self._proximity_probe = None
         self._cbf_mesh_ids = None
+        # WHERE d_obstacle COMES FROM. Two arms, one variable:
+        #   "rays"  -- RaySphereProbe: omnidirectional EUCLIDEAN distance to the nearest
+        #              surface, from the env's warp mesh. Privileged (the real drone has no
+        #              such sensor) and coarse (1.6 deg spacing misses thin geometry), but
+        #              it sees abeam and behind, where the measured crash geometry sits.
+        #   "depth" -- the rendered depth image's minimum. Sensor-realisable, ~33x denser
+        #              per steradian so it resolves thin branches the sphere misses, but
+        #              blind outside the 87x56 deg cone -- and it is Z-DEPTH, not range
+        #              (calculate_depth = True), so an obstacle 2 m away at 45 deg off-axis
+        #              reads 1.41 m. That bias is CONSERVATIVE, unlike the sphere's.
+        # They measure different quantities on purpose; the arms answer whether the barrier
+        # needs 360 deg privileged geometry or can run on what the airframe can actually
+        # sense, which is the difference between a deployable term and a sim-only one.
+        self._cbf_source = str(self.task_config.cbf_source).lower()
+        assert self._cbf_source in ("rays", "depth"), (
+            f"cbf_source must be 'rays' or 'depth', got {self._cbf_source!r}"
+        )
         if self._cbf_active:
             # alpha is a RATE in 1/s. The [0, 1] bound belongs to the per-step decay
             # factor alpha*dt, NOT to alpha itself -- at dt = 0.03 s that admits alpha up
@@ -321,14 +338,39 @@ class NavigationWithObstaclesTask(BaseTask):
                 f"discrete barrier is well-posed only inside it "
                 f"(alpha <= {1.0 / self._env_step_dt:.1f} /s)."
             )
-            self._proximity_probe = RaySphereProbe(
-                self.sim_env.num_envs,
-                self.device,
-                max_dist=rparams["cbf_max_range"],
-                num_rays=int(rparams["cbf_rays"]),
-            )
-            self._cbf_mesh_ids = find_mesh_ids(self.sim_env)
-            if self._cbf_mesh_ids is None:
+            # The depth arm reads a tensor the renderer already fills, so it allocates
+            # nothing and needs no mesh ids -- but it DOES need the camera, and the
+            # normalisation constant, which is read from the live config rather than
+            # hardcoded so a change of lens cannot silently rescale the clearance.
+            if self._cbf_source == "depth":
+                if "depth_range_pixels" not in self.obs_dict:
+                    raise RuntimeError(
+                        "cbf_source='depth' but obs_dict has no 'depth_range_pixels': the "
+                        "robot's depth camera is disabled, so there is nothing to measure."
+                    )
+                self._cbf_img_range = float(cam_cfg.max_range)
+                # Plain floats: reward_parameters holds 0-dim CUDA tensors by now, and
+                # reading one back per step would sync the device every step.
+                self._cbf_range_f = float(rparams["cbf_max_range"])
+                self._cbf_d_safe_f = float(rparams["d_safe"])
+                logger.warning(
+                    f"p_cbf clearance from the DEPTH IMAGE "
+                    f"({cam_cfg.width}x{cam_cfg.height}, max_range "
+                    f"{self._cbf_img_range} m, z-depth not range, in-FOV only). "
+                    "THIS SOURCE WAS MEASURED AND REJECTED: the image minimum depends on "
+                    "ATTITUDE as well as position, so an obstacle entering the frustum "
+                    "reads as closing speed -- 3.7% of steps exceed the physically "
+                    "possible closing speed, up to 175.9 m/s. See the task config."
+                )
+            else:
+                self._proximity_probe = RaySphereProbe(
+                    self.sim_env.num_envs,
+                    self.device,
+                    max_dist=rparams["cbf_max_range"],
+                    num_rays=int(rparams["cbf_rays"]),
+                )
+                self._cbf_mesh_ids = find_mesh_ids(self.sim_env)
+            if self._cbf_source == "rays" and self._cbf_mesh_ids is None:
                 # The silent failure this guards: with no mesh ids the kernel writes
                 # nothing, every env reads max_range, the barrier is never violated, and
                 # p_cbf is identically zero for the whole run -- a term that looks
@@ -347,13 +389,18 @@ class NavigationWithObstaclesTask(BaseTask):
             )
             # Ray spacing, and the thinnest feature it can still catch at 2 m: the
             # number that decides whether a tree branch is measured or missed.
-            spacing = math.degrees(math.sqrt(4.0 * math.pi / float(rparams["cbf_rays"])))
-            r_min = 2.0 * math.radians(spacing) / 2.0
+            if self._cbf_source == "rays":
+                spacing = math.degrees(
+                    math.sqrt(4.0 * math.pi / float(rparams["cbf_rays"]))
+                )
+                src = (f"rays={int(rparams['cbf_rays'])} ({spacing:.2f} deg spacing, "
+                       f"catches r>={math.radians(spacing):.3f} m at 2 m)")
+            else:
+                src = "source=depth image (in-FOV only, z-depth)"
             logger.info(
                 f"p_cbf: d_safe={rparams['d_safe']} m, alpha={rparams['alpha_cbf']} /s "
                 f"(alpha*dt={alpha_dt:.3f}), lambda_cbf={self._cbf_lambda}, "
-                f"range={rparams['cbf_max_range']} m, rays={int(rparams['cbf_rays'])} "
-                f"({spacing:.2f} deg spacing, catches r>={r_min:.3f} m at 2 m). "
+                f"range={rparams['cbf_max_range']} m, {src}. "
                 f"Allowed closing speed [clearance m -> m/s]: {allowed}"
             )
 
@@ -926,6 +973,20 @@ class NavigationWithObstaclesTask(BaseTask):
         # Step the simulation and update the observation dictionary
         self.sim_env.step(actions=transformed_action)
 
+        # The depth arm needs a FRESH frame before the reward reads it, and nothing else
+        # in step() provides one: the sensors are not re-rendered until
+        # post_reward_calculation_step(), which runs AFTER compute_rewards. Without this
+        # call the image on hand is the one rendered at the START of this step, so it would
+        # feed BOTH h(x_t) and h(x_{t+1}) -- the same frame -- and v_close would be
+        # identically zero. The barrier would log clean numbers and never fire.
+        #
+        # The cost is a second full sensor capture per step (the other is the one
+        # post_reward_calculation_step does for the observation). Paid only by this arm; it
+        # is what buys the two arms identical TIMING, so they differ in the measurement
+        # geometry alone.
+        if self._cbf_active and self._cbf_source == "depth":
+            self.sim_env.render()
+
         # Compute rewards, terminations, and event masks
         self.rewards[:], self.terminations[:], arrive_mask, exceed_mask = (
             self.compute_rewards(self.obs_dict, current_action)
@@ -1138,6 +1199,38 @@ class NavigationWithObstaclesTask(BaseTask):
             n > 0, n * self._sim_dt, torch.full_like(n, self._env_step_dt)
         )
 
+    def _clearance_from_depth(self):
+        """h(x) from the rendered depth image: the nearest thing the CAMERA can see.
+
+        Two encoding details decide whether this is a clearance signal or a hazard, both
+        read off config/sensor_config/realsense_d435_cam_config.py:
+
+        NEGATIVE PIXELS MEAN TOO CLOSE, NOT NO-RETURN. normalize_range = True puts values
+        in [-1] U [0, 1], where far-out-of-range is far_out_of_range_value = max_range,
+        i.e. +1.0, and near-out-of-range is near_out_of_range_value = -max_range, i.e.
+        -1.0. So a negative pixel is a surface NEARER than min_range (0.1 m) -- the most
+        dangerous reading the sensor can produce. Mapping negatives to "far" would invert
+        exactly the case the barrier exists for. They are mapped to ZERO distance here.
+        (analysis/validate_ray_probe.py does map them to far, which is right for the gap
+        metric it computes there and must not be copied into a reward.)
+
+        IT IS Z-DEPTH, NOT RANGE. calculate_depth = True, so a pixel carries the distance
+        along the optical axis, not to the point: an obstacle at range r and angle theta
+        off-axis reads r*cos(theta), which at the frustum corner (~51 deg) is 0.63*r. The
+        minimum over the image therefore UNDER-states the true distance off-axis. That bias
+        is conservative -- it permits less closing speed than the geometry allows -- which
+        is the opposite sign to the ray sphere's, and worth remembering when the two arms
+        are compared.
+
+        Measured from the CAMERA, mounted at [0.10, 0, -0.03] in the body frame, not from
+        base_link like the ray probe. ~10 cm, noted for completeness.
+        """
+        img = self.obs_dict["depth_range_pixels"]
+        # Negative -> nearer than min_range -> treat as zero clearance, never as far.
+        img = torch.where(img < 0.0, torch.zeros_like(img), img)
+        d = img.flatten(1).min(dim=1).values * self._cbf_img_range
+        return d.clamp(max=self._cbf_range_f) - self._cbf_d_safe_f
+
     def _clearance(self):
         """h(x) = DF(p) - d_safe for every env, at the CURRENT robot position.
 
@@ -1163,6 +1256,8 @@ class NavigationWithObstaclesTask(BaseTask):
             probe is None otherwise. The subtraction allocates, so callers get a fresh
             tensor rather than an alias of the probe's reused output buffer.
         """
+        if self._cbf_source == "depth":
+            return self._clearance_from_depth()
         d = self._proximity_probe.measure(
             self.obs_dict["robot_position"], self._cbf_mesh_ids
         )

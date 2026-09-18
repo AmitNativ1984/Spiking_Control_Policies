@@ -280,3 +280,75 @@ def test_per_env_independence():
     assert got[0].item() == pytest.approx(0.0, abs=1e-9)
     assert got[1].item() == pytest.approx(-LAMBDA_CBF * (1.5 - ALPHA * 0.4), rel=1e-5)
     assert got[2].item() == pytest.approx(-LAMBDA_CBF * ALPHA * 0.5, rel=1e-5)
+
+# --- the depth-image clearance source -------------------------------------------------
+#
+# These do not go through _reward_progress: they exercise _clearance_from_depth directly,
+# because its two encoding traps are silent and one of them is dangerous.
+
+
+def _depth_stub(img, max_range=10.0, cbf_max=MAX_RANGE, d_safe=D_SAFE):
+    stub = types.SimpleNamespace()
+    stub._cbf_img_range = max_range
+    stub._cbf_range_f = cbf_max
+    stub._cbf_d_safe_f = d_safe
+    stub.obs_dict = {"depth_range_pixels": torch.as_tensor(img, dtype=torch.float32)}
+    return stub
+
+
+def _depth_clearance(img, **kw):
+    stub = _depth_stub(img, **kw)
+    return NavigationWithObstaclesTask._clearance_from_depth(stub)
+
+
+def test_depth_normalised_pixels_become_metres():
+    """normalize_range = True, so a pixel is a fraction of max_range. 0.25 -> 2.5 m."""
+    img = torch.full((1, 1, 4, 4), 0.25)
+    assert _depth_clearance(img).item() == pytest.approx(2.5 - D_SAFE, rel=1e-6)
+
+
+def test_depth_takes_the_minimum_over_the_whole_image():
+    img = torch.full((1, 1, 4, 4), 0.8)
+    img[0, 0, 2, 3] = 0.12
+    assert _depth_clearance(img).item() == pytest.approx(1.2 - D_SAFE, rel=1e-6)
+
+
+def test_a_negative_pixel_means_TOO_CLOSE_not_no_return():
+    """THE trap. near_out_of_range_value = -max_range, so a negative pixel is a surface
+    NEARER than min_range -- the most dangerous reading the sensor produces. Mapping it to
+    'far' (as the ray-probe validation script deliberately does for its own gap metric)
+    would invert exactly the case the barrier exists for."""
+    img = torch.full((1, 1, 4, 4), 0.9)
+    img[0, 0, 1, 1] = -1.0
+    got = _depth_clearance(img).item()
+    assert got == pytest.approx(0.0 - D_SAFE, rel=1e-6)
+    assert got < 0.0, "a too-close pixel must land INSIDE the safe-set boundary"
+
+
+def test_far_out_of_range_is_positive_one_and_reads_as_max_range():
+    """far_out_of_range_value = max_range, i.e. +1.0 normalised -- positive, unlike near."""
+    img = torch.ones((1, 1, 4, 4))
+    # clamped by cbf_max_range, which is below the camera's 10 m
+    assert _depth_clearance(img).item() == pytest.approx(MAX_RANGE - D_SAFE, rel=1e-6)
+
+
+def test_depth_is_clamped_to_the_barrier_range():
+    """The probe range, not the camera range, bounds h -- so the range-limit exemption in
+    _reward_progress keys off the same number for both sources."""
+    img = torch.full((1, 1, 2, 2), 0.95)  # 9.5 m, well past cbf_max_range
+    assert _depth_clearance(img).item() == pytest.approx(MAX_RANGE - D_SAFE, rel=1e-6)
+
+
+def test_depth_is_per_env():
+    img = torch.full((3, 1, 2, 2), 0.5)
+    img[1] = 0.2
+    img[2, 0, 0, 0] = -1.0
+    got = _depth_clearance(img)
+    assert got[0].item() == pytest.approx(5.0 - D_SAFE, rel=1e-6)
+    assert got[1].item() == pytest.approx(2.0 - D_SAFE, rel=1e-6)
+    assert got[2].item() == pytest.approx(0.0 - D_SAFE, rel=1e-6)
+
+
+def test_the_shipped_source_is_rays():
+    """The depth arm is opt-in via F450_CBF_SOURCE, so the default must not change."""
+    assert task_config.cbf_source == "rays"

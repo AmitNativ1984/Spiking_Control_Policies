@@ -104,6 +104,8 @@ def main():
         "f450_navigation_task", num_envs=args.num_envs, headless=True, use_warp=True
     )
     assert task._cbf_active, "probe did not come up; p_cbf would be inert"
+    source = task._cbf_source
+    print(f"clearance source: {source}")
     dt = task._env_step_dt
 
     obs_dim = actor[0].in_features
@@ -124,6 +126,7 @@ def main():
     n_pairs = torch.zeros((), device=dev)
     max_vclose = torch.zeros((), device=dev)
     max_speed = torch.zeros((), device=dev)
+    n_superluminal = torch.zeros((), device=dev)
 
     obs = task.reset()[0]["observations"]
     prev_d = None
@@ -151,6 +154,9 @@ def main():
                     v_close = (prev_d[alive] - d[alive]) / dt
                     n_pairs.add_(v_close.numel())
                     max_vclose.copy_(torch.maximum(max_vclose, v_close.abs().max()))
+                    n_superluminal.add_(
+                        (v_close > speed[alive] * (4.0 / 3.0) + 0.5).sum()
+                    )
                     for (ds, al), acc in cells.items():
                         h = prev_d[alive] - ds
                         excess = torch.clamp(v_close - al * h, min=0.0)
@@ -166,15 +172,30 @@ def main():
             if (s + 1) % 500 == 0:
                 print(f"step {s + 1}/{args.num_steps}")
 
-    # --- reset leakage: DF is 1-Lipschitz, so |v_close| <= speed, always ---------------
+    # --- physically impossible closing speeds ------------------------------------------
+    # For the RAYS source, DF is 1-Lipschitz in position and the mesh is static within a
+    # step, so |v_close| can never exceed the distance travelled over dt. Anything beyond
+    # that is a teleport leaking across a reset, and it is asserted.
+    #
+    # For the DEPTH source it is NOT a bug and cannot be asserted away: the image minimum
+    # is taken over a cone that moves with the drone's ATTITUDE, so an obstacle entering or
+    # leaving the 87x56 deg frustum steps the measurement discontinuously. h is then a
+    # function of (position, orientation), not of position alone -- which is precisely what
+    # a barrier function is not allowed to be. The rate is reported instead, because how
+    # often it happens decides whether the depth arm measures clearance or measures where
+    # the camera happens to be pointing.
     mv, ms = float(max_vclose), float(max_speed)
+    bound = ms * (4.0 / 3.0) + 0.5
+    frac_over = float(n_superluminal) / max(float(n_pairs), 1.0)
     print(f"\nmax |v_close| {mv:.2f} m/s vs max speed {ms:.2f} m/s")
+    print(f"pairs with v_close beyond the physical bound ({bound:.2f} m/s): "
+          f"{100 * frac_over:.3f}%  ({int(n_superluminal)} of {int(n_pairs)})")
     # Tolerance, not equality: speed is sampled once per step while the displacement
     # integrates over it, and this script pairs across steps using the NOMINAL dt (the task
     # itself uses the true per-step count -- see _cbf_step_dt), so a step that ran 4
     # substeads instead of 3 inflates v_close here by up to 4/3. Anything far beyond that
     # is a teleport leaking across a reset, which is what this is really watching for.
-    assert mv <= ms * (4.0 / 3.0) * 1.1 + 0.5, (
+    assert source == "depth" or mv <= ms * (4.0 / 3.0) * 1.1 + 0.5, (
         f"max |v_close| {mv:.2f} m/s exceeds the max speed {ms:.2f} m/s by more than the "
         f"substep-jitter bound: DF is 1-Lipschitz in position, so the excess can only be "
         f"a teleport leaking across a reset into the pairing."
@@ -221,6 +242,8 @@ def main():
         "frac_floor_nearest": frac_floor,
         "max_v_close": mv,
         "max_speed": ms,
+        "source": source,
+        "frac_v_close_beyond_physical": frac_over,
         "hist_edges": edges,
         "d_hist": d_hist.tolist(),
         "alt_hist": alt_hist.tolist(),

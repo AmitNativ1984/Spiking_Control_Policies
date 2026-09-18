@@ -101,6 +101,53 @@ class task_config:
     # config is shared -- other training jobs may already be running against it).
     v_max = float(os.environ.get("F450_V_MAX", 5.0))  # Speed threshold for excess speed penalty (m/s)
 
+    # --- p_cbf: WHERE the clearance is measured -------------------------------------
+    # NOT in reward_parameters, deliberately: __init__ tensor-converts every entry of that
+    # dict and torch.tensor() cannot take a str. Lives here with v_max instead.
+    #
+    # "rays"  omnidirectional Euclidean distance from the env's warp mesh. Privileged --
+    #         no such sensor exists on the airframe -- and coarse (1.6 deg spacing at the
+    #         default ray count), but it sees the geometry abeam and behind, which is where
+    #         the measured crash geometry sits: median 91 deg off the direction of travel,
+    #         51% already past, and 76-86% of struck obstacles never in view at all.
+    # "depth" the rendered depth image's minimum. SENSOR-REALISABLE, so a policy trained on
+    #         it is deployable, and ~33x denser per steradian than a 16,384-ray sphere, so
+    #         it resolves the thin branches the sphere misses. But blind outside the
+    #         87x56 deg cone, and it is Z-DEPTH not range (calculate_depth = True), so an
+    #         obstacle 2 m away at 45 deg off-axis reads 1.41 m -- a CONSERVATIVE bias,
+    #         opposite in sign to the sphere's optimistic one.
+    #
+    # The two arms differ in this one variable, and answer whether the barrier needs 360 deg
+    # privileged geometry or can run on what the drone can actually sense -- i.e. whether
+    # p_cbf survives contact with a real F450.
+    #
+    # The depth arm forces an EXTRA sensor render per step (see step()): the sensors are
+    # otherwise not re-rendered until after the reward, so one frame would have to serve as
+    # both h(x_t) and h(x_{t+1}) and v_close would be identically zero.
+    #
+    # *** "depth" WAS MEASURED AND REJECTED. DO NOT RUN IT WITHOUT READING THIS. ***
+    # The image minimum is taken over a cone that moves with the drone's ATTITUDE, so h
+    # becomes a function of (position, orientation) rather than of position alone -- which
+    # is exactly what a barrier function may not be. An obstacle entering or leaving the
+    # 87x56 deg frustum steps the measurement discontinuously, and the barrier reads that
+    # as closing speed. Measured on the p_fov baseline at level 30, 381,800 paired steps
+    # (analysis/data/cbf_margin_p_fov_l30_depth.json):
+    #
+    #     max |v_close| 175.93 m/s against a 5.73 m/s max speed
+    #     3.712% of pairs (14,174) exceed what the drone could physically close
+    #
+    # One step in 27, each worth several reward units against a 10-15 arrive bonus, and the
+    # penalty is one-sided so the spurious CLOSING jumps are all charged while the spurious
+    # opening ones are free -- a systematic bias, not noise. It also creates a perverse
+    # incentive to yaw obstacles out of frame. The rays source has no such term: DF is
+    # 1-Lipschitz in position, so v_close <= ||v|| falls out of the geometry.
+    #
+    # Kept, inert and unit-tested, because the negative result is worth more than the
+    # deletion -- and because the same reduction is the right starting point for anyone
+    # building a DEPLOYABLE clearance signal, which this one genuinely is. It would need a
+    # formulation that does not differentiate a moving sensing window.
+    cbf_source = os.environ.get("F450_CBF_SOURCE", "rays")
+
     # --- OBSERVATIONS ---
     state_dim = 17
     privileged_observation_space_dim = 0
