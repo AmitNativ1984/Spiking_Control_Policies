@@ -50,6 +50,10 @@ _register("mlp_gru_actor_critic", GRUActorCriticNetworkBuilder)
 _register("mlp_vae_actor_critic", VAEActorCriticNetworkBuilder)
 _register("popsan", POPSANNetworkBuilder)
 
+# Network names whose actor block actually reads `observation_bounds`; see
+# bind_encoder_bounds. Keep this in step with snn/pop_spiking_actor.py.
+_BOUNDS_CONSUMERS = {"popsan"}
+
 
 def bind_encoder_bounds(config: dict, task_config=None) -> dict:
     """Give the PopSAN encoder its per-dimension clamp bounds, derived from the task.
@@ -67,7 +71,16 @@ def bind_encoder_bounds(config: dict, task_config=None) -> dict:
 
     A value already in the YAML wins, so a config can pin bounds explicitly — which is
     also how the runner installs bounds measured from a teacher rollout. Networks with no
-    `actor` block, and tasks that publish no layout, are left alone.
+    `actor` block, tasks that publish no layout, and networks that do not consume bounds at
+    all are left alone.
+
+    ONLY `popsan` CONSUMES THESE (snn/pop_spiking_actor.py asserts one window per input
+    dimension). The MLP, GRU and end-to-end VAE networks receive the list and ignore it, so
+    deriving it for them was always wasted work — and it became a hard failure with the
+    end-to-end depth policy, whose layout names a `depth_image` type the per-type table has
+    no window for, and for which expanding the layout would write a 57,600-entry list into
+    every saved config.yaml. Skipping non-consumers fixes both. A popsan config that reaches
+    the encoder without bounds still fails loudly there, not silently.
 
     Args:
         config: The full parsed rl_games config (the dict with a "params" key).
@@ -92,7 +105,11 @@ def bind_encoder_bounds(config: dict, task_config=None) -> dict:
                 f"(known: {task_registry.get_task_names()}). Did you `import config`?"
             ) from None
 
-    actor = config["params"]["network"].get("actor")
+    network = config["params"]["network"]
+    if network.get("name") not in _BOUNDS_CONSUMERS:
+        return config
+
+    actor = network.get("actor")
     layout = getattr(task_config, "observation_layout", None)
     if actor is None or layout is None:
         return config

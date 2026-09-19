@@ -249,17 +249,40 @@ class task_config:
             (slice(10, 13), "gravity"),             # gravity in body frame (normalized)
             (slice(13, 17), "prev_action"),         # transformed action: thrust, roll, pitch, yaw_rate
     ]
-    # VAE latents only when enabled; appended so the state dims keep indices [0:17].
-    if vae_config.use_vae:
+    # The depth half, only when enabled; appended so the state dims keep indices [0:17].
+    # Which form it takes depends on where the encoder lives: 32 latents when the env owns a
+    # frozen encoder, or the whole flattened image when the POLICY owns a trainable one and
+    # the env is only shipping pixels.
+    if vae_config.use_vae and vae_config.train_encoder:
+        observation_layout.append(
+            (
+                slice(17, 17 + vae_config.target_height * vae_config.target_width),
+                "depth_image",  # raw flattened depth; encoded inside the policy network
+            )
+        )
+    elif vae_config.use_vae:
         observation_layout.append(
             (slice(17, 17 + vae_config.latent_dims), "vae_latent")  # DepthVAE latents
         )
 
-    # The layout must tile [0, observation_space_dim) exactly. Checked here rather than at
-    # a consumer, so an edit to the layout fails at import, not mid-rollout.
-    assert sorted(i for sl, _ in observation_layout for i in range(sl.start, sl.stop)) \
-        == list(range(observation_space_dim)), \
-        "observation_layout must cover every index in [0, observation_space_dim) exactly once"
+    # The layout must tile [0, observation_space_dim) exactly. Checked here rather than at a
+    # consumer, so an edit to the layout fails at import, not mid-rollout.
+    #
+    # Checked by walking the sorted slices rather than by materialising every index: with the
+    # raw depth image in the layout that would build a 57,617-element list on every import of
+    # this module, for a property that is about slice BOUNDARIES.
+    _covered = 0
+    for _sl, _name in sorted(observation_layout, key=lambda kv: kv[0].start):
+        assert _sl.start == _covered, (
+            f"observation_layout has a gap or overlap at {_name}: expected it to start at "
+            f"{_covered}, got {_sl.start}"
+        )
+        _covered = _sl.stop
+    assert _covered == observation_space_dim, (
+        f"observation_layout covers {_covered} of {observation_space_dim} dimensions -- it "
+        f"must tile [0, observation_space_dim) exactly once"
+    )
+    del _covered
 
 
     # --- REWARD PARAMETERS ---
