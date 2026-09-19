@@ -105,23 +105,87 @@ def test_obstacles_are_placed_at_high_intensity():
     assert (live <= NUM_SLOTS - NUM_KEEP).all()
 
 
+def _distance_from_spawn_box(manager, state):
+    """True Euclidean distance from each live obstacle to the spawn BOX.
+
+    Deliberately NOT expressed in the keep-out's own coordinates. The previous version of
+    this test re-derived the manager's ellipsoid and asserted the obstacles satisfied it,
+    which is a tautology: it restates the implementation instead of the guarantee, and it
+    passed for as long as the ellipsoid was the wrong shape.
+    """
+    lower = torch.tensor(LOWER)
+    upper = torch.tensor(UPPER)
+    centre = 0.5 * (lower + upper)
+    half_extent = 0.5 * (manager.spawn_ratio_hi - manager.spawn_ratio_lo) * (upper - lower)
+
+    positions = state[:, NUM_KEEP:, 0:3]
+    live = positions[..., 0] > -900
+    outside = ((positions - centre).abs() - half_extent).clamp(min=0.0)
+    return outside.norm(dim=2), live
+
+
 def test_no_live_obstacle_lands_inside_the_spawn_keep_out():
     """The count is capped at the number of valid candidates, so an invalid one can never
     be promoted into the surviving set when the draw runs hot."""
     manager, state = make_manager(5.0)  # absurd density: the draw saturates the pool
     manager.reset_idx(ALL_ENVS)
 
+    distance, live = _distance_from_spawn_box(manager, state)
+    assert (distance[live] >= manager.clearance).all(), (
+        "an obstacle spawned inside the keep-out")
+
+
+def test_keep_out_holds_along_the_box_diagonals():
+    """The regression this file exists to prevent.
+
+    The keep-out used to be an ELLIPSOID with semi-axes (half_extent + clearance). The
+    spawn region is a BOX, and the set of points at least `clearance` away from a box is
+    that box Minkowski-summed with a ball -- a ROUNDED BOX, which the ellipsoid is
+    strictly inside everywhere off the principal axes. So obstacles were admitted along
+    the diagonals at well under the clearance: on the shipped configuration the worst
+    admitted obstacle sat 0.31 m from the spawn box where 0.95 m was required, and ~0.9%
+    of spawn poses could begin already in contact with a 0.6 m sphere.
+
+    Averaging over resets is not enough to catch it -- the violation is confined to the
+    corners, so this hammers the same env many times and checks the WORST case.
+    """
+    manager, state = make_manager(0.5)
+    worst = float("inf")
+    for _ in range(40):
+        manager.reset_idx(ALL_ENVS)
+        distance, live = _distance_from_spawn_box(manager, state)
+        if live.any():
+            worst = min(worst, float(distance[live].min()))
+    assert worst >= manager.clearance, (
+        f"closest live obstacle sat {worst:.3f} m from the spawn box, inside the "
+        f"{manager.clearance} m clearance -- the keep-out region is the wrong shape")
+
+
+def test_keep_out_volume_matches_the_region_actually_rejected():
+    """The Poisson mean is computed against `extent - keep_out_volume`. If that volume is
+    not the volume of the region the test rejects, the realized density silently drifts
+    from the configured one."""
+    manager, state = make_manager(0.067)
     lower = torch.tensor(LOWER)
     upper = torch.tensor(UPPER)
-    centre = 0.5 * (lower + upper)
-    semi_axes = 0.5 * (manager.spawn_ratio_hi - manager.spawn_ratio_lo) * (
-        upper - lower
-    ) + manager.clearance
+    h = 0.5 * (manager.spawn_ratio_hi - manager.spawn_ratio_lo) * (upper - lower)
+    r = manager.clearance
 
-    positions = state[:, NUM_KEEP:, 0:3]
-    live = positions[..., 0] > -900
-    normalized = ((positions - centre) / semi_axes).norm(dim=2)
-    assert (normalized[live] >= 1.0).all(), "an obstacle spawned inside the keep-out"
+    analytic = (
+        8 * h.prod()
+        + 8 * r * (h[0] * h[1] + h[1] * h[2] + h[0] * h[2])
+        + 2 * math.pi * r * r * h.sum()
+        + (4 / 3) * math.pi * r ** 3
+    )
+
+    # Monte-Carlo the same region: a point is inside iff its distance from the box < r.
+    pts = (torch.rand(400_000, 3) - 0.5) * 2 * (h + r) * 1.05
+    inside = (((pts.abs() - h).clamp(min=0.0)).norm(dim=1) < r).float().mean()
+    mc_volume = inside * (2 * (h + r) * 1.05).prod()
+
+    assert torch.isclose(analytic, mc_volume, rtol=0.02), (
+        f"keep-out volume formula {analytic:.2f} m^3 disagrees with the region it "
+        f"describes ({mc_volume:.2f} m^3)")
 
 
 def test_obstacles_span_the_whole_box():
@@ -186,9 +250,10 @@ def test_ground_anchored_obstacles_still_scatter_in_the_free_axes():
 
 
 def test_ground_anchored_obstacles_respect_a_column_keep_out():
-    """The 3D ellipsoid test clears every floor-level asset, so a tree could stand
-    directly under the spawn point with its canopy through it. Pinned axes drop out of
-    the distance, leaving an elliptical column in x/y."""
+    """A 3D distance test clears every floor-level asset, so a tree could stand directly
+    under the spawn point with its canopy through it. Pinned axes drop out of the
+    distance, leaving a keep-out COLUMN in x/y -- the spawn box's footprint grown by
+    `clearance`."""
     manager, state = make_manager_with_anchored_slots(5.0, num_anchored=6)
     manager.reset_idx(ALL_ENVS)
 

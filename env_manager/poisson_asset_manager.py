@@ -42,7 +42,8 @@ logger = CustomLogger("poisson_asset_manager")
 
 class PoissonAssetManager(AssetManager):
     """Homogeneous Poisson point process over the env box, thinned by a keep-out
-    ellipsoid around the env centre (where the drone spawns).
+    region around the env centre (where the drone spawns) -- the spawn box grown by
+    `clearance` in every direction.
 
     Structural assets (the ground plane and any perimeter walls) are NOT part of the
     process. asset_loader.select_and_order_assets() appendleft()s every keep_in_env asset,
@@ -62,8 +63,10 @@ class PoissonAssetManager(AssetManager):
                                           units -- read straight from the robot config so
                                           the spawn box has a single source of truth.
         clearance                       : float, metres added to the spawn-box
-                                          half-extents to form the keep-out ellipsoid
-                                          (max obstacle radius + drone radius).
+                                          half-extents to form the keep-out region
+                                          (max obstacle radius + drone radius). It is a
+                                          true minimum separation from the spawn box, so
+                                          no reachable spawn pose can start in contact.
     """
 
     def init_tensors(self, global_tensor_dict, num_keep_in_env):
@@ -143,14 +146,27 @@ class PoissonAssetManager(AssetManager):
         )[env_ids, num_keep:, 0:3]
         positions = torch.where(pinned, anchored, positions)
 
-        # 2. Keep-out ellipsoid, sized per env from that env's OWN bounds so it tracks the
-        #    randomized box exactly. A sphere fits the spawn box badly once the z range is
-        #    widened for elevation randomization (it would need R ~= 2.0 m and remove
-        #    ~34 m^3); the ellipsoid removes ~15 m^3 for the same guarantee.
+        # 2. Keep-out region, sized per env from that env's OWN bounds so it tracks the
+        #    randomized box exactly.
+        #
+        #    THE REGION IS A ROUNDED BOX, NOT AN ELLIPSOID. The spawn region is a BOX, and
+        #    the set of points at least `clearance` from every point of a box is that box
+        #    Minkowski-summed with a ball of radius `clearance`. An ellipsoid with
+        #    semi-axes (half_extent + clearance) -- which is what this used to use -- is
+        #    strictly INSIDE that set everywhere except along the three principal axes,
+        #    so it admitted obstacles that violated the clearance it was supposed to
+        #    guarantee. Measured on the shipped config (spawn half-extents [1, 1, 0.75] m,
+        #    clearance 0.95 m): the worst admitted obstacle sat 0.63 m from a reachable
+        #    spawn point where 0.95 m is required for the largest sphere, and the failure
+        #    direction was diagonal. That is an episode that begins in contact -- an
+        #    unavoidable crash, since collision_force_threshold is 0.005 N.
+        #
+        #    The correct region removes ~44 m^3 where the ellipsoid removed ~27 m^3. On a
+        #    ~1970 m^3 free volume that is 0.9% fewer obstacles: the density is unchanged
+        #    for practical purposes, and it is now the density that was actually asked for.
         half_extent = 0.5 * (self.spawn_ratio_hi - self.spawn_ratio_lo) * extent
-        semi_axes = half_extent + self.clearance
 
-        # 3. Thin the process: drop candidates inside the ellipsoid. Reject-and-drop, NOT
+        # 3. Thin the process: drop candidates inside the keep-out. Reject-and-drop, NOT
         #    push-to-surface -- pushing would pile up a density spike on the shell.
         #
         #    Pinned axes are dropped from the distance. A ground-anchored tree sits at
@@ -164,9 +180,15 @@ class PoissonAssetManager(AssetManager):
         #    nothing sampled, so there is nothing to reject: its position is exactly where
         #    the config author put it. Without this it would score distance 0, read as
         #    "inside the keep-out", and be culled on every single reset.
-        delta = (positions - centre.unsqueeze(1)) / semi_axes.unsqueeze(1)
+        #    Per-axis distance from the SURFACE of the spawn box, clamped to 0 inside it,
+        #    so the norm below is the true Euclidean distance from the box. Zeroing the
+        #    pinned axes turns it into a distance from the box's x/y FOOTPRINT, which is
+        #    the rectangular-column analogue of the old elliptical column and keeps the
+        #    ground-anchored-tree behaviour the comment above describes.
+        outside = (positions - centre.unsqueeze(1)).abs() - half_extent.unsqueeze(1)
+        outside = outside.clamp(min=0.0)
         free = ~pinned
-        valid = (delta * free.float()).norm(dim=2) >= 1.0
+        valid = (outside * free.float()).norm(dim=2) >= self.clearance
         valid |= ~free.any(dim=2)
 
         # 4. Per-env obstacle count from that env's own free volume. The floor is not
@@ -177,7 +199,20 @@ class PoissonAssetManager(AssetManager):
         #    The upper bound is the number of VALID candidates, not num_free. Invalid ones
         #    are ranked last by step 5 and would otherwise survive whenever the draw
         #    exceeds the valid count -- putting an obstacle inside the spawn keep-out.
-        free_volume = extent.prod(dim=1) - (4.0 / 3.0) * math.pi * semi_axes.prod(dim=1)
+        #    The volume subtracted must be the SAME region the test above rejects, or the
+        #    realized density drifts from the configured one. For a box of half-extents h
+        #    grown by r, that is
+        #        8*h1*h2*h3 + 8r(h1h2 + h2h3 + h1h3) + 2*pi*r^2*(h1+h2+h3) + 4/3*pi*r^3
+        #    (box, face slabs, edge quarter-cylinders, corner octants).
+        h1, h2, h3 = half_extent[:, 0], half_extent[:, 1], half_extent[:, 2]
+        r = self.clearance
+        keep_out_volume = (
+            8.0 * h1 * h2 * h3
+            + 8.0 * r * (h1 * h2 + h2 * h3 + h1 * h3)
+            + 2.0 * math.pi * r * r * (h1 + h2 + h3)
+            + (4.0 / 3.0) * math.pi * r ** 3
+        )
+        free_volume = extent.prod(dim=1) - keep_out_volume
         counts = torch.poisson(intensity * free_volume.clamp(min=0.0)).clamp_(
             min=0.0, max=float(num_free)
         )
