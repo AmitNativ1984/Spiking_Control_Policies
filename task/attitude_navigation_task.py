@@ -216,7 +216,23 @@ class NavigationWithObstaclesTask(BaseTask):
         )
 
         # VAE encoder for depth images (custom DepthVAE). Encodes all envs in one batch.
-        if self.task_config.vae_config.use_vae:
+        #
+        # ... unless the encoder is being trained END-TO-END, in which case it lives inside
+        # the policy network instead (networks/ann/vae_actor_critic.py) and the task's job
+        # is only to ship the raw pixels. Building a second, frozen copy here would waste an
+        # encode per step and, worse, invite someone to compare its latents with the ones
+        # the policy is actually using, which diverge the moment training starts.
+        if self.task_config.vae_config.use_vae and self.task_config.vae_config.train_encoder:
+            self.vae_model = None
+            self.image_latents = None
+            logger.warning(
+                "vae_config.train_encoder=True: the depth encoder is INSIDE the policy "
+                f"network and the observation carries the raw {self.task_config.vae_config.target_height}"
+                f"x{self.task_config.vae_config.target_width} image "
+                f"({self.task_config.observation_space_dim} floats per env). Rollout memory "
+                "scales with num_actors -- 1024 actors would need ~30 GB."
+            )
+        elif self.task_config.vae_config.use_vae:
             self.vae_model = DepthVAEImageEncoder(
                 config=self.task_config.vae_config, device=self.device
             )
@@ -1368,9 +1384,18 @@ class NavigationWithObstaclesTask(BaseTask):
         # yaw_rate are body-axis attitude setpoints for lee_attitude_control.
         self.task_obs["observations"][:, 13:17] = self.prev_action
         
-        # ADD VAE LATENTS (32D) TO OBSERVATION VECTOR
-        # [17:49] VAE latent encoding (32D)
-        if self.task_config.vae_config.use_vae and self.image_latents is not None:
+        # ADD THE DEPTH INFORMATION TO THE OBSERVATION VECTOR
+        # [17:49] VAE latent encoding (32D), or [17:] the raw flattened depth image when
+        # the encoder is trained end-to-end and therefore lives in the network.
+        #
+        # The frame is the one rendered by post_reward_calculation_step(), which runs before
+        # this -- the same frame the frozen path would have encoded, so the two modes see
+        # identical pixels.
+        if self.task_config.vae_config.use_vae and self.task_config.vae_config.train_encoder:
+            self.task_obs["observations"][:, self.task_config.state_dim:] = (
+                self.obs_dict["depth_range_pixels"].reshape(self.sim_env.num_envs, -1)
+            )
+        elif self.task_config.vae_config.use_vae and self.image_latents is not None:
             self.task_obs["observations"][:, 17:49] = self.image_latents
 
     def check_and_update_curriculum_level(self, successes, crashes, timeouts, exceeds):

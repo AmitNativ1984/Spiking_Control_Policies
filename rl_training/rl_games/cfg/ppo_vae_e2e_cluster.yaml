@@ -1,0 +1,159 @@
+# END-TO-END DEPTH ENCODER, keeping the p_cbf reward.
+#
+# Everywhere else in this tree the DepthVAE is frozen and lives in the ENV: the task encodes
+# depth and writes 32 latents into the observation, which reaches rl_games as DATA, so no
+# gradient can touch the encoder. The latent is therefore whatever minimises RECONSTRUCTION
+# error -- and there is no reason the 32 dimensions that best reconstruct a depth image are
+# the 32 that best fly through a forest. Here the encoder sits inside the policy network
+# (networks/ann/vae_actor_critic.py) and the policy and value losses shape it for CONTROL.
+#
+# --- WHY num_actors IS 128 AND NOT 1024 -------------------------------------------------
+# The observation has to carry the raw depth image instead of 32 numbers:
+# 17 + 180*320 = 57,617 floats per env. Rollout buffer at horizon 128:
+#     1024 actors -> ~30 GB   does not fit beside the sim on a 40 GB card
+#      128 actors -> ~3.5 GB  fits
+# minibatch_size drops 8192 -> 1024 with it, so gradient steps per update stay at
+# (horizon * num_actors / minibatch) * mini_epochs = (128*128/1024)*4 = 64, the same as
+# every other arm. What does NOT stay the same is the data per update: 16,384 samples
+# against 131,072, and a rollout/episode ratio of ~0.55 against 230+ step episodes. Updates
+# are therefore noisier here than in the arms this is compared against, which is a real
+# confound and not a tuning detail -- an 8x smaller batch is its own intervention.
+#
+# --- WHY normalize_input IS False -------------------------------------------------------
+# rl_games would fit a running mean/std over all 57,617 inputs, depth pixels included, and
+# hand the pre-trained encoder something quite unlike the [0,1] depth it was trained on --
+# making those weights worthless. Instead the network normalises only the 17 state channels,
+# using statistics copied out of the seed policy, and passes depth through the encoder's own
+# documented pipeline (* sensor_max_range -> metres -> normalize_depth).
+#
+# --- HOW THE WEIGHTS ARRIVE -------------------------------------------------------------
+# NOT via --checkpoint. Resuming needs an optimizer state matching the parameter set, and
+# the parameter set has changed (the encoder's weights are new), so rl_games would refuse it
+# or restore a mismatched one. The network loads its own seeds instead, from
+# encoder_checkpoint and policy_checkpoint below, and the run starts at epoch 0 with a
+# correctly-sized fresh optimizer. tests/test_vae_actor_critic.py asserts that the seeded
+# network produces IDENTICAL actions to the p_cbf policy it starts from, so the run begins
+# from that behaviour and diverges only because the encoder is now learning.
+#
+# policy_checkpoint is ep_2350, not the last one: that is where the p_cbf arm's crash rate
+# bottomed (10.22%) before it drifted into over-compliance.
+#
+# --- SUBMIT ------------------------------------------------------------------------------
+#   sbatch --export=ALL,CONFIG_FILE=rl_training/rl_games/cfg/ppo_vae_e2e_cluster.yaml \
+#     ,EXPERIMENT=f450_nav_vae_e2e,CURRICULUM_LEVEL=30,F450_TRAIN_VAE=1 \
+#     ,F450_LAMBDA_FOV=0.015,F450_LAMBDA_BLIND=0.0 \
+#     ,F450_LAMBDA_CBF=0.5,F450_D_SAFE=0.7,F450_ALPHA_CBF=4.0 \
+#     slurm/train_navigation.sbatch
+#
+# F450_TRAIN_VAE=1 is REQUIRED: it is what makes the task emit raw depth instead of latents.
+# Without it the observation is 49-D, the network's assert fires at build time, and the run
+# dies immediately rather than training on the wrong thing -- which is the intended failure.
+#
+# --- WHAT TO WATCH -----------------------------------------------------------------------
+# The encoder is ~2.4M parameters against the heads' ~150k, and grad_norm is 1.0 over all of
+# them, so the clip may throttle the encoder. If losses/a_loss and c_loss move but crash
+# rate does not, check whether the gradient norm is saturating. Also watch for the latent
+# collapsing: the value loss shares the encoder and critic_coef is 2, so the value objective
+# carries twice the policy's weight into those shared parameters.
+params:
+  seed: 42
+  algo:
+    name: a2c_continuous
+
+  model:
+    name: continuous_a2c_logstd
+
+  load_checkpoint: False
+
+  network:
+    name: mlp_vae_actor_critic
+    separate: True
+    space:
+      continuous:
+        mu_activation: None
+        sigma_activation: None
+        mu_init:
+          name: default
+        sigma_init:
+          name: const_initializer
+          val: 0
+        fixed_sigma: True
+
+    # Geometry, mirroring config/task_config's vae_config. The network asserts that
+    # state_dim + img_height*img_width equals the observation the task actually produces,
+    # so a mismatch here cannot pass silently.
+    state_dim: 17
+    img_height: 180
+    img_width: 320
+    latent_dim: 32
+    sensor_max_range: 10.0
+    max_depth_m: 7.0
+    min_depth_m: 0.1
+
+    train_encoder: True
+    encoder_checkpoint: /workspaces/aerial_gym_docker/vae_depth/runs/20260828_060313/checkpoints/epoch_200.pth
+    policy_checkpoint: /workspaces/aerial_gym_docker/runs/f450_nav_p_cbf_ft_hot/2026-09-18_13-50-26/nn/last_f450_nav_p_cbf_ft_hot_ep_2350_rew_1.7070831.pth
+
+    actor:
+      hidden_dims: [256, 256, 64]
+      activation: elu
+    critic:
+      hidden_dims: [256, 256, 64]
+      activation: elu
+
+  config:
+    name: f450_navigation
+    env_name: f450_navigation_task
+    env_config:
+      headless: True
+      use_warp: True
+
+    reward_shaper:
+      scale_value: 1.0
+
+    normalize_advantage: True
+    gamma: 0.99
+    tau: 0.95
+    ppo: True
+
+    # Every hyperparameter below is the p_cbf arm's, unchanged, so the comparison moves the
+    # encoder and the batch size and nothing else. See ppo_mlp_p_cbf_finetune_cluster.yaml
+    # for the reasoning behind each one.
+    learning_rate: 1e-4
+    lr_schedule: adaptive
+    kl_threshold: 0.008
+
+    save_best_after: 10
+    save_frequency: 50
+    score_to_win: 100000
+    grad_norm: 1.0
+    entropy_coef: 0.001
+    truncate_grads: True
+    e_clip: 0.2
+    clip_value: False
+
+    # 128 actors and a 1024 minibatch: see the header. horizon_length stays at 128.
+    num_actors: 128
+    horizon_length: 128
+    minibatch_size: 1024
+    mini_epochs: 4
+    seq_length: 8
+
+    critic_coef: 2
+    normalize_value: True
+    value_bootstrap: True
+
+    # False, and load-bearing -- see the header.
+    normalize_input: False
+
+    bounds_loss_coef: 0.01
+    # Starts at epoch 0 (fresh optimizer, seeded weights), so this is the number of epochs
+    # actually trained, unlike the fine-tune configs where it is an absolute ceiling.
+    max_epochs: 1000
+    use_diagnostics: True
+
+    player:
+      render: True
+      deterministic: True
+      games_num: 100000
+      num_actors: 1

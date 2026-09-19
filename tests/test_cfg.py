@@ -43,10 +43,13 @@ def test_config_names_a_registered_task(path):
 def test_custom_network_builders_are_registered():
     """model_builder.NETWORK_REGISTRY holds only CUSTOM builders — rl_games' built-ins
     (e.g. 'actor_critic') resolve through NetworkBuilder's own factory and never appear
-    here. So this checks our three, and test_config_builds_a_model covers the rest."""
-    assert {"mlp_actor_critic", "mlp_gru_actor_critic", "popsan"} <= set(
-        model_builder.NETWORK_REGISTRY
-    )
+    here. So this checks ours, and test_config_builds_a_model covers the rest."""
+    assert {
+        "mlp_actor_critic",
+        "mlp_gru_actor_critic",
+        "mlp_vae_actor_critic",
+        "popsan",
+    } <= set(model_builder.NETWORK_REGISTRY)
 
 
 @pytest.mark.parametrize("path", CFG_PATHS, ids=cfg_id)
@@ -58,11 +61,28 @@ def test_config_builds_a_model(path):
     params = config_dict["params"]
     task_config = task_registry.get_task_config(params["config"]["env_name"])
 
+    network = dict(params["network"])
+    if network.get("train_encoder"):
+        # This config trains the depth encoder inside the policy, so it requires the task's
+        # END-TO-END observation -- raw pixels instead of latents -- which
+        # vae_config.train_encoder switches on via F450_TRAIN_VAE at import time. Sizing it
+        # from task_config.observation_space_dim would therefore test whichever mode the
+        # suite happens to run in. The network block is self-describing, so use that; the
+        # network's own assert is what catches a genuine task/config mismatch at runtime.
+        obs_dim = network["state_dim"] + network["img_height"] * network["img_width"]
+        # And drop the pre-trained weight paths: this test asks whether the model BUILDS and
+        # is sized right, not whether a particular run's checkpoint is on disk. runs/ is
+        # gitignored, so depending on one would break the suite on a fresh clone.
+        network.pop("encoder_checkpoint", None)
+        network.pop("policy_checkpoint", None)
+    else:
+        obs_dim = task_config.observation_space_dim
+
     model = ModelBuilder().load(
-        {"model": params["model"], "network": params["network"]}
+        {"model": params["model"], "network": network}
     ).build({
         "actions_num": task_config.action_space_dim,
-        "input_shape": (task_config.observation_space_dim,),
+        "input_shape": (obs_dim,),
         "num_seqs": 8,
         "value_size": 1,
         "normalize_input": params["config"]["normalize_input"],

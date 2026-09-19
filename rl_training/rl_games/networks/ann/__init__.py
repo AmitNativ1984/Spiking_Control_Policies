@@ -4,6 +4,7 @@ from .actor import ANNMLPActor
 from .actor_critic import ANNMLPActorCriticNetwork, MLPActorCriticNetworkBuilder
 from .critic import ANNMLPCritic
 from .gru_actor_critic import GRUActorCriticNetwork, GRUActorCriticNetworkBuilder
+from .vae_actor_critic import VAEActorCriticNetwork, VAEActorCriticNetworkBuilder
 
 __all__ = [
     "ANNMLPActor",
@@ -12,4 +13,6 @@ __all__ = [
     "MLPActorCriticNetworkBuilder",
     "GRUActorCriticNetwork",
     "GRUActorCriticNetworkBuilder",
+    "VAEActorCriticNetwork",
+    "VAEActorCriticNetworkBuilder",
 ]

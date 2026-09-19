@@ -193,6 +193,22 @@ class task_config:
         use_vae = True
         latent_dims = 32
 
+        # END-TO-END: train the encoder with the RL objective instead of freezing it.
+        #
+        # When True the task stops encoding depth itself and puts the RAW depth image in
+        # the observation, so the encoder can live inside the policy network
+        # (rl_training/rl_games/networks/ann/vae_actor_critic.py) and receive PPO
+        # gradients. The latent then optimises CONTROL rather than reconstruction, which
+        # is the point -- there is no reason the 32 dimensions that best reconstruct a
+        # depth image are the 32 that best fly through a forest.
+        #
+        # THE COST IS THE ROLLOUT BUFFER: the observation goes from 49 floats per env to
+        # 17 + 180*320 = 57,617, which is ~30 GB at 1024 actors and does not fit beside
+        # the sim on a 40 GB card. Runs using this MUST drop num_actors (128 gives
+        # ~3.8 GB) and scale minibatch_size with it to hold the gradient-step count.
+        # See rl_training/rl_games/cfg/ppo_vae_e2e_cluster.yaml.
+        train_encoder = os.environ.get("F450_TRAIN_VAE", "0") not in ("0", "", "false", "False")
+
         # Path to trained DepthVAE checkpoint. No F450-specific VAE has been trained yet,
         # so this points at the same checkpoint navigation_with_obstacles uses.
         model_file = "/workspaces/aerial_gym_docker/vae_depth/runs/20260828_060313/checkpoints/epoch_200.pth"
@@ -206,8 +222,13 @@ class task_config:
         min_depth_m = 0.1
         sensor_max_range = 10.0
 
-    # Observation space: state_dim [+ vae_config.latent_dims when use_vae].
-    observation_space_dim = state_dim + (vae_config.latent_dims if vae_config.use_vae else 0)
+    # Observation space: state_dim [+ vae_config.latent_dims when use_vae], or, when the
+    # encoder is trained end-to-end, state_dim + the flattened raw depth image, because the
+    # encoder then lives in the network and the env must ship it the pixels.
+    if vae_config.use_vae and vae_config.train_encoder:
+        observation_space_dim = state_dim + vae_config.target_height * vae_config.target_width
+    else:
+        observation_space_dim = state_dim + (vae_config.latent_dims if vae_config.use_vae else 0)
 
     # --- OBSERVATION LAYOUT ---
     #

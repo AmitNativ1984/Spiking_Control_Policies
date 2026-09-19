@@ -9,7 +9,11 @@ then names them from a YAML's `network.name`.
 
 from rl_games.algos_torch import model_builder
 
-from .ann import GRUActorCriticNetworkBuilder, MLPActorCriticNetworkBuilder
+from .ann import (
+    GRUActorCriticNetworkBuilder,
+    MLPActorCriticNetworkBuilder,
+    VAEActorCriticNetworkBuilder,
+)
 from .snn import POPSANNetworkBuilder, bounds_from_layout
 from .teacher_student import build_teacher
 
@@ -43,6 +47,7 @@ def _register(name, builder):
 
 _register("mlp_actor_critic", MLPActorCriticNetworkBuilder)
 _register("mlp_gru_actor_critic", GRUActorCriticNetworkBuilder)
+_register("mlp_vae_actor_critic", VAEActorCriticNetworkBuilder)
 _register("popsan", POPSANNetworkBuilder)
 
 
