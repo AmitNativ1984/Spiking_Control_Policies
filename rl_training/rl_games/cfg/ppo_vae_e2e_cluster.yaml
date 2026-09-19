@@ -22,9 +22,11 @@
 # --- WHY normalize_input IS False -------------------------------------------------------
 # rl_games would fit a running mean/std over all 57,617 inputs, depth pixels included, and
 # hand the pre-trained encoder something quite unlike the [0,1] depth it was trained on --
-# making those weights worthless. Instead the network normalises only the 17 state channels,
-# using statistics copied out of the seed policy, and passes depth through the encoder's own
-# documented pipeline (* sensor_max_range -> metres -> normalize_depth).
+# making those weights worthless. Instead the network normalises the 49 FEATURES after
+# encoding -- state AND latent, exactly as the seed policy's normalize_input did, using its
+# statistics -- and passes depth through the encoder's own documented pipeline
+# (* sensor_max_range -> metres -> normalize_depth). Normalising only the state half was
+# tried and is wrong: the seed's trunk was trained on normalised latents.
 #
 # --- HOW THE WEIGHTS ARRIVE -------------------------------------------------------------
 # NOT via --checkpoint. Resuming needs an optimizer state matching the parameter set, and
@@ -50,11 +52,15 @@
 # dies immediately rather than training on the wrong thing -- which is the intended failure.
 #
 # --- WHAT TO WATCH -----------------------------------------------------------------------
-# The encoder is ~2.4M parameters against the heads' ~150k, and grad_norm is 1.0 over all of
-# them, so the clip may throttle the encoder. If losses/a_loss and c_loss move but crash
-# rate does not, check whether the gradient norm is saturating. Also watch for the latent
-# collapsing: the value loss shares the encoder and critic_coef is 2, so the value objective
-# carries twice the policy's weight into those shared parameters.
+# info/kl FIRST, and early. The failure mode here is not slow degradation, it is the trust
+# region breaking down: training the encoder moves the observation -> feature map, so a small
+# policy-parameter step can be a large behavioural step and the KL guard cannot hold. The
+# collapsed run sat at 0.0666 against a 0.008 target with the LR already cut to 3.8e-5. If KL
+# climbs past ~0.02 and stays there, lower encoder_grad_scale further rather than waiting.
+#
+# Then success_rate against the 0.884 it starts from. This run BEGINS at the seed policy's
+# behaviour, so any sustained fall is the encoder damaging a representation that already
+# worked -- there is no early-training excuse for it.
 params:
   seed: 42
   algo:
@@ -91,6 +97,13 @@ params:
     min_depth_m: 0.1
 
     train_encoder: True
+    # The encoder learns ~100x slower than the heads reading it, and the value loss is kept
+    # out of it entirely. Both exist because the first attempt without them (job 271932)
+    # started from a verified copy of an 88.4%-success policy and reached 92.9% CRASH in 309
+    # epochs, with KL at 0.0666 against a 0.008 target. See the network's module docstring
+    # for the full diagnosis; setting these to 1.0 and False reproduces that run.
+    encoder_grad_scale: 0.01
+    critic_detaches_encoder: True
     encoder_checkpoint: /workspaces/aerial_gym_docker/vae_depth/runs/20260828_060313/checkpoints/epoch_200.pth
     policy_checkpoint: /workspaces/aerial_gym_docker/runs/f450_nav_p_cbf_ft_hot/2026-09-18_13-50-26/nn/last_f450_nav_p_cbf_ft_hot_ep_2350_rew_1.7070831.pth
 

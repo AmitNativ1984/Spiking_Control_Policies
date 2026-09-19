@@ -42,6 +42,38 @@ The statistics are FIXED buffers copied from the donor, not a running estimate. 
 stale as the encoder drifts, which is harmless: a fixed affine on the encoder's output is
 something the encoder itself can absorb, whereas a running normaliser over a latent that is
 simultaneously being trained is a moving target under PPO.
+
+--- THE FIRST ATTEMPT AT THIS DESTROYED THE POLICY, AND WHY -----------------------------
+
+Job 271932 started from a verified exact copy of a policy at 88.4% success and reached
+92.9% CRASH within 309 epochs. The diagnostic was the KL: 0.0666 against a 0.008 target,
+with the adaptive scheduler having already cut the learning rate to 3.8e-5. Updates far
+outside the trust region despite a small LR means the gradient direction was inconsistent
+between minibatches, and there were two compounding reasons:
+
+  1. THE REPRESENTATION MOVES UNDER THE POLICY. PPO's trust region constrains the policy
+     PARAMETERS, but training the encoder also changes the observation -> feature map, so a
+     small parameter step can be a large behavioural step and the KL guard cannot do its
+     job. This is the structural hazard of going end-to-end from a policy that was trained
+     against a frozen encoder.
+  2. THE VALUE LOSS DOMINATED THE ENCODER. 2.4M encoder parameters share one grad_norm clip
+     with ~150k head parameters, and critic_coef is 2, so the value loss carried twice the
+     policy loss into them. Early on the critic is mis-calibrated for the 8x smaller batch
+     this configuration forces, so large value gradients landed on the pre-trained features
+     and wrecked them -- and once the latent is noise, the policy that reads it fails.
+
+Two mechanisms answer those, both off by default in the sense that setting them neutral
+reproduces the failed run exactly:
+
+  encoder_grad_scale       multiplies every gradient entering the encoder, leaving the heads
+                           untouched, so the encoder learns ~100x slower than the policy on
+                           top of it. This is the standard way to fine-tune a pre-trained
+                           trunk, expressed as a gradient scale rather than a second
+                           optimizer param group because rl_games builds the optimizer over
+                           model.parameters() and does not expose groups.
+  critic_detaches_encoder  the value head reads the latent but sends no gradient back into
+                           it, so only the policy loss shapes the representation. The critic
+                           still learns freely on top of whatever the encoder produces.
 """
 
 from typing import Tuple
@@ -58,6 +90,26 @@ from .actor import ANNMLPActor
 from .critic import ANNMLPCritic
 
 _NORM_CLAMP = 5.0  # matches rl_games' normalize_input clipping
+
+
+class _ScaleGrad(torch.autograd.Function):
+    """Identity forward, scaled gradient backward.
+
+    Lets the encoder train at a different effective learning rate from the heads without a
+    second optimizer param group -- rl_games constructs the optimizer over
+    model.parameters() and exposes no way to group them. Because the forward pass is exactly
+    the identity, a network with any scale still reproduces its seed policy's actions, which
+    is what tests/test_vae_actor_critic.py checks.
+    """
+
+    @staticmethod
+    def forward(ctx, x, scale):
+        ctx.scale = scale
+        return x
+
+    @staticmethod
+    def backward(ctx, grad):
+        return grad * ctx.scale, None
 
 
 class VAEActorCriticNetworkBuilder(NetworkBuilder):
@@ -79,6 +131,8 @@ class VAEActorCriticNetwork(nn.Module):
         state_dim / img_height / img_width / latent_dim
         sensor_max_range / max_depth_m / min_depth_m
         train_encoder            False freezes it again, for an A/B against this very run
+        encoder_grad_scale       gradient multiplier into the encoder (default 0.01)
+        critic_detaches_encoder  True keeps the value loss out of the encoder (default True)
         encoder_checkpoint       DepthVAE .pth to seed the encoder from
         policy_checkpoint        MLP policy .pth to seed actor/critic and the state stats
         actor.hidden_dims / actor.activation
@@ -96,6 +150,9 @@ class VAEActorCriticNetwork(nn.Module):
         self.max_depth_m = float(config.get("max_depth_m", 7.0))
         self.min_depth_m = float(config.get("min_depth_m", 0.1))
         self.train_encoder = bool(config.get("train_encoder", True))
+        # See the module docstring: 1.0 and False together reproduce the run that collapsed.
+        self.encoder_grad_scale = float(config.get("encoder_grad_scale", 0.01))
+        self.critic_detaches_encoder = bool(config.get("critic_detaches_encoder", True))
 
         expected = self.state_dim + self.img_h * self.img_w
         assert input_dim == expected, (
@@ -225,6 +282,10 @@ class VAEActorCriticNetwork(nn.Module):
         depth_m = img * self.sensor_max_range
         x = normalize_depth(depth_m, self.max_depth_m, self.min_depth_m)
         z = self.encoder(x)[:, : self.latent_dim]  # mu; the encoder emits [mu, logvar]
+        if self.train_encoder and self.encoder_grad_scale != 1.0:
+            # Identity forward, so this cannot change what the policy does -- only how fast
+            # the encoder moves relative to the heads reading it.
+            z = _ScaleGrad.apply(z, self.encoder_grad_scale)
 
         # Normalise [state, latent] as ONE vector, which is what the donor's normalize_input
         # did -- its trunk never saw a raw latent.
@@ -236,12 +297,16 @@ class VAEActorCriticNetwork(nn.Module):
     def forward(self, obs_dict) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]:
         """Returns (mu, log_std, value, states); states is None for a feed-forward net.
 
-        Actor and critic SHARE the encoder, so the value loss shapes the latent too. That is
-        deliberate -- more gradient into a 32-D bottleneck that has to summarise a depth
-        image -- but note critic_coef is 2 in the yaml, so the value loss carries twice the
-        weight of the policy loss into those shared parameters.
+        Actor and critic share the encoder's OUTPUT, but by default only the policy loss
+        shapes the encoder itself: critic_coef is 2, so letting the value loss through gave
+        it twice the policy's weight over the representation, and that is what wrecked the
+        first attempt (see the module docstring). Detaching costs the encoder some gradient
+        signal and buys a representation that only the objective we care about moves.
+
+        Detaching the whole feature vector is equivalent to detaching just the latent here:
+        the state half descends from the observation, which is an input, not a parameter.
         """
         features = self.encode(obs_dict["obs"])
         mu, log_std = self.actor(features)
-        value = self.critic(features)
+        value = self.critic(features.detach() if self.critic_detaches_encoder else features)
         return mu, log_std, value, None

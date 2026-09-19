@@ -145,11 +145,83 @@ def test_gradients_reach_the_encoder():
     net = _build_net()
     img, state = _fake_batch()
     obs = torch.cat([state, img.reshape(img.shape[0], -1)], dim=1)
-    mu, _, value, _ = net({"obs": obs})
-    (mu.square().mean() + value.square().mean()).backward()
+    mu, _, _, _ = net({"obs": obs})
+    mu.square().mean().backward()
     grads = [p.grad for p in net.encoder.parameters() if p.grad is not None]
     assert grads, "no encoder parameter received a gradient"
     assert any(float(g.abs().sum()) > 0 for g in grads), "encoder gradients are all zero"
+
+
+def _encoder_grad_norm(**overrides):
+    from rl_training.rl_games.networks.ann import VAEActorCriticNetwork
+    net = VAEActorCriticNetwork(
+        input_dim=STATE_DIM + H * W, action_dim=4, **dict(NET_CFG, **overrides)
+    )
+    img, state = _fake_batch()
+    obs = torch.cat([state, img.reshape(img.shape[0], -1)], dim=1)
+    mu, _, value, _ = net({"obs": obs})
+    (mu.square().mean() + value.square().mean()).backward()
+    return sum(
+        float(p.grad.pow(2).sum()) for p in net.encoder.parameters() if p.grad is not None
+    ) ** 0.5
+
+
+def test_the_encoder_gradient_scale_is_applied():
+    """The mechanism that answers the collapse: the encoder must learn ~100x slower than the
+    heads reading it. Scaling the gradient is how, since rl_games builds one optimizer over
+    model.parameters() and exposes no param groups."""
+    fast = _encoder_grad_norm(encoder_grad_scale=1.0)
+    slow = _encoder_grad_norm(encoder_grad_scale=0.01)
+    assert fast > 0.0
+    assert slow == pytest.approx(fast * 0.01, rel=1e-3)
+
+
+def test_the_grad_scale_cannot_change_the_policy():
+    """Identity forward. If the scale altered actions it would be an intervention on the
+    policy rather than on its learning rate, and the seed-equivalence above would be void."""
+    from rl_training.rl_games.networks.ann import VAEActorCriticNetwork
+    img, state = _fake_batch()
+    obs = torch.cat([state, img.reshape(img.shape[0], -1)], dim=1)
+    outs = []
+    for scale in (1.0, 0.01):
+        net = VAEActorCriticNetwork(
+            input_dim=STATE_DIM + H * W, action_dim=4,
+            **dict(NET_CFG, encoder_grad_scale=scale),
+        ).eval()
+        with torch.no_grad():
+            outs.append(net({"obs": obs})[0])
+    assert torch.equal(outs[0], outs[1])
+
+
+def test_the_critic_does_not_train_the_encoder_by_default():
+    """critic_coef is 2, so letting the value loss into the encoder gave it twice the
+    policy's weight over the representation -- which is what wrecked the first attempt."""
+    from rl_training.rl_games.networks.ann import VAEActorCriticNetwork
+    img, state = _fake_batch()
+    obs = torch.cat([state, img.reshape(img.shape[0], -1)], dim=1)
+
+    def value_only_grad(detach):
+        net = VAEActorCriticNetwork(
+            input_dim=STATE_DIM + H * W, action_dim=4,
+            **dict(NET_CFG, critic_detaches_encoder=detach),
+        )
+        _, _, value, _ = net({"obs": obs})
+        value.square().mean().backward()
+        return sum(
+            float(p.grad.abs().sum())
+            for p in net.encoder.parameters() if p.grad is not None
+        )
+
+    assert value_only_grad(True) == 0.0, "value loss must not reach the encoder by default"
+    assert value_only_grad(False) > 0.0, "the switch must actually let it through"
+    # And the critic itself still learns either way.
+    net = VAEActorCriticNetwork(input_dim=STATE_DIM + H * W, action_dim=4, **NET_CFG)
+    _, _, value, _ = net({"obs": obs})
+    value.square().mean().backward()
+    assert any(
+        p.grad is not None and float(p.grad.abs().sum()) > 0
+        for p in net.critic.parameters()
+    )
 
 
 def test_freezing_the_encoder_is_respected():
