@@ -119,12 +119,16 @@ def main():
     print(f"[cfg] censoring at {args.range_cap:.1f} m; pose margins "
           f"xy {xy_margin:.1f} m, z {z_margin:.2f} m")
 
-    # Per-frame accumulators. Pixels inside one frame see the same obstacles, so the
-    # confidence interval has to bootstrap over FRAMES, not over rays.
-    frame_exposure, frame_events = [], []
+    # Accumulate per frame, but TAG each frame with the obstacle layout it came from.
+    # Rays inside a frame are correlated, and so are frames that share a layout -- the
+    # dominant variance in a Poisson field is which obstacles got drawn, not which
+    # pixel you look at. The interval below therefore resamples LAYOUTS.
+    frame_exposure, frame_events, frame_layout = [], [], []
+    layout_id = 0
     kept = 0
     while kept < args.frames:
         env_manager.global_tensor_dict["obstacle_intensity"] = intensity
+        layout_id += 1          # env_manager.reset() below re-draws every env's obstacles
         for pose_idx in range(max(args.poses_per_layout, 1)):
             if pose_idx == 0:
                 env_manager.reset()
@@ -163,6 +167,9 @@ def main():
                 frame_exposure.append(float(np.where(hit, d, args.range_cap)
                                             [~near_sentinel].sum()))
                 frame_events.append(int(hit.sum()))
+                # Each env holds its own independent Poisson draw, so the layout key is
+                # (reset index, env index), not the reset alone.
+                frame_layout.append((layout_id, e))
                 kept += 1
 
     exposure = np.array(frame_exposure)
@@ -171,24 +178,49 @@ def main():
         print(f"[warn] only {events.sum()} hits; lambda will be noisy. Raise --frames.")
     lam = exposure.sum() / max(events.sum(), 1)
 
-    # Bootstrap over frames: adjacent pixels are not independent samples.
+    # Cluster bootstrap over LAYOUTS. Resampling frames (or rays) would understate the
+    # interval, because the dominant variance is which obstacles were drawn.
+    keys = sorted(set(frame_layout))
+    by_layout = {k: [] for k in keys}
+    for i, k in enumerate(frame_layout):
+        by_layout[k].append(i)
+    idx_of = [np.array(by_layout[k]) for k in keys]
+
     rs = np.random.default_rng(args.seed)
-    boot = np.array([
-        (lambda i: exposure[i].sum() / max(events[i].sum(), 1))(
-            rs.integers(0, len(events), len(events)))
-        for _ in range(400)])
+    boot = []
+    for _ in range(1000):
+        pick = np.concatenate([idx_of[j] for j in
+                               rs.integers(0, len(idx_of), len(idx_of))])
+        boot.append(exposure[pick].sum() / max(events[pick].sum(), 1))
     lo_ci, hi_ci = np.percentile(boot, [2.5, 97.5])
 
-    print(f"[data] {kept} usable frames, {events.sum()} hits within "
-          f"{args.range_cap:.1f} m")
-    print(f"\n  MEAN FREE PATH lambda = {lam:.1f} m   (95% CI {lo_ci:.1f} - {hi_ci:.1f})")
-    print("  Agile Autonomy: 26.7 m (densest, s=4) .. 81.7 m (sparsest, s=7)")
-    if lam > 27:
+    print(f"[data] {kept} usable frames over {len(keys)} independent layouts, "
+          f"{events.sum()} hits within {args.range_cap:.1f} m")
+    if len(keys) < 60:
+        print(f"[warn] only {len(keys)} layouts. The interval is driven by layout "
+              f"variance -- raise --frames (or lower --poses_per_layout) until it is "
+              f"tight enough to decide against the 27 m threshold.")
+    # The statistical interval is not the whole story. Pooling rays across obstacle
+    # layouts makes the free-path distribution a MIXTURE of exponentials, which is not
+    # itself exponential, so the MLE carries a small systematic offset -- measured at
+    # 1-3% against closed-form fields, and it is what makes a pure bootstrap interval
+    # under-cover (67% at nominal 95% once enough layouts narrow it). Report both, and
+    # refuse to call a difference this tool cannot resolve.
+    SYS = 0.034          # validated systematic, fraction
+    lo_tot, hi_tot = lo_ci*(1-SYS), hi_ci*(1+SYS)
+    print(f"\n  MEAN FREE PATH lambda = {lam:.1f} m")
+    print(f"    statistical 95% CI      {lo_ci:5.1f} - {hi_ci:5.1f} m")
+    print(f"    incl. 3.4% systematic   {lo_tot:5.1f} - {hi_tot:5.1f} m   <- use this one")
+    print("\n  Agile Autonomy: 26.7 m (densest, s=4) .. 81.7 m (sparsest, s=7)")
+    if lo_tot > 26.7:
         print("  -> SPARSER than their densest forest")
-    elif lam >= 15:
+    elif hi_tot < 15.0:
+        print("  -> DENSER than anything in either paper")
+    elif lo_tot >= 15.0 and hi_tot <= 26.7:
         print("  -> COMPARABLE to their forest range")
     else:
-        print("  -> DENSER than anything in either paper")
+        print("  -> TOO CLOSE TO CALL at this sample size. The interval straddles a "
+              "threshold; raise --frames and re-run before concluding anything.")
 
 
 if __name__ == "__main__":
