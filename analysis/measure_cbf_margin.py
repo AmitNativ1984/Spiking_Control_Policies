@@ -56,6 +56,20 @@ HIST_MAX = 6.0  # m, matches the probe's default range
 D_SAFE_GRID = [0.7, 1.0, 1.25, 1.5]
 ALPHA_GRID = [0.5, 1.0, 2.0, 4.0, 8.0]
 
+# The inverse-power barrier h = 1 - (d_safe/d)^n (cbf_form = "inverse_power"). Its excess
+# is in h-units per second, so its lambda is NOT comparable to the linear table's.
+INV_D_SAFE_GRID = [0.5, 0.7]
+INV_POWER_GRID = [2.0, 3.0]
+INV_ALPHA_GRID = [2.0, 4.0, 8.0]
+
+# Distance bands (m) over which each cell's penalty mass is split, at the START of the
+# step. Shows WHERE a barrier charges -- the property the inverse-power form exists for.
+BANDS = [(0.0, 0.85), (0.85, 1.0), (1.0, 1.25), (1.25, 1.5), (1.5, 99.0)]
+
+
+def _inv_h(d, ds, n):
+    return 1.0 - (ds / d.clamp(min=0.05)).pow(n)
+
 
 def _pct(hist, edges, qs):
     tot = float(hist.sum())
@@ -98,7 +112,6 @@ def main():
     # the probe. 1.0 is chosen so the task's own reward/p_cbf EMA reads -mean(excess)
     # directly, giving an independent cross-check on the table this script prints.
     F450NavTaskConfig.reward_parameters["lambda_cbf"] = 1.0
-    d_safe_task = F450NavTaskConfig.reward_parameters["d_safe"]
 
     task = task_registry.make_task(
         "f450_navigation_task", num_envs=args.num_envs, headless=True, use_warp=True
@@ -123,6 +136,12 @@ def main():
     # Per-cell accumulators for the (d_safe, alpha) table.
     cells = {(ds, al): [torch.zeros((), device=dev), torch.zeros((), device=dev)]
              for ds in D_SAFE_GRID for al in ALPHA_GRID}
+    inv_cells = {(ds, n, al): [torch.zeros((), device=dev), torch.zeros((), device=dev)]
+                 for ds in INV_D_SAFE_GRID for n in INV_POWER_GRID for al in INV_ALPHA_GRID}
+    # Per-band penalty mass for every cell, linear and inverse alike.
+    band_mass = {key: torch.zeros(len(BANDS), device=dev)
+                 for key in list(cells) + list(inv_cells)}
+    band_count = torch.zeros(len(BANDS), device=dev)
     n_pairs = torch.zeros((), device=dev)
     max_vclose = torch.zeros((), device=dev)
     max_speed = torch.zeros((), device=dev)
@@ -136,7 +155,9 @@ def main():
         for s in range(args.num_steps):
             # d at the START of the step: the same position and the same mesh the task's
             # own prev_h snapshot reads a moment later.
-            d = task._clearance() + d_safe_task
+            # The raw distance, not h: h's shape depends on cbf_form, the distance does not.
+            task._clearance()
+            d = task._cbf_last_d.clone()
             z_agl = (task.obs_dict["robot_position"][:, 2]
                      - task.obs_dict["env_bounds_min"][:, 2])
             speed = torch.linalg.norm(task.obs_dict["robot_linvel"], dim=1)
@@ -157,11 +178,26 @@ def main():
                     n_superluminal.add_(
                         (v_close > speed[alive] * (4.0 / 3.0) + 0.5).sum()
                     )
+                    d0 = prev_d[alive]
+                    band_idx = torch.zeros_like(d0, dtype=torch.long)
+                    for b, (lo, hi) in enumerate(BANDS):
+                        band_idx[(d0 >= lo) & (d0 < hi)] = b
+                    band_count.add_(torch.bincount(band_idx, minlength=len(BANDS)).float())
                     for (ds, al), acc in cells.items():
-                        h = prev_d[alive] - ds
+                        h = d0 - ds
                         excess = torch.clamp(v_close - al * h, min=0.0)
                         acc[0].add_((excess > 0).sum())
                         acc[1].add_(excess.sum())
+                        band_mass[(ds, al)].add_(torch.bincount(
+                            band_idx, weights=excess, minlength=len(BANDS)))
+                    for (ds, n, al), acc in inv_cells.items():
+                        h0 = _inv_h(d0, ds, n)
+                        h1 = _inv_h(d[alive], ds, n)
+                        excess = torch.clamp((h0 - h1) / dt - al * h0, min=0.0)
+                        acc[0].add_((excess > 0).sum())
+                        acc[1].add_(excess.sum())
+                        band_mass[(ds, n, al)].add_(torch.bincount(
+                            band_idx, weights=excess, minlength=len(BANDS)))
 
             mu = actor(torch.clamp((obs - mean) / std, -_NORM_CLAMP, _NORM_CLAMP))
             o, _, term, trunc, _ = task.step(mu.clamp(-1, 1))
@@ -226,6 +262,35 @@ def main():
         }
         print(f"{ds:>7.2f}  {al:>6.2f}  {100 * rate:>6.1f}%  {mean_ex:>12.4f}  {lam:>9.4f}")
 
+    def _bands(key):
+        m = band_mass[key]
+        tot = float(m.sum())
+        return [float(x) / tot if tot > 0 else 0.0 for x in m]
+
+    band_labels = [f"{lo:.2f}-{hi:.2f}" if hi < 90 else f">{lo:.2f}" for lo, hi in BANDS]
+    occ = [float(c) / max(float(band_count.sum()), 1.0) for c in band_count]
+    print("\nshare of steps per distance band [m]: "
+          + "  ".join(f"{l} {100 * o:.1f}%" for l, o in zip(band_labels, occ)))
+    print("\ninverse-power barrier h = 1 - (d_safe/d)^n  (excess in 1/s; lambda per 1/s)")
+    print(f"{'d_safe':>7}  {'n':>3}  {'alpha':>6}  {'viol%':>7}  {'mean excess':>12}  "
+          f"{'lambda':>9}  penalty share by band {band_labels}")
+    inv_table = {}
+    for (ds, n, al), acc in sorted(inv_cells.items()):
+        rate = float(acc[0]) / float(n_pairs)
+        mean_ex = float(acc[1]) / float(n_pairs)
+        lam = args.target / mean_ex if mean_ex > 0 else float("inf")
+        share = _bands((ds, n, al))
+        inv_table[f"{ds}_{n}_{al}"] = {
+            "d_safe": ds, "power": n, "alpha": al, "violation_rate": rate,
+            "mean_excess_per_s": mean_ex, "lambda_cbf": lam, "band_share": share,
+        }
+        print(f"{ds:>7.2f}  {n:>3.0f}  {al:>6.2f}  {100 * rate:>6.1f}%  {mean_ex:>12.4f}  "
+              f"{lam:>9.4f}  " + " ".join(f"{100 * x:5.1f}" for x in share))
+    for key in [(0.7, 4.0)]:
+        print(f"linear {key} penalty share by band: "
+              + " ".join(f"{100 * x:5.1f}" for x in _bands(key)))
+        table[f"{key[0]}_{key[1]}"]["band_share"] = _bands(key)
+
     print("\nRead the violation rate first. Near 1.0 means the barrier is violated on "
           "essentially every step, so p_cbf has degenerated into a flat speed tax with "
           "no gradient structure left -- raise alpha. Near 0.0 means it never fires.")
@@ -243,6 +308,9 @@ def main():
         "max_v_close": mv,
         "max_speed": ms,
         "source": source,
+        "bands": band_labels,
+        "band_occupancy": occ,
+        "inv_table": inv_table,
         "frac_v_close_beyond_physical": frac_over,
         "hist_edges": edges,
         "d_hist": d_hist.tolist(),

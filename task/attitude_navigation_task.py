@@ -320,7 +320,17 @@ class NavigationWithObstaclesTask(BaseTask):
         rparams = self.task_config.reward_parameters
         self._cbf_lambda = rparams["lambda_cbf"]
         self._cbf_active = self._cbf_lambda != 0.0
-        self._cbf_h_max = rparams["cbf_max_range"] - rparams["d_safe"]
+        self._cbf_d_safe = float(rparams["d_safe"])
+        self._cbf_alpha = float(rparams["alpha_cbf"])
+        self._cbf_form = str(self.task_config.cbf_form).lower()
+        self._cbf_power = float(rparams["cbf_power"])
+        assert self._cbf_form in ("linear", "inverse_power"), (
+            f"cbf_form must be 'linear' or 'inverse_power', got {self._cbf_form!r}"
+        )
+        self._cbf_h_max = float(
+            self._barrier(torch.tensor([float(rparams["cbf_max_range"])]))[0]
+        )
+        self._cbf_last_d = None
         self.prev_h = torch.zeros(self.sim_env.num_envs, device=self.device)
         self._proximity_probe = None
         self._cbf_mesh_ids = None
@@ -368,7 +378,6 @@ class NavigationWithObstaclesTask(BaseTask):
                 # Plain floats: reward_parameters holds 0-dim CUDA tensors by now, and
                 # reading one back per step would sync the device every step.
                 self._cbf_range_f = float(rparams["cbf_max_range"])
-                self._cbf_d_safe_f = float(rparams["d_safe"])
                 logger.warning(
                     f"p_cbf clearance from the DEPTH IMAGE "
                     f"({cam_cfg.width}x{cam_cfg.height}, max_range "
@@ -400,8 +409,8 @@ class NavigationWithObstaclesTask(BaseTask):
             # What the barrier actually permits, so the run's own log states it rather
             # than leaving it to be recovered from alpha and d_safe after the fact.
             allowed = ", ".join(
-                f"{d:.1f}->{rparams['alpha_cbf'] * (d - rparams['d_safe']):.2f}"
-                for d in (rparams["d_safe"], 1.5, 2.0, 3.0)
+                f"{d:.2f}->{self._cbf_allowed_speed(d):.2f}"
+                for d in (0.85, 1.0, 1.2, 1.5, 2.0, 3.0)
             )
             # Ray spacing, and the thinnest feature it can still catch at 2 m: the
             # number that decides whether a tree branch is measured or missed.
@@ -414,7 +423,9 @@ class NavigationWithObstaclesTask(BaseTask):
             else:
                 src = "source=depth image (in-FOV only, z-depth)"
             logger.info(
-                f"p_cbf: d_safe={rparams['d_safe']} m, alpha={rparams['alpha_cbf']} /s "
+                f"p_cbf: form={self._cbf_form}"
+                f"{'' if self._cbf_form == 'linear' else f' (n={self._cbf_power:g})'}, "
+                f"d_safe={rparams['d_safe']} m, alpha={rparams['alpha_cbf']} /s "
                 f"(alpha*dt={alpha_dt:.3f}), lambda_cbf={self._cbf_lambda}, "
                 f"range={rparams['cbf_max_range']} m, {src}. "
                 f"Allowed closing speed [clearance m -> m/s]: {allowed}"
@@ -494,7 +505,7 @@ class NavigationWithObstaclesTask(BaseTask):
         self._reward_comp_ema = {
             "r_progress": 0.0, "p_speed": 0.0, "p_jerk": 0.0,
             "p_action_mag": 0.0, "p_blind": 0.0, "p_fov": 0.0, "p_cbf": 0.0,
-            "p_time": 0.0, "p_floor": 0.0,
+            "p_time": 0.0,
         }
         self._ema_alpha = 0.02  # smooth over ~50 steps
 
@@ -1147,7 +1158,6 @@ class NavigationWithObstaclesTask(BaseTask):
         self.infos["reward/p_fov"] = self._reward_comp_ema["p_fov"]
         self.infos["reward/p_cbf"] = self._reward_comp_ema["p_cbf"]
         self.infos["reward/p_time"] = self._reward_comp_ema["p_time"]
-        self.infos["reward/p_floor"] = self._reward_comp_ema["p_floor"]
         # Only meaningful when the probe actually ran; logging them inert would put a
         # flat 0 m clearance on the dashboard, which reads as a crash, not as "off".
         if self._cbf_active:
@@ -1248,10 +1258,40 @@ class NavigationWithObstaclesTask(BaseTask):
         # Negative -> nearer than min_range -> treat as zero clearance, never as far.
         img = torch.where(img < 0.0, torch.zeros_like(img), img)
         d = img.flatten(1).min(dim=1).values * self._cbf_img_range
-        return d.clamp(max=self._cbf_range_f) - self._cbf_d_safe_f
+        return d.clamp(max=self._cbf_range_f)
+
+    def _barrier(self, d):
+        """h(d): the barrier value for a distance d to the nearest surface (m).
+
+        "linear":        h = d - d_safe                        (metres)
+        "inverse_power": h = 1 - (d_safe / d)^n                (dimensionless, < 1)
+
+        Both are zero on the d_safe sphere and negative inside it. The inverse-power form
+        is what makes p_cbf LOCAL without a gate: its rate is
+            dh/dt = n * d_safe^n / d^(n+1) * dd/dt,
+        so the same closing speed moves h (d_safe/d)^(n+1) times less far out, and the
+        closing speed the barrier allows, alpha * h * d^(n+1) / (n * d_safe^n), grows like
+        d^(n+1). The penalty is charged in h-units per second, so its magnitude decays
+        the same way. Near d_safe it binds; a metre further out it is effectively off --
+        an outcome of h, not a switch. The floor is just one more surface in DF.
+        """
+        d_safe = self._cbf_d_safe
+        if self._cbf_form == "linear":
+            return d - d_safe
+        # d floored at 5 cm: (d_safe/d)^n is unbounded at contact, and a contact step
+        # terminates the episode anyway, so nothing below that distance is ever charged.
+        return 1.0 - (d_safe / d.clamp(min=0.05)).pow(self._cbf_power)
+
+    def _cbf_allowed_speed(self, d):
+        """Closing speed (m/s) the barrier permits at distance d -- for logs and sizing."""
+        h = float(self._barrier(torch.tensor([d]))[0])
+        if self._cbf_form == "linear":
+            return self._cbf_alpha * h
+        n = self._cbf_power
+        return self._cbf_alpha * h * d ** (n + 1) / (n * self._cbf_d_safe ** n)
 
     def _clearance(self):
-        """h(x) = DF(p) - d_safe for every env, at the CURRENT robot position.
+        """h(x) = barrier(DF(p)) for every env, at the CURRENT robot position.
 
         Single source of truth for the barrier function. DF is the distance to the nearest
         surface in any direction -- obstacles, side walls and the floor alike -- so
@@ -1271,16 +1311,19 @@ class NavigationWithObstaclesTask(BaseTask):
         and p_cbf adds nothing to the observation.
 
         Returns:
-            (num_envs,) tensor of h in meters. Valid only when self._cbf_active; the
-            probe is None otherwise. The subtraction allocates, so callers get a fresh
-            tensor rather than an alias of the probe's reused output buffer.
+            (num_envs,) tensor of h (see _barrier for its units). Valid only when
+            self._cbf_active; the probe is None otherwise. _barrier allocates, so callers
+            get a fresh tensor rather than an alias of the probe's reused output buffer.
+            The raw distance is kept in self._cbf_last_d for diagnostics.
         """
         if self._cbf_source == "depth":
-            return self._clearance_from_depth()
-        d = self._proximity_probe.measure(
-            self.obs_dict["robot_position"], self._cbf_mesh_ids
-        )
-        return d - self.task_config.reward_parameters["d_safe"]
+            d = self._clearance_from_depth()
+        else:
+            d = self._proximity_probe.measure(
+                self.obs_dict["robot_position"], self._cbf_mesh_ids
+            )
+        self._cbf_last_d = d.clone()
+        return self._barrier(d)
 
     def _get_dist_to_target(self, env_ids=slice(None)):
         """World-frame distance from robot to target, in raw meters.
@@ -1635,9 +1678,6 @@ class NavigationWithObstaclesTask(BaseTask):
         8. p_time:     -lambda_time
                        - flat cost per step aloft, so a detour costs time directly
                          instead of only through discounting of the arrive bonus.
-        9. p_floor:    -lambda_floor * max(0, min(floor_z_ref, z_tgt) - z_agl)
-                       - PENALIZE being below a cruise floor; the CBF only rations the
-                         rate of descent and never pays for climbing back.
 
         Args:
             mask: Boolean tensor indicating which envs get this reward
@@ -1798,6 +1838,11 @@ class NavigationWithObstaclesTask(BaseTask):
         #
         # DF is 1-Lipschitz in position, so v_close <= ||v|| exactly: bounded speed
         # bounds the penalty, and the magnitude needs no clamp of its own.
+        #
+        # With cbf_form = "inverse_power" the same lines hold with h dimensionless, so
+        # v_close / v_allow are rates of h in 1/s rather than m/s, and the bound becomes
+        # v_close <= n * d_safe^n / d^(n+1) * ||v|| -- steep near contact (that is the
+        # point) and vanishing far out. See _barrier.
         if self._cbf_active:
             h_next = self._clearance()
             v_close = (self.prev_h - h_next) / self._cbf_step_dt()
@@ -1821,18 +1866,6 @@ class NavigationWithObstaclesTask(BaseTask):
         # telescopes). Sizing and the crash-incentive bound are in the config.
         p_time = torch.full_like(speed, -params["lambda_time"])
 
-        # 9. Soft floor: height above the floor slab, against a reference that never sits
-        # above the target, so a low target's final approach is free. See the config.
-        if params["lambda_floor"] != 0.0:
-            floor_z = self.obs_dict["env_bounds_min"][:, 2]
-            z_agl = self.obs_dict["robot_position"][:, 2] - floor_z
-            z_ref = torch.clamp(
-                self.target_position[:, 2] - floor_z, max=params["floor_z_ref"]
-            )
-            p_floor = -params["lambda_floor"] * torch.clamp(z_ref - z_agl, min=0.0)
-        else:
-            p_floor = torch.zeros_like(speed)
-
         # Apply mask to zero out rewards for envs that had terminal events
         r_progress = r_progress[mask]
         p_speed = p_speed[mask]
@@ -1842,7 +1875,6 @@ class NavigationWithObstaclesTask(BaseTask):
         p_fov = p_fov[mask]
         p_cbf = p_cbf[mask]
         p_time = p_time[mask]
-        p_floor = p_floor[mask]
 
         # Update EMA for tensorboard reward component logging.
         # Guarded: when every env terminates on the same step the mask is empty, and
@@ -1859,13 +1891,12 @@ class NavigationWithObstaclesTask(BaseTask):
             self._reward_comp_ema["p_fov"] += a * (float(p_fov.mean()) - self._reward_comp_ema["p_fov"])
             self._reward_comp_ema["p_cbf"] += a * (float(p_cbf.mean()) - self._reward_comp_ema["p_cbf"])
             self._reward_comp_ema["p_time"] += a * (float(p_time.mean()) - self._reward_comp_ema["p_time"])
-            self._reward_comp_ema["p_floor"] += a * (float(p_floor.mean()) - self._reward_comp_ema["p_floor"])
             # Clearance diagnostics, over the same non-terminal envs. h_next and v_close
             # are full-width (only p_cbf was masked above), so they are masked here.
             if self._cbf_active:
-                d_mean = float(h_next[mask].mean()) + params["d_safe"]
+                d_mean = float(self._cbf_last_d[mask].mean())
                 viol = float((v_close > v_allow)[mask].float().mean())
                 self._cbf_d_ema += a * (d_mean - self._cbf_d_ema)
                 self._cbf_viol_ema += a * (viol - self._cbf_viol_ema)
 
-        return r_progress + p_speed + p_jerk + p_action_mag + p_blind + p_fov + p_cbf + p_time + p_floor
+        return r_progress + p_speed + p_jerk + p_action_mag + p_blind + p_fov + p_cbf + p_time

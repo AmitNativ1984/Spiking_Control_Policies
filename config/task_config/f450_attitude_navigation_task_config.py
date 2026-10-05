@@ -147,6 +147,9 @@ class task_config:
     # building a DEPLOYABLE clearance signal, which this one genuinely is. It would need a
     # formulation that does not differentiate a moving sensing window.
     cbf_source = os.environ.get("F450_CBF_SOURCE", "rays")
+    # Shape of the barrier h(DF): "linear" or "inverse_power". Documented with cbf_power
+    # in reward_parameters; lives here because the task tensorizes that dict.
+    cbf_form = os.environ.get("F450_CBF_FORM", "linear")
 
     # --- OBSERVATIONS ---
     state_dim = 17
@@ -341,32 +344,9 @@ class task_config:
         # this cost, lambda_time / (1 - gamma) = 100 * lambda_time. Crashing must stay
         # worse than flying to a timeout, -10 < -2 - 100 * lambda_time, so
         # lambda_time < 0.08. 0.01 (40% of r_progress's measured 0.0255/step) prices a
-        # 60-step detour at 0.6, the same as ~5 violating steps at lambda_cbf 0.2.
+        # 60-step detour at 0.6.
         # 0.0 = inert, same convention as the other experimental terms.
         "lambda_time": float(os.environ.get("F450_LAMBDA_TIME", 0.0)),
-
-        # --- p_floor: a soft floor under the cruise altitude --------------------------
-        #   p_floor = -lambda_floor * max(0, z_ref - z_agl),  z_ref = min(floor_z_ref, z_tgt)
-        # z_agl is EXACT height above the floor slab (privileged state; reward only).
-        #
-        # WHY p_cbf DOES NOT ALREADY DO THIS. The floor is in the probe mesh, but a CBF
-        # only rations the RATE of approach: any descent slower than alpha*(z - d_safe) is
-        # compliant, so a slow sink toward d_safe = 0.7 m is free and nothing ever pays the
-        # policy to climb back. Measured at level 30 the trained policy does sit high
-        # (p_cbf ep_2350 altitude p1 0.90 / median 2.30 m) -- but that is held by the
-        # spawn box (35-65% of height) and short flights, not by anything in the reward.
-        # The observation has no altitude channel and vz carries 0.05 m/s of white noise,
-        # so a 0.05 m/s sink is invisible and over a 20 s test flight is a metre.
-        #
-        # z_ref drops to the TARGET's own height when the target is lower, so targets at
-        # the bottom of the sampling window (0.12 * 4 m = 0.48 m) stay reachable without
-        # paying for the final approach. 1.0 m is above d_safe (0.7) with margin for the
-        # ~0.25 m airframe radius.
-        #
-        # SIZING: 0.2 per metre below z_ref -> 0.06/step at 0.7 m AGL, about one violating
-        # p_cbf step at lambda_cbf 0.2, and ~2.4x r_progress. 0.0 = inert.
-        "lambda_floor": float(os.environ.get("F450_LAMBDA_FLOOR", 0.0)),  # per m
-        "floor_z_ref": float(os.environ.get("F450_FLOOR_Z_REF", 1.0)),    # m AGL
         # -0.01 by default. B2 experiment (smoothness/saturation plan): override via
         # env var F450_LAMBDA_JERK to sweep without touching this file (this task
         # config is shared -- other training jobs may already be running against it).
@@ -667,6 +647,25 @@ class task_config:
         # env whose previous h sat at this limit is exempt from the penalty anyway (see
         # the task), since a truncated DF understates the allowed closing speed.
         "cbf_max_range": float(os.environ.get("F450_CBF_MAX_RANGE", 6.0)),  # m
+        #
+        # --- cbf_form: the SHAPE of h, which decides where the barrier binds -----------
+        #   "linear"         h = DF - d_safe                (metres; arms 1 and 2)
+        #   "inverse_power"  h = 1 - (d_safe / DF)^n        (dimensionless, < 1)
+        # The linear form charges an m/s of excess the same at 0.8 m and at 3 m; arm 2's
+        # field test showed what that buys -- a policy that treats a whole wood as
+        # expensive and flies around it. The inverse-power form makes the barrier LOCAL
+        # as a property of h itself: dh/dt carries a factor n*d_safe^n/DF^(n+1), so the
+        # allowed closing speed alpha*h*DF^(n+1)/(n*d_safe^n) grows like DF^(n+1) and the
+        # penalty, charged in h-units/s, shrinks the same way. At d_safe 0.7, alpha 4,
+        # n 2 it allows 0.8 m/s at 0.85 m, 2.1 at 1.0, 4.6 at 1.2 and 11 at 1.5 m --
+        # binding inside ~1.2 m, effectively off beyond. Larger n = tighter locality.
+        #
+        # lambda_cbf's UNITS CHANGE with the form (per m/s for linear, per 1/s for
+        # inverse_power), so a lambda sized for one is meaningless for the other.
+        # analysis/measure_cbf_margin.py prints both tables.
+        # cbf_form itself is a class attribute next to cbf_source (a str cannot live in
+        # this dict: the task converts every value here to a tensor).
+        "cbf_power": float(os.environ.get("F450_CBF_POWER", 2.0)),
         #
         # --- cbf_rays: how many directions the clearance sphere samples ----------------
         # DF is measured by ray casting, not by an exact closest-point query -- not by

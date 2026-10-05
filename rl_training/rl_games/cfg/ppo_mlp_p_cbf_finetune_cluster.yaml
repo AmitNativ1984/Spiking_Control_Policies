@@ -143,40 +143,52 @@
 # gamed rather than obeyed.
 #
 #
-# --- ARM 3: f450_nav_p_cbf_brave -- re-price the barrier, price time, add a floor ------
+# --- ARM 3: f450_nav_p_cbf_local -- a LOCAL barrier, at a quarter of arm 2's weight ----
 #
-# Field test of ep_2350 (2026-10-05): (1) too slow and cautious -- it flies around a
-# wood it could thread; (2) flies low and can slowly drift into the ground.
+# Field test of ep_2350 (2026-10-05): too slow and cautious -- it flies around a wood it
+# could thread -- and flies low enough to drift into the ground.
 #
-# (1) IS ARM 2 WORKING AS SPECIFIED. Its lambda was derived so that "violating progress
-# must lose to a timeout" (15 - lambda*Ebar*N < -2): the baseline's line through clutter
-# was priced at -5.1, BELOW timing out. And r_progress telescopes, so a detour costs only
-# gamma-discounting of the bonus -- ~1.5 points for 60 extra steps at step ~150, against
-# 0.25/step for threading at 0.5 m/s of excess at lambda 0.5. Measured (crash_cause_eval,
-# 3000 steps x 256 envs, level 30): p_cbf 2.14 m/s / 233 steps per episode against
-# p_fov's 2.44 m/s / 189. Fixes: lambda_cbf 0.5 -> 0.2 (violating-arrive at launch:
-# 15 - 0.2*0.2295*175 = +7.0, above timeout and below compliant-arrive), plus
-# lambda_time 0.01, so a detour costs time directly.
+# THE CAUTION IS ARM 2 WORKING AS SPECIFIED. Its lambda was derived so that "violating
+# progress must lose to a timeout": the baseline's line through clutter was priced at -5.1,
+# below timing out. And the linear barrier charges an m/s of excess the same wherever it
+# happens: measured on the p_fov baseline, 22% of linear (0.7, 4.0)'s penalty mass falls
+# at DF >= 0.85 m and 10.8% at DF >= 1.0 m. Measured cost at level 30 (crash_cause_eval,
+# 3000 x 256): p_cbf 2.14 m/s and 233 steps/episode against p_fov's 2.44 m/s and 189.
 #
-# (2) IS NOT REPRODUCED IN THE TRAINING ENV. p_cbf altitude p1/median 0.90/2.30 m vs
-# p_fov 0.80/2.25 (measure_cbf_margin, level 30); floor strikes 0.15% vs 0.17% of
-# episodes at level 30, 0.03% vs 0% at level 5. The gap is structural instead: no
-# altitude in the observation, 0.05 m/s white noise on vz, the CBF only rations descent
-# RATE (a slow sink toward d_safe is compliant), and training flights are ~7 s from a
-# 1.4-3.9 m spawn, so long-flight drift is never practised. lambda_floor 0.2 pays for
-# climbing back below 1 m AGL (or the target's height, if lower).
+# TWO CHANGES, BOTH TO THE BARRIER:
+#   cbf_form inverse_power, n 2: h = 1 - (d_safe/DF)^2. The barrier is local BY ITS SHAPE,
+#     not by a gate: the allowed closing speed is 0.81 m/s at 0.85 m, 2.08 at 1.0, 4.65 at
+#     1.2, 10.8 at 1.5, and the penalty is charged in h-units/s, which shrink as DF^-3.
+#     Measured (analysis/measure_cbf_margin.py, level 30, 1500 x 256):
+#                         viol    penalty mass at DF <0.85 / 0.85-1.0 / >=1.0 m
+#       linear (0.7, 4)   19.4%   77.7 / 11.5 / 10.8 %      (p_fov ep_2000)
+#       inv (0.7, n2, 4)  15.7%   97.3 /  2.3 /  0.3 %      (p_fov ep_2000)
+#       inv (0.7, n2, 4)  11.8%   98.2 /  1.6 /  0.2 %      (p_cbf ep_2350)
+#     It is never stricter than the linear form at the same alpha (equal at d_safe, looser
+#     everywhere beyond), so this alone already loosens the wood-crossing.
+#   lambda_cbf 0.036 per 1/s: the sizing rule arms 1 and 2 started from, mean penalty =
+#     r_progress's 0.0255/step, on the p_fov baseline (mean excess 0.704 /s). Arm 2 ran at
+#     ~4.5x that. Budget at launch: 15 - 0.0255 * 175 = +10.5 for a violating arrival,
+#     well above the -2 timeout, so threading clutter now pays. NOT comparable to arm 2's
+#     0.5 -- the units changed with the form. On ep_2350 itself the same target gives
+#     0.0525; the baseline figure is the worst case at launch.
 #
-# Warm-started from arm 2's best checkpoint, not the p_fov base, so it keeps the crash
-# reduction it already earned and only has to unlearn the over-caution:
+# THE FLOOR STAYS AN OBSTACLE LIKE ANY OTHER -- no separate term (it is in the probe
+# mesh). For the record, the low flight did not reproduce in the training env: altitude
+# p1/median 0.90/2.30 m vs p_fov 0.80/2.25; floor strikes 0.15% vs 0.17% at level 30.
+#
+# lambda_time (F450_LAMBDA_TIME) exists but is held at 0 here, so this arm moves the
+# barrier and nothing else. Warm-started from arm 2's best checkpoint, so it keeps the
+# crash reduction already earned and only has to unlearn the caution:
 #   sbatch --export=ALL,CONFIG_FILE=<this> \
 #     ,CHECKPOINT=runs/f450_nav_p_cbf_ft_hot/2026-09-18_13-50-26/nn/last_f450_nav_p_cbf_ft_hot_ep_2350_rew_1.7070831.pth \
-#     ,EXPERIMENT=f450_nav_p_cbf_brave,CURRICULUM_LEVEL=30 \
+#     ,EXPERIMENT=f450_nav_p_cbf_local,CURRICULUM_LEVEL=30 \
 #     ,F450_LAMBDA_FOV=0.015,F450_LAMBDA_BLIND=0.0 \
-#     ,F450_LAMBDA_CBF=0.2,F450_D_SAFE=0.7,F450_ALPHA_CBF=4.0 \
-#     ,F450_LAMBDA_TIME=0.01,F450_LAMBDA_FLOOR=0.2 \
+#     ,F450_CBF_FORM=inverse_power,F450_CBF_POWER=2 \
+#     ,F450_LAMBDA_CBF=0.036,F450_D_SAFE=0.7,F450_ALPHA_CBF=4.0 \
 #     slurm/train_navigation.sbatch
-# Watch: metrics mean speed / episode length (should move toward p_fov's), crash rate
-# (must stay below p_fov's 13.2% at level 30), reward/p_floor (should go to ~0).
+# Watch: episode length / speed (should move toward p_fov's 189 steps / 2.44 m/s), crash
+# rate (must stay under p_fov's 13.2% at level 30), metrics/cbf_violation_rate.
 params:
   seed: 42
   algo:
