@@ -47,6 +47,8 @@ Usage (inside the container):
     between the two is the trees' TRUE contribution, integrating the real canopy meshes
     with no assumption about how porous they are.
 """
+import isaacgym  # noqa: F401  — must precede torch
+
 import argparse
 import math
 
@@ -104,9 +106,9 @@ def main():
 
     # Reuses the dataset collector's builder verbatim, so the obstacle field is exactly
     # the one the policy trains in (Poisson placement, same pools, same keep-out).
-    from vae_depth.data_generation.generate_dataset import setup_sim
+    from vae_depth.data_generation.generate_dataset import setup_environment
 
-    env_manager, nav_cfg = setup_sim(args)
+    env_manager, nav_cfg = setup_environment(args)
     top = nav_cfg.curriculum.density_at_level
     intensity = nav_cfg.obstacle_density_max * min(args.level / max(top, 1), 1.0)
     print(f"[cfg] level {args.level} -> intensity {intensity:.4f} obstacles/m^3")

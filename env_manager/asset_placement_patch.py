@@ -82,7 +82,7 @@ def fixed_reset_idx(self, env_ids=None):
         nk = self.asset_manager.num_keep_in_env
         self.asset_manager.num_keep_in_env = self.asset_manager.num_keep_in_env // 2
         samples = torch.bernoulli(0.15 * torch.ones(len(env_ids), device=self.device))
-        selected_indices = torch.nonzero(samples).squeeze(-1)
+        selected_indices = torch.nonzero(samples).squeeze(-1).to(env_ids.device)
         if len(selected_indices) > 0:
             self.asset_manager.reset_idx(env_ids[selected_indices], num_obstacles // 2)
         self.asset_manager.num_keep_in_env = nk
