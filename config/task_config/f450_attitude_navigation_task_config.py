@@ -117,19 +117,53 @@ class task_config:
         terminations keep using true state, otherwise the policy would be paid for
         reaching a hallucinated target.
 
-        TODO(latency): this models estimator error but NOT transport delay. The real
-        D435 -> Orin -> PX4 path is ~50-80 ms, i.e. 1.5-3 policy steps of dead time, and
-        num_physics_steps_per_env_step only sets the loop RATE, not a delay. Needs an
-        explicit N-step obs/action FIFO. Deferred deliberately.
+        This models estimator error only. Transport delay is control_latency below.
         """
         enable = True
         # NOTE: the random-walk timestep is NOT set here. It is derived at runtime from
-        # sim dt x num_physics_steps_per_env_step_mean (see _setup_domain_randomization),
-        # so changing the sim rate or the substep count cannot silently desync the drift.
+        # sim dt x the EXPECTED substep count of upstream's floored Gaussian draw (see
+        # _setup_domain_randomization), so changing the sim rate or the substep count
+        # cannot silently desync the drift.
         pos_bias_init_std = 0.05    # m, turn-on offset, resampled per episode
         pos_random_walk_std = 0.02  # m/sqrt(s), slow drift within an episode
         vel_noise_std = 0.05        # m/s, white
         yaw_bias_std = 0.05         # rad (~3 deg), constant per episode
+
+    class control_latency:
+        """Dead time from depth capture to the command reaching the attitude controller.
+
+        MEASURED in Gazebo SITL (2026-10-05): 45 ms mean, 10 ms std, image capture to
+        control output, with the policy running at ~33 Hz +/- 10 Hz. That is ~1.5 policy
+        periods, so the real loop always has an action in flight; the sim had none.
+
+        Implemented as an action timeline at physics-substep resolution (sim dt 0.01 s):
+        every action is drawn its own latency and the controller flies the newest one that
+        has arrived. See task/control_latency.py for the model and its one assumption --
+        state channels are treated as exactly as stale as the image (the pessimistic side).
+
+        The loop RATE half of the measurement lives in the env config, as
+        num_physics_steps_per_env_step_mean/std (config/env_config/env_forest_with_obstacles.py).
+
+        The observation's prev_action dims [13:17] stay the action the policy last
+        COMMANDED, not the one currently applied -- the deployed node can only know the
+        former, and it is exactly the in-flight information a delayed policy needs.
+
+        F450_LATENCY=0 removes the dead time (the controller flies each action from the
+        first substep, as before). That alone is NOT the pre-measurement task: the loop
+        rate also moved (F450_SUBSTEPS_MEAN=3 restores it), and the estimator's random-walk
+        dt is now the true expected step length rather than the configured mean, so even
+        with both reverted the position drift per step is ~9% smaller than before.
+        """
+        enable = os.environ.get("F450_LATENCY", "1") != "0"
+        mean_s = float(os.environ.get("F450_LATENCY_MEAN_MS", 45.0)) / 1000.0
+        std_s = float(os.environ.get("F450_LATENCY_STD_MS", 10.0)) / 1000.0
+        # Clamp the Gaussian tails: below 0 is acausal, and +5.5 sigma covers anything
+        # a real frame drop short of a stall would produce.
+        min_s = 0.0
+        max_s = 0.1
+        # Slots per env. In flight at once is ~2 at the measured rate and bounded by
+        # max_s / sim dt + 1 = 11 even if every env step ran a single substep.
+        buffer_len = 16
 
     class vae_config:
         """Custom 32D DepthVAE configuration.

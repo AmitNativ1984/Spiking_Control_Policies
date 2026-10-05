@@ -29,6 +29,7 @@ from env_manager import warp_bvh_patch
 from env_manager import asset_placement_patch
 from env_manager import warp_bvh_rebuild_patch
 from vae_depth.vae_image_encoder import DepthVAEImageEncoder
+from task.control_latency import ControlLatency
 
 # Upstream builds every warp BVH over a zero-filled vertex buffer, leaving each tree
 # permanently degenerate -- correct depth images, but ~95x slower stepping (render 197x,
@@ -70,6 +71,20 @@ os.environ.setdefault(
 
 logger = CustomLogger("attitude_navigation_task")
 logger.setLevel("INFO")  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+
+
+def _expected_substeps(mean, std):
+    """E[max(floor(X), 0)] for X ~ N(mean, std): upstream EnvManager.step's substep draw.
+
+    Not simply `mean`: the floor puts the expectation ~0.5 below it (3.0 -> 2.5,
+    3.5 -> 3.0). Uses E[N] = sum_{k>=1} P(X >= k) for a non-negative integer N.
+    """
+    if std <= 0:
+        return float(max(math.floor(mean), 0))
+    upper = int(math.ceil(mean + 10.0 * std)) + 1
+    return sum(
+        0.5 * math.erfc((k - mean) / (std * math.sqrt(2.0))) for k in range(1, upper)
+    )
 
 
 class NavigationWithObstaclesTask(BaseTask):
@@ -232,6 +247,7 @@ class NavigationWithObstaclesTask(BaseTask):
         self.obs_dict = self.sim_env.get_obs()
 
         self._install_imu_substep_accumulator()
+        self._install_control_latency()
         self._setup_domain_randomization()
 
         # Curriculum setup
@@ -528,9 +544,13 @@ class NavigationWithObstaclesTask(BaseTask):
 
         # One env step in seconds, from the live sim rather than the config: the position
         # random walk scales as sqrt(dt), so a hardcoded value would silently misscale the
-        # drift the moment sim.dt or the substep count changed.
-        self._env_step_dt = (
-            self.obs_dict["dt"] * self.sim_env.cfg.env.num_physics_steps_per_env_step_mean
+        # drift the moment sim.dt or the substep count changed. The EXPECTED substep count,
+        # not the configured mean: upstream floors the Gaussian draw, which sits half a
+        # substep below the mean (see _expected_substeps).
+        env_cfg = self.sim_env.cfg.env
+        self._env_step_dt = self.obs_dict["dt"] * _expected_substeps(
+            env_cfg.num_physics_steps_per_env_step_mean,
+            env_cfg.num_physics_steps_per_env_step_std,
         )
 
         n = self.sim_env.num_envs
@@ -679,6 +699,43 @@ class NavigationWithObstaclesTask(BaseTask):
 
         imu.update = _accumulating_update
 
+    def _install_control_latency(self):
+        """Delay every command by the measured capture->output latency.
+
+        Same technique as the IMU accumulator: upstream calls
+        robot_manager.pre_physics_step(actions) once per PHYSICS substep with the env
+        step's action, and exposes no hook to change it mid-step. Wrapping that bound
+        method lets each substep fly whatever has arrived by then. The actions argument
+        upstream passes is ignored on purpose -- step() has already pushed it into the
+        timeline. IGE_env/warp_env.pre_physics_step also receive actions and ignore them.
+
+        Installed before the build-time warm-up step in __init__, which is harmless: with
+        nothing pushed the controller holds the zero (neutral) command, exactly what that
+        step passes anyway.
+        """
+        cfg = self.task_config.control_latency
+        if not cfg.enable:
+            self._latency = None
+            return
+        self._latency = ControlLatency(
+            num_envs=self.sim_env.num_envs,
+            action_dim=self.task_config.action_space_dim,
+            sim_dt=float(self.obs_dict["dt"]),
+            mean_s=cfg.mean_s,
+            std_s=cfg.std_s,
+            min_s=cfg.min_s,
+            max_s=cfg.max_s,
+            buffer_len=cfg.buffer_len,
+            device=self.device,
+        )
+        robot_manager = self.sim_env.robot_manager
+        _wrapped_pre_physics_step = robot_manager.pre_physics_step
+
+        def _delayed_pre_physics_step(actions):
+            _wrapped_pre_physics_step(self._latency.on_substep())
+
+        robot_manager.pre_physics_step = _delayed_pre_physics_step
+
     def _consume_imu_gyro(self):
         """Mean gyro over this env step's substeps, falling back to ground truth.
 
@@ -713,6 +770,11 @@ class NavigationWithObstaclesTask(BaseTask):
         if self._imu_gyro_accum is not None:
             self._imu_gyro_accum[env_ids] = 0.0
             self._imu_substep_count[env_ids] = 0.0
+
+        # Commands still in flight belong to the episode that just ended; the new one starts
+        # on the neutral command until its own first action arrives, ~45 ms in.
+        if self._latency is not None:
+            self._latency.reset(env_ids)
 
         # Fresh airframe and fresh estimator bias, so an agent cannot memorise one vehicle
         # and the position walk restarts each flight.
@@ -798,6 +860,11 @@ class NavigationWithObstaclesTask(BaseTask):
         transformed_action = self.action_transformation_function(actions)
         current_action = transformed_action.clone()  # snapshot before sim overwrites robot_actions/robot_prev_actions
         self.prev_dist[:] = self._get_dist_to_target()
+
+        # The frame this action was computed from was captured at the end of the last
+        # step, i.e. now -- queue it to reach the controller one measured latency later.
+        if self._latency is not None:
+            self._latency.push(transformed_action)
 
         # Step the simulation and update the observation dictionary
         self.sim_env.step(actions=transformed_action)
