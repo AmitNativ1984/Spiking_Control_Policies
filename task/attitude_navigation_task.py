@@ -494,6 +494,7 @@ class NavigationWithObstaclesTask(BaseTask):
         self._reward_comp_ema = {
             "r_progress": 0.0, "p_speed": 0.0, "p_jerk": 0.0,
             "p_action_mag": 0.0, "p_blind": 0.0, "p_fov": 0.0, "p_cbf": 0.0,
+            "p_time": 0.0, "p_floor": 0.0,
         }
         self._ema_alpha = 0.02  # smooth over ~50 steps
 
@@ -1145,6 +1146,8 @@ class NavigationWithObstaclesTask(BaseTask):
         self.infos["reward/p_blind"] = self._reward_comp_ema["p_blind"]
         self.infos["reward/p_fov"] = self._reward_comp_ema["p_fov"]
         self.infos["reward/p_cbf"] = self._reward_comp_ema["p_cbf"]
+        self.infos["reward/p_time"] = self._reward_comp_ema["p_time"]
+        self.infos["reward/p_floor"] = self._reward_comp_ema["p_floor"]
         # Only meaningful when the probe actually ran; logging them inert would put a
         # flat 0 m clearance on the dashboard, which reads as a crash, not as "off".
         if self._cbf_active:
@@ -1629,6 +1632,12 @@ class NavigationWithObstaclesTask(BaseTask):
                          barrier function allows, where h = DF - d_safe is the margin
                          to the nearest surface and v_close is the rate it is being
                          spent. The ONLY term that knows how much room is left.
+        8. p_time:     -lambda_time
+                       - flat cost per step aloft, so a detour costs time directly
+                         instead of only through discounting of the arrive bonus.
+        9. p_floor:    -lambda_floor * max(0, min(floor_z_ref, z_tgt) - z_agl)
+                       - PENALIZE being below a cruise floor; the CBF only rations the
+                         rate of descent and never pays for climbing back.
 
         Args:
             mask: Boolean tensor indicating which envs get this reward
@@ -1808,6 +1817,22 @@ class NavigationWithObstaclesTask(BaseTask):
         else:
             p_cbf = torch.zeros_like(speed)
 
+        # 8. Flat per-step cost of time aloft; prices the detour r_progress cannot (it
+        # telescopes). Sizing and the crash-incentive bound are in the config.
+        p_time = torch.full_like(speed, -params["lambda_time"])
+
+        # 9. Soft floor: height above the floor slab, against a reference that never sits
+        # above the target, so a low target's final approach is free. See the config.
+        if params["lambda_floor"] != 0.0:
+            floor_z = self.obs_dict["env_bounds_min"][:, 2]
+            z_agl = self.obs_dict["robot_position"][:, 2] - floor_z
+            z_ref = torch.clamp(
+                self.target_position[:, 2] - floor_z, max=params["floor_z_ref"]
+            )
+            p_floor = -params["lambda_floor"] * torch.clamp(z_ref - z_agl, min=0.0)
+        else:
+            p_floor = torch.zeros_like(speed)
+
         # Apply mask to zero out rewards for envs that had terminal events
         r_progress = r_progress[mask]
         p_speed = p_speed[mask]
@@ -1816,6 +1841,8 @@ class NavigationWithObstaclesTask(BaseTask):
         p_blind = p_blind[mask]
         p_fov = p_fov[mask]
         p_cbf = p_cbf[mask]
+        p_time = p_time[mask]
+        p_floor = p_floor[mask]
 
         # Update EMA for tensorboard reward component logging.
         # Guarded: when every env terminates on the same step the mask is empty, and
@@ -1831,6 +1858,8 @@ class NavigationWithObstaclesTask(BaseTask):
             self._reward_comp_ema["p_blind"] += a * (float(p_blind.mean()) - self._reward_comp_ema["p_blind"])
             self._reward_comp_ema["p_fov"] += a * (float(p_fov.mean()) - self._reward_comp_ema["p_fov"])
             self._reward_comp_ema["p_cbf"] += a * (float(p_cbf.mean()) - self._reward_comp_ema["p_cbf"])
+            self._reward_comp_ema["p_time"] += a * (float(p_time.mean()) - self._reward_comp_ema["p_time"])
+            self._reward_comp_ema["p_floor"] += a * (float(p_floor.mean()) - self._reward_comp_ema["p_floor"])
             # Clearance diagnostics, over the same non-terminal envs. h_next and v_close
             # are full-width (only p_cbf was masked above), so they are masked here.
             if self._cbf_active:
@@ -1839,4 +1868,4 @@ class NavigationWithObstaclesTask(BaseTask):
                 self._cbf_d_ema += a * (d_mean - self._cbf_d_ema)
                 self._cbf_viol_ema += a * (viol - self._cbf_viol_ema)
 
-        return r_progress + p_speed + p_jerk + p_action_mag + p_blind + p_fov + p_cbf
+        return r_progress + p_speed + p_jerk + p_action_mag + p_blind + p_fov + p_cbf + p_time + p_floor

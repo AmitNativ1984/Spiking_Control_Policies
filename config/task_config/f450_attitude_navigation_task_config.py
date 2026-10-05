@@ -324,6 +324,49 @@ class task_config:
         "lambda_p": 0.5,           # Rewards closing distance to target (encourage progress)
 
         "lambda_v": -0.1,         # Penlizes velocity above v_max (encourage speed control for safety)
+
+        # --- lambda_time: a flat per-step cost of being airborne ------------------------
+        # r_progress telescopes, so a DETOUR is free except for gamma-discounting of the
+        # arrive bonus. That was enough while flights fit inside the 3 s discount horizon
+        # (see lambda_p), but p_cbf stretched level-30 flights to ~240 steps (7.2 s), and
+        # by then the bonus is discounted to 15 * 0.99^240 = 1.3. A 60-step detour around a
+        # wood then costs ~1.5 points, while threading it at 0.5 m/s of excess closing
+        # speed costs 0.25/step at lambda_cbf 0.5 -- six violating steps outweigh the whole
+        # detour, so circumventing is the CORRECT answer and the policy found it.
+        #
+        # This prices time directly, so the clearance-vs-time trade p_cbf is meant to
+        # arbitrate is explicit in the reward instead of left to the discount factor.
+        #
+        # UPPER BOUND: the most a policy can avoid by crashing is the discounted tail of
+        # this cost, lambda_time / (1 - gamma) = 100 * lambda_time. Crashing must stay
+        # worse than flying to a timeout, -10 < -2 - 100 * lambda_time, so
+        # lambda_time < 0.08. 0.01 (40% of r_progress's measured 0.0255/step) prices a
+        # 60-step detour at 0.6, the same as ~5 violating steps at lambda_cbf 0.2.
+        # 0.0 = inert, same convention as the other experimental terms.
+        "lambda_time": float(os.environ.get("F450_LAMBDA_TIME", 0.0)),
+
+        # --- p_floor: a soft floor under the cruise altitude --------------------------
+        #   p_floor = -lambda_floor * max(0, z_ref - z_agl),  z_ref = min(floor_z_ref, z_tgt)
+        # z_agl is EXACT height above the floor slab (privileged state; reward only).
+        #
+        # WHY p_cbf DOES NOT ALREADY DO THIS. The floor is in the probe mesh, but a CBF
+        # only rations the RATE of approach: any descent slower than alpha*(z - d_safe) is
+        # compliant, so a slow sink toward d_safe = 0.7 m is free and nothing ever pays the
+        # policy to climb back. Measured at level 30 the trained policy does sit high
+        # (p_cbf ep_2350 altitude p1 0.90 / median 2.30 m) -- but that is held by the
+        # spawn box (35-65% of height) and short flights, not by anything in the reward.
+        # The observation has no altitude channel and vz carries 0.05 m/s of white noise,
+        # so a 0.05 m/s sink is invisible and over a 20 s test flight is a metre.
+        #
+        # z_ref drops to the TARGET's own height when the target is lower, so targets at
+        # the bottom of the sampling window (0.12 * 4 m = 0.48 m) stay reachable without
+        # paying for the final approach. 1.0 m is above d_safe (0.7) with margin for the
+        # ~0.25 m airframe radius.
+        #
+        # SIZING: 0.2 per metre below z_ref -> 0.06/step at 0.7 m AGL, about one violating
+        # p_cbf step at lambda_cbf 0.2, and ~2.4x r_progress. 0.0 = inert.
+        "lambda_floor": float(os.environ.get("F450_LAMBDA_FLOOR", 0.0)),  # per m
+        "floor_z_ref": float(os.environ.get("F450_FLOOR_Z_REF", 1.0)),    # m AGL
         # -0.01 by default. B2 experiment (smoothness/saturation plan): override via
         # env var F450_LAMBDA_JERK to sweep without touching this file (this task
         # config is shared -- other training jobs may already be running against it).

@@ -365,6 +365,12 @@ def main():
                     "angle_to_camera_deg": angle_to_cam_deg,
                     "vel_azimuth_deg": vel_azimuth_deg,
                     "vel_elev_deg": vel_elev_deg,
+                    # Height above the floor slab and world-frame vertical speed at impact.
+                    # obstacle_type is the NEAREST ASSET CENTRE, which can never name the
+                    # floor (its centre is metres away under a 20 x 20 m slab), so a floor
+                    # strike only shows up here, as z_agl at about the airframe's radius.
+                    "z_agl_m": float(robot_pos[i, 2] - obs_dict["env_bounds_min"][i, 2]),
+                    "vz_world_mps": float(robot_linvel[i, 2]),
                     "obst_azimuth_deg": obst_azimuth_deg,
                     "obst_elev_deg": obst_elev_deg,
                     "in_view_yaw_slaved": cf["yaw_slaved"],
