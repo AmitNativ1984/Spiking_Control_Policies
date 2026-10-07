@@ -360,3 +360,38 @@ def test_first_episode_spawns_inside_the_spawn_box(task):
         f"first-episode spawn ratios {ratio.tolist()} fall outside init_config's box "
         f"{lo_r.tolist()}..{hi_r.tolist()}"
     )
+
+
+def test_controller_flies_the_delayed_command(task, num_envs):
+    """control_latency is wired in: the robot flies the timeline, not the step's argument.
+
+    Upstream hands robot_manager.pre_physics_step the env step's action every substep;
+    the task wraps that method so the controller gets ControlLatency's newest ARRIVED
+    action instead. If the wrapper were lost, robot_manager.actions would equal the
+    commanded action from the very first substep and the latency would silently be zero.
+    """
+    lat = task._latency
+    if lat is None:
+        import pytest
+        pytest.skip("control_latency disabled (F450_LATENCY=0)")
+    rm = task.sim_env.robot_manager
+    a = torch.zeros((num_envs, 4), device=task.device)
+    a[:, 1] = 0.05  # a small roll -- distinguishable from neutral, nowhere near a crash
+    commanded = task.action_transformation_function(a)
+
+    task.sim_env.sim_steps[:] = task.task_config.episode_len_steps + 1  # force a reset
+    task.step(torch.zeros((num_envs, 4), device=task.device))
+    assert torch.equal(rm.actions, lat._applied)
+
+    # Push the new command once, then run zero-latency's worth of physics: one substep.
+    # With a 45 ms mean (clamped at 0) at most a few percent of envs can have it yet.
+    lat.push(task.action_transformation_function(a))
+    rm.pre_physics_step(a)  # the wrapped method: exactly one on_substep(), no physics
+    early = (rm.actions == commanded).all(dim=1).float().mean().item()
+    assert early < 0.2, f"{early:.0%} of envs already fly a command pushed 0 ms ago"
+
+    # Long after the latency has elapsed, every surviving env flies it.
+    for _ in range(6):
+        task.step(a)
+    flying = (rm.actions == commanded).all(dim=1).float().mean().item()
+    assert flying > 0.8, f"only {flying:.0%} of envs fly the command after ~180 ms"

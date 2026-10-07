@@ -1,3 +1,5 @@
+import os
+
 from aerial_gym.config.asset_config.env_object_config import (
     thin_asset_params,
     tile_asset_params,
@@ -34,7 +36,16 @@ class ForestEnvCfg:
         num_env_actions = 0  # no dynamically-actuated entities: panels/objects/thin/trees/
         # spheres/cylinders are all fix_base_link=True, positioned once per reset and static.
 
-        num_physics_steps_per_env_step_mean = 3  # number of steps between camera renders mean
+        # Policy loop RATE, matched to the Gazebo SITL measurement (2026-10-05): ~33 Hz
+        # +/- ~10 Hz. Upstream draws ONE count per env step for the whole batch as
+        # max(floor(gauss(mean, std)), 0) -- the FLOOR is the trap: E[floor(N(m, 1))] is
+        # m - 0.5, so the old mean = 3 really ran 2.5 substeps = 25 ms = 40 Hz, not the
+        # 30 ms everything assumed. mean = 3.5 makes the expectation exactly 3.0 substeps
+        # (30 ms, 33 Hz), and std 1 gives a period std of ~10.4 ms -- ~11 Hz at 33 Hz,
+        # matching the measured jitter. The task derives its step dt from the same
+        # expectation (_expected_substeps), never from this mean directly.
+        # F450_SUBSTEPS_MEAN=3 restores the pre-measurement rate.
+        num_physics_steps_per_env_step_mean = float(os.environ.get("F450_SUBSTEPS_MEAN", 3.5))
         num_physics_steps_per_env_step_std = 1  # number of steps between camera renders std
 
         render_viewer_every_n_steps = 1  # render the viewer every n steps
