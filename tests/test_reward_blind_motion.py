@@ -21,7 +21,7 @@ from config.task_config.f450_attitude_navigation_task_config import task_config
 from config.sensor_config.realsense_d435_cam_config import RealSenseD435CamConfig as CAM
 
 EMA_KEYS = ["r_progress", "p_speed", "p_jerk", "p_action_mag", "p_blind", "p_fov",
-            "p_cbf"]
+            "p_cbf", "p_time"]
 
 LAMBDA_BLIND = task_config.reward_parameters["lambda_blind"]
 

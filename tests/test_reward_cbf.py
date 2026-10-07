@@ -24,7 +24,8 @@ from task.attitude_navigation_task import NavigationWithObstaclesTask
 from config.task_config.f450_attitude_navigation_task_config import task_config
 from config.sensor_config.realsense_d435_cam_config import RealSenseD435CamConfig as CAM
 
-EMA_KEYS = ["r_progress", "p_speed", "p_jerk", "p_action_mag", "p_blind", "p_fov", "p_cbf"]
+EMA_KEYS = ["r_progress", "p_speed", "p_jerk", "p_action_mag", "p_blind", "p_fov", "p_cbf",
+            "p_time"]
 
 HALF_H = math.radians(CAM.horizontal_fov_deg) / 2.0
 HALF_V = math.atan(math.tan(HALF_H) * (CAM.height / CAM.width))
@@ -72,7 +73,14 @@ def _stub(h_prev, h_next, lam=LAMBDA_CBF, alpha=ALPHA, dt=DT, max_range=MAX_RANG
     stub._cbf_step_dt = lambda: NavigationWithObstaclesTask._cbf_step_dt(stub)
     stub.prev_h = torch.as_tensor(h_prev, dtype=torch.float32).reshape(-1)
     h_n = torch.as_tensor(h_next, dtype=torch.float32).reshape(-1)
-    stub._clearance = lambda: h_n
+
+    # _clearance() returns h and records the raw distance in _cbf_last_d (for the
+    # d_obstacle diagnostic). In the shipped linear form d = h + d_safe.
+    def _clearance():
+        stub._cbf_last_d = h_n + D_SAFE
+        return h_n
+
+    stub._clearance = _clearance
     return stub
 
 
@@ -284,14 +292,14 @@ def test_per_env_independence():
 # --- the depth-image clearance source -------------------------------------------------
 #
 # These do not go through _reward_progress: they exercise _clearance_from_depth directly,
-# because its two encoding traps are silent and one of them is dangerous.
+# because its two encoding traps are silent and one of them is dangerous. It returns the
+# DISTANCE in metres; _barrier() turns that into h, so d_safe does not appear here.
 
 
-def _depth_stub(img, max_range=10.0, cbf_max=MAX_RANGE, d_safe=D_SAFE):
+def _depth_stub(img, max_range=10.0, cbf_max=MAX_RANGE):
     stub = types.SimpleNamespace()
     stub._cbf_img_range = max_range
     stub._cbf_range_f = cbf_max
-    stub._cbf_d_safe_f = d_safe
     stub.obs_dict = {"depth_range_pixels": torch.as_tensor(img, dtype=torch.float32)}
     return stub
 
@@ -304,13 +312,13 @@ def _depth_clearance(img, **kw):
 def test_depth_normalised_pixels_become_metres():
     """normalize_range = True, so a pixel is a fraction of max_range. 0.25 -> 2.5 m."""
     img = torch.full((1, 1, 4, 4), 0.25)
-    assert _depth_clearance(img).item() == pytest.approx(2.5 - D_SAFE, rel=1e-6)
+    assert _depth_clearance(img).item() == pytest.approx(2.5, rel=1e-6)
 
 
 def test_depth_takes_the_minimum_over_the_whole_image():
     img = torch.full((1, 1, 4, 4), 0.8)
     img[0, 0, 2, 3] = 0.12
-    assert _depth_clearance(img).item() == pytest.approx(1.2 - D_SAFE, rel=1e-6)
+    assert _depth_clearance(img).item() == pytest.approx(1.2, rel=1e-6)
 
 
 def test_a_negative_pixel_means_TOO_CLOSE_not_no_return():
@@ -321,22 +329,22 @@ def test_a_negative_pixel_means_TOO_CLOSE_not_no_return():
     img = torch.full((1, 1, 4, 4), 0.9)
     img[0, 0, 1, 1] = -1.0
     got = _depth_clearance(img).item()
-    assert got == pytest.approx(0.0 - D_SAFE, rel=1e-6)
-    assert got < 0.0, "a too-close pixel must land INSIDE the safe-set boundary"
+    assert got == pytest.approx(0.0, abs=1e-6)
+    assert got < D_SAFE, "a too-close pixel must land INSIDE the safe-set boundary"
 
 
 def test_far_out_of_range_is_positive_one_and_reads_as_max_range():
     """far_out_of_range_value = max_range, i.e. +1.0 normalised -- positive, unlike near."""
     img = torch.ones((1, 1, 4, 4))
     # clamped by cbf_max_range, which is below the camera's 10 m
-    assert _depth_clearance(img).item() == pytest.approx(MAX_RANGE - D_SAFE, rel=1e-6)
+    assert _depth_clearance(img).item() == pytest.approx(MAX_RANGE, rel=1e-6)
 
 
 def test_depth_is_clamped_to_the_barrier_range():
     """The probe range, not the camera range, bounds h -- so the range-limit exemption in
     _reward_progress keys off the same number for both sources."""
     img = torch.full((1, 1, 2, 2), 0.95)  # 9.5 m, well past cbf_max_range
-    assert _depth_clearance(img).item() == pytest.approx(MAX_RANGE - D_SAFE, rel=1e-6)
+    assert _depth_clearance(img).item() == pytest.approx(MAX_RANGE, rel=1e-6)
 
 
 def test_depth_is_per_env():
@@ -344,9 +352,9 @@ def test_depth_is_per_env():
     img[1] = 0.2
     img[2, 0, 0, 0] = -1.0
     got = _depth_clearance(img)
-    assert got[0].item() == pytest.approx(5.0 - D_SAFE, rel=1e-6)
-    assert got[1].item() == pytest.approx(2.0 - D_SAFE, rel=1e-6)
-    assert got[2].item() == pytest.approx(0.0 - D_SAFE, rel=1e-6)
+    assert got[0].item() == pytest.approx(5.0, rel=1e-6)
+    assert got[1].item() == pytest.approx(2.0, rel=1e-6)
+    assert got[2].item() == pytest.approx(0.0, abs=1e-6)
 
 
 def test_the_shipped_source_is_rays():
