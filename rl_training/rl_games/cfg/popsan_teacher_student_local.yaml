@@ -33,12 +33,9 @@ params:
   config:
     # Teacher Student distillation configuration
     distillation:
-      # TODO: this teacher was trained on the LEGACY navigation_with_obstacles task.
-      # Its obs vector is the same width (17 state + 32 VAE latent = 49), but the state
-      # semantics and reward are the old task's — retrain a teacher on f450_navigation_task
-      # before trusting distillation from it. The runner warns and falls back to the task's
-      # default encoder bounds if this path is missing.
-      checkpoint: navigation_with_obstacles/runs/nav_vae_ann_cluster_2026-06-22_11-47-23/nn/last_nav_vae_ann_cluster_ep_450_rew_15.500851.pth
+      # Must match the cache's teacher_checkpoint string exactly, or the bounds are recollected.
+      checkpoint: /workspaces/aerial_gym_docker/runs/f450_nav_ann/f450_nav_lat_pfov/2026-10-07_13-37-08/nn/f450_nav_lat_pfov.pth
+      bounds_cache: /workspaces/aerial_gym_docker/runs/f450_nav_ann/f450_nav_lat_pfov/2026-10-07_13-37-08/obs_stats/observation_bounds.json
       normalize_input: True
       normalize_value: True
       kd_actor_coeff: 0.5           # weight on the actor distillation term (full Gaussian KL by default)

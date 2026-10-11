@@ -215,6 +215,7 @@ def resolve_encoder_bounds(config_dict, args):
                        f"({teacher_ckpt!r}); using the task config's default bounds.")
         return
 
+    from . import DEFAULT_BOUNDS_CACHE
     from .tools.collect_obs_stats import load_or_collect_bounds
 
     bounds = load_or_collect_bounds(
@@ -224,6 +225,7 @@ def resolve_encoder_bounds(config_dict, args):
         num_envs=min(config_dict["params"]["config"]["env_config"]["num_envs"], 64),
         num_steps=args["bounds_steps"],
         recompute=args["recompute_bounds"],
+        cache_path=distill_cfg.get("bounds_cache") or DEFAULT_BOUNDS_CACHE,
     )
     config_dict["params"]["network"]["actor"]["observation_bounds"] = bounds
     logger.info(f"[obs-bounds] encoder bounds set from collected stats ({len(bounds)} dims).")

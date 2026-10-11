@@ -69,7 +69,7 @@ class A2CTeacherAgent(A2CAgent):
         assert all(not p.requires_grad for p in self.teacher.parameters()), \
             "Teacher parameters still requires grad"
 
-        # --- Phase 4.5: initialize the SNN critic from the ANN critic --------------------
+        # --- Phase 4.5: initialize the student's ANN critic from the teacher's ---------------
         # Both are ANNMLPCritic with matching hidden_dims (enforced by the YAML), so weights
         # copy 1:1.
         # The critic stays TRAINABLE:
@@ -98,7 +98,7 @@ class A2CTeacherAgent(A2CAgent):
                     and hasattr(self.teacher, "value_mean_std"):
                 self.value_mean_std.load_state_dict(
                     self.teacher.value_mean_std.state_dict())
-            print("[a2c_teacher] initialized SNN critic + norm stats from the ANN teacher "
+            print("[a2c_teacher] initialized student's ANN critic + norm stats from the teacher "
                   "(overridden by --checkpoint if one is loaded).")
         except Exception as e:  # noqa: BLE001 - never let init crash the whole run
             print(f"[a2c_teacher] WARNING: could not init critic from teacher ({e}); "

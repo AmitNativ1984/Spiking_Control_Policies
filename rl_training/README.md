@@ -267,7 +267,7 @@ does nothing — the scale holds and never climbs back.
 
 **1 — Train the ANN teacher.** The teacher's architecture must match the `distillation.network`
 block in the student YAML, and its critic `hidden_dims` must match the student's `critic` block
-(the ANN→SNN critic warm-start copies those weights).
+(the critic warm-start copies the teacher's critic into the student's ANN critic).
 
 ```bash
 python -m rl_training.rl_games.runner \
