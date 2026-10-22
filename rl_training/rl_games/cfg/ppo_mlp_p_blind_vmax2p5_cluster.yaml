@@ -1,0 +1,116 @@
+# Continuation of the p_blind experiment (ppo_mlp_p_blind_cluster.yaml), warm-started
+# from its final checkpoint (epoch 2000, runs/f450_nav_p_blind/2026-09-08_17-44-28/nn/
+# last_f450_nav_p_blind_ep_2000_rew_11.54345.pth) to isolate the effect of lowering the
+# max-speed threshold, rather than re-learning the task from scratch.
+#
+# Submit with:
+#   F450_V_MAX=2.5 \
+#   CHECKPOINT=runs/f450_nav_p_blind/2026-09-08_17-44-28/nn/last_f450_nav_p_blind_ep_2000_rew_11.54345.pth \
+#   CURRICULUM_LEVEL=30 \
+#   CONFIG_FILE=rl_training/rl_games/cfg/ppo_mlp_p_blind_vmax2p5_cluster.yaml \
+#   EXPERIMENT=f450_nav_p_blind_vmax2p5 \
+#   sbatch slurm/train_navigation.sbatch
+#
+# F450_V_MAX lowers config/task_config/f450_attitude_navigation_task_config.py's v_max
+# from 5.0 to 2.5 m/s (the lambda_v excess-speed penalty now bites at half the speed).
+# CURRICULUM_LEVEL=30 pins both curriculum.min_level and max_level at the hardest level
+# (runner.py) so training resumes directly at the difficulty the checkpoint was trained
+# for, instead of re-climbing the curriculum from level 0.
+#
+# max_epochs is 3000, not 1000: --checkpoint restores epoch_num=2000 from the checkpoint
+# (rl_games a2c_common.py set_full_state_weights, set_epoch=True by default), and the
+# stop condition is `epoch_num >= max_epochs` -- so 3000 here means "2000 already done +
+# 1000 more", not "1000 total" (which would exit after a single iteration).
+#
+# Identical to ppo_mlp_p_blind_cluster.yaml otherwise: same network (mlp_actor_critic,
+# no GRU -- this continues the non-recurrent baseline line, not the G-series), same PPO
+# hyperparameters.
+params:
+  seed: 42
+  algo:
+    name: a2c_continuous
+
+  model:
+    name: continuous_a2c_logstd
+
+  load_checkpoint: False
+
+  network:
+    name: mlp_actor_critic
+    separate: True
+    space:
+      continuous:
+        mu_activation: None
+        sigma_activation: None
+        mu_init:
+          name: default
+        sigma_init:
+          name: const_initializer
+          val: 0
+        fixed_sigma: True
+    actor:
+      hidden_dims: [256, 256, 64]
+      activation: elu
+    critic:
+      hidden_dims: [256, 256, 64]
+      activation: elu
+
+  config:
+    name: f450_navigation
+    env_name: f450_navigation_task
+    env_config:
+      headless: True
+      use_warp: True
+
+    # Reward scaling
+    reward_shaper:
+      scale_value: 1.0
+
+    # PPO settings
+    normalize_advantage: True
+    gamma: 0.99
+    tau: 0.95
+    ppo: True
+
+    # Learning rate: unchanged from the p_blind baseline.
+    learning_rate: 1e-4          # starting point; the scheduler moves it from here
+    lr_schedule: adaptive
+    kl_threshold: 0.008
+
+    # Training params
+    save_best_after: 10
+    save_frequency: 50
+    score_to_win: 100000
+    grad_norm: 1.0
+    entropy_coef: 0.001
+    truncate_grads: True
+    e_clip: 0.2
+    clip_value: False
+
+    # Batch settings: unchanged from the p_blind baseline.
+    num_actors: 1024
+    horizon_length: 128
+    minibatch_size: 8192
+    mini_epochs: 4
+    seq_length: 8
+
+    # Value function
+    critic_coef: 2
+    normalize_value: True
+    value_bootstrap: True
+
+    # Input normalization (important for mixed state + VAE latents)
+    normalize_input: True
+
+    # Other settings
+    bounds_loss_coef: 0.01
+    # 2000 (already trained, restored from checkpoint) + 1000 more.
+    max_epochs: 3000
+    use_diagnostics: True
+
+    # Player settings (for inference/testing)
+    player:
+      render: True
+      deterministic: True
+      games_num: 100000
+      num_actors: 1
