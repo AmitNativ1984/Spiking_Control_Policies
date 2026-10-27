@@ -22,14 +22,23 @@ in sync. The hidden state is carried across steps and ZEROED for every env whose
 ended on the previous step -- without that the policy would enter a new episode still
 conditioned on the last one, which reads as a much worse policy and is silent.
 
-No gradient updates and no exploration noise: the mean action is used, clamped, so this
-measures the policy rather than the sampler. p_cbf is not evaluated (lambda_cbf defaults to
-0.0), so the clearance probe is never built and the rollout costs nothing extra.
+POPSAN CHECKPOINTS WORK TOO. A spiking actor (a2c_network.spiking_actor.*) is rebuilt
+through the project's own POPSANNetworkBuilder from the run's config.yaml; the encoder's
+obs_bounds come back with the weights, so the receptive fields are exactly the trained ones.
+Its membranes reset on every forward call, so it is stateless across env steps.
+
+No gradient updates and, by default, no exploration noise: the mean action is used,
+clamped, so this measures the policy rather than the sampler. --sample instead draws
+mu + exp(log_std) * N(0, 1) and clamps it, exactly what rl_games feeds the env during
+training -- running both on one checkpoint separates "the mean policy got worse" from "the
+exploration noise grew". p_cbf is not evaluated (lambda_cbf defaults to 0.0), so the
+clearance probe is never built and the rollout costs nothing extra.
 
 Isaac Gym allows ONE sim per process, so one level per invocation.
 
 usage: python analysis/eval_levels.py <checkpoint.pth> <level> [--num_envs 256]
                                       [--num_steps 3000] [--out out.json]
+                                      [--sample] [--seed 0]
 """
 import isaacgym  # noqa: F401  -- MUST precede torch
 
@@ -102,6 +111,32 @@ def build_gru_policy(weights, num_envs, dev, ckpt_path):
     return net, obs_dim
 
 
+def build_popsan_policy(weights, dev, ckpt_path):
+    """Rebuild the PopSAN spiking actor (and its unused critic) through the project's builder."""
+    from rl_training.rl_games.networks import POPSANNetworkBuilder
+
+    params = _run_config_for(ckpt_path)
+    builder = POPSANNetworkBuilder()
+    builder.load(params["network"])
+
+    obs_dim = weights["running_mean_std.running_mean"].shape[0]
+    net = builder.build(
+        "network",
+        input_shape=(obs_dim,),
+        actions_num=weights["a2c_network.spiking_actor.log_std"].shape[0],
+    )
+    inner = {k[len("a2c_network."):]: v for k, v in weights.items()
+             if k.startswith("a2c_network.")}
+    # strict: a spiking actor that silently keeps freshly initialised weights (or encoder
+    # bounds) would still produce actions, just meaningless ones.
+    net.load_state_dict(inner, strict=True)
+    print(f"  PopSAN rebuilt: obs_dim {obs_dim}, "
+          f"num_steps {net.spiking_actor.num_steps}, pop_dim {net.spiking_actor.pop_dim}",
+          flush=True)
+    net = net.to(dev).eval()
+    return net, obs_dim
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("checkpoint")
@@ -109,25 +144,45 @@ def main():
     p.add_argument("--num_envs", type=int, default=256)
     p.add_argument("--num_steps", type=int, default=3000)
     p.add_argument("--out", default=None)
+    p.add_argument("--sample", action="store_true",
+                   help="sample mu + sigma*N(0,1) as in training, instead of the mean action")
+    p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
 
     dev = "cuda:0"
+    torch.manual_seed(args.seed)
     ck = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     w = ck["model"]
     recurrent = any("actor_gru" in k for k in w)
+    popsan = any(k.startswith("a2c_network.spiking_actor.") for k in w)
+    kind = "PopSAN (spiking)" if popsan else "GRU (recurrent)" if recurrent else "MLP (feed-forward)"
+    mode = "sampled" if args.sample else "deterministic"
     print(f"checkpoint {os.path.basename(args.checkpoint)}  epoch {ck.get('epoch', '?')}",
           flush=True)
-    print(f"policy: {'GRU (recurrent)' if recurrent else 'MLP (feed-forward)'}", flush=True)
+    print(f"policy: {kind}   actions: {mode}", flush=True)
 
     mean = w["running_mean_std.running_mean"].float().to(dev)
     std = torch.sqrt(w["running_mean_std.running_var"].float().to(dev) + _NORM_EPS)
 
-    if recurrent:
+    log_std = None  # state-independent action log-std, for --sample and for the record
+    if popsan:
+        net, obs_dim = build_popsan_policy(w, dev, args.checkpoint)
+        log_std = w["a2c_network.spiking_actor.log_std"].float().to(dev)
+    elif recurrent:
         net, obs_dim = build_gru_policy(w, args.num_envs, dev, args.checkpoint)
     else:
         actor, _ = build_actor(w)
         actor = actor.to(dev).eval()
         obs_dim = actor[0].in_features
+        if "a2c_network.actor.action_log_std" in w:
+            log_std = w["a2c_network.actor.action_log_std"].float().to(dev)
+    if args.sample and log_std is None:
+        raise SystemExit("--sample needs a state-independent log_std in the checkpoint; "
+                         "none found for this policy type.")
+    sigma = log_std.exp() if log_std is not None else None
+    if sigma is not None:
+        print(f"  action sigma {[round(float(x), 4) for x in sigma]}  "
+              f"(geo-mean {float(log_std.mean().exp()):.4f})", flush=True)
 
     from config.task_config import F450NavTaskConfig
     F450NavTaskConfig.curriculum.min_level = args.level
@@ -151,13 +206,16 @@ def main():
     with torch.no_grad():
         for s in range(args.num_steps):
             normed = torch.clamp((obs - mean) / std, -_NORM_CLAMP, _NORM_CLAMP)
-            if recurrent:
+            if popsan:
+                mu, _, _, _ = net({"obs": normed})
+            elif recurrent:
                 mu, _, _, states = net({"obs": normed, "rnn_states": states,
                                         "seq_length": 1})
             else:
                 mu = actor(normed)
+            action = mu + sigma * torch.randn_like(mu) if args.sample else mu
 
-            o, _, term, trunc, infos = task.step(mu.clamp(-1, 1))
+            o, _, term, trunc, infos = task.step(action.clamp(-1, 1))
             obs = o["observations"]
 
             term = term.bool()
@@ -184,7 +242,7 @@ def main():
 
     tot = sum(n.values())
     rates = {k: v / max(tot, 1) for k, v in n.items()}
-    print(f"\nLEVEL {args.level}  |  {tot} episodes")
+    print(f"\nLEVEL {args.level}  |  {mode}  |  {tot} episodes")
     for k in ("arrive", "crash", "timeout", "exceed"):
         print(f"  {k:8s} {n[k]:6d}   {100 * rates[k]:6.2f}%")
     print(f"  success rate {100 * rates['arrive']:.2f}%   "
@@ -193,7 +251,9 @@ def main():
     if args.out:
         json.dump({
             "checkpoint": args.checkpoint, "epoch": ck.get("epoch"),
-            "recurrent": recurrent, "level": args.level,
+            "policy": kind, "recurrent": recurrent, "mode": mode, "seed": args.seed,
+            "sigma": [float(x) for x in sigma] if sigma is not None else None,
+            "level": args.level,
             "num_envs": args.num_envs, "num_steps": args.num_steps,
             "episodes": tot, "counts": n, "rates": rates,
         }, open(args.out, "w"), indent=1)

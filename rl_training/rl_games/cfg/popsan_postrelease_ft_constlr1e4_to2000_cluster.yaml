@@ -1,0 +1,143 @@
+# Post-KD-release PPO fine-tune of the PopSAN student (resume with --checkpoint).
+#
+# Run 280273 (popsan_teacher_student_cluster.yaml) reached teacher parity at KD release
+# (epoch 410; ep_450 deterministic eval 86.30% vs the teacher's 86.23% at level 30), then
+# collapsed: with the KD anchor gone, the entropy bonus pushed log_std up every step
+# (sigma 0.14 -> 0.68), wider sigma lowered the per-step KL, the adaptive scheduler raised
+# the LR to its 1e-3 ceiling, and those steps damaged the mean policy (ep_1000 det 71.9%).
+#
+# This config continues from a post-release checkpoint with pure PPO and the TEACHER's
+# trust region (f450_nav_lat_pfov trained 1000 epochs with exactly these and its sigma
+# shrank 0.087 -> 0.071). log_std stays learnable and uncapped -- watch sigma; add a cap
+# only if it climbs past ~0.2. Everything else is identical to the cluster distill YAML.
+#
+# CONSTANT-LR VARIANT. The adaptive version (kl_threshold 0.008) pinned the LR at its 1e-6
+# floor from the first epoch: the spiking student's per-update KL sits at ~0.015 even at
+# lr 1e-6 -- over the 0.016 cut line in some epochs (6 of the first 32) and never under the
+# 0.004 raise line -- so the LR could only fall and the policy barely trained. Here the LR is fixed at 1e-5 (about what the original
+# run used on its stable plateau). A constant LR also rules out the original runaway, in
+# which wider sigma -> lower KL -> the scheduler raised the LR -> sigma grew faster.
+#
+# LR x10 VARIANT (1e-4). The 1e-5 run with the teacher's reward (W&B wig5qvuk) held teacher parity
+# to epoch 1000 while sigma crept 0.145 -> 0.163 and entropy never settled. This tests whether a 10x
+# larger constant step speeds that up without degrading success/reward. The LR is still constant, so
+# the adaptive-LR runaway that collapsed the original run cannot happen; the risk is bigger steps on
+# the mean policy and ~10x faster sigma drift. Launch with F450_LAMBDA_FOV=0.015 F450_LAMBDA_BLIND=0.0.
+#
+# CONTINUATION TO EPOCH 2000. Identical to popsan_postrelease_ft_constlr1e4_cluster.yaml except max_epochs.
+# Resume from that run's ep_1000 checkpoint (job 280722, W&B j5skxllu): epochs 1000 -> 2000. Question: does
+# sigma plateau (it reached 0.295 at ep1000, climb slowing), and where does success settle (0.81 at ep1000
+# vs 0.856 for the lr 1e-5 run)? Launch with F450_LAMBDA_FOV=0.015 F450_LAMBDA_BLIND=0.0.
+params:
+  seed: 42
+  
+  algo:
+    name: a2c_teacher                 # custom PPO + annealed ANN->SNN distillation tail (agents/a2c_teacher_agent.py)
+  
+  model:
+    name: continuous_a2c_logstd
+
+  load_checkpoint: False
+
+  network:
+      name: popsan                  # Custom SNN network (registered in networks/__init__.py)
+      device: cuda
+
+      actor:
+        encoder:
+          pop_dim: 10
+          threshold: 0.95                   # Activation threshold for the population encoding layer (matches PopSAN reference vth=0.5)
+        num_steps: 5                        # Number of SNN simulation timesteps per forward pass
+        sigma_init: 0.5                     # Initial action std (log_std = log(sigma_init)); learnable thereafter
+        hidden_dims: [256, 256]         # Hidden layer dimensions (matches MLP architecture)
+        beta: 0.75                          # Voltage decay factor for LIF neurons (0 = no memory, 1 = perfect memory)
+        alpha: 0.5                          # Current decay factor (matches PopSAN reference alpha=0.5)
+        threshold: 0.5                      # LIF firing threshold for hidden/output populations (matches PopSAN reference vth=0.5)
+        spike_grad: fast_sigmoid            # Surrogate gradient function for backprop (fast_sigmoid is more stable)
+        reset_mechanism: subtract           # Reset mechanism after spike: "subtract" or "zero"
+        reset_delay: False                  # Whether to delay reset by one timestep
+
+      critic:
+        hidden_dims: [256, 256, 64]   # MUST match the teacher critic (distillation.network.critic) for the ANN->SNN critic warm-start
+
+  config:
+    # Teacher Student distillation configuration
+    distillation:
+      # Must match the cache's teacher_checkpoint string exactly, or the bounds are recollected.
+      checkpoint: /workspaces/aerial_gym_docker/runs/f450_nav_ann/f450_nav_lat_pfov/2026-10-07_13-37-08/nn/f450_nav_lat_pfov.pth
+      bounds_cache: /workspaces/aerial_gym_docker/runs/f450_nav_ann/f450_nav_lat_pfov/2026-10-07_13-37-08/obs_stats/observation_bounds.json
+      normalize_input: True
+      normalize_value: True
+      kd_actor_coeff: 0.0           # KD OFF: pure PPO after release (teacher forward is skipped)
+      kd_critic_coeff: 0.0          # weight on critic-value distillation (0 = critic trains purely on PPO returns)
+      kd_actor_loss: kl             # 'kl' (full diagonal-Gaussian KL, mu+sigma) or 'mse' (means only, == warm-up)
+      # Monotonic, success-gated KD anneal: scale starts at 1.0 and only ever decreases.
+      kd_release_success: 0.50      # each curriculum check with success >= this subtracts one step
+      kd_anneal_step: 0.05          # per-check decrement of the KD scale (~20 sustained checks -> 0)
+      network:
+        name: mlp_actor_critic
+        separate: True
+        actor:
+          hidden_dims: [256, 256, 64]
+          activation: elu
+        critic: 
+          hidden_dims: [256, 256, 64]
+          activation: elu
+    
+    name: f450_navigation
+    env_name: f450_navigation_task
+    env_config:
+      headless: True
+      use_warp: True
+
+    # Reward scaling
+    reward_shaper:
+      scale_value: 1.0
+
+    # PPO settings
+    normalize_advantage: True
+    gamma: 0.99
+    tau: 0.95
+    ppo: True
+
+    # Learning rate
+    learning_rate: 1.0e-4           # constant, 10x the 1e-5 run (float on purpose: the identity scheduler passes it straight to Adam)
+    lr_schedule: constant           # rl_games IdentityScheduler: anything but 'adaptive'/'linear'; kl_threshold/max_lr unused
+    kl_threshold: 0.008             # teacher's (was 0.08): LR cut at KL > 0.016, raised at < 0.004
+    min_lr: 1e-6
+    max_lr: 2e-4                    # teacher's LR never exceeded 2.3e-4 (was 1e-3)
+
+    # Training params
+    save_best_after: 10
+    save_frequency: 50
+    score_to_win: 100000
+    grad_norm: 1.0
+    entropy_coef: 0.001             # teacher's (was 0.002); this push is what drove sigma up
+    truncate_grads: True
+    e_clip: 0.2
+    clip_value: False
+
+    # Batch settings
+    num_actors: 1024
+    horizon_length: 128             # 1024 x 128 = 131k steps/epoch, the teacher's batch
+    minibatch_size: 8192
+    mini_epochs: 4
+
+    # Value function
+    critic_coef: 2
+    normalize_value: True
+    value_bootstrap: True
+
+    normalize_input: True   # RL-GAMES normalization of observations
+
+    # Other settings
+    bounds_loss_coef: 0.01                # = the ANN teacher f450_nav_lat_pfov (was 0.0001, 100x weaker: let the yaw mean drift past +-1.1)
+    max_epochs: 2000                # resumes at the checkpoint's epoch (1000) -> 1000 more
+    use_diagnostics: True
+
+    # Player settings (for inference/testing)
+    player:
+      render: False
+      deterministic: True
+      games_num: 100000
+      num_actors: 1
