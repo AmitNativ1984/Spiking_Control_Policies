@@ -8,7 +8,6 @@
 		}
 	],
 	"settings": {
-		"python-envs.defaultEnvManager": "ms-python.python:system",
-		"github.copilot.chat.codeGeneration.useInstructionFiles": true
+		"python-envs.defaultEnvManager": "ms-python.python:system"
 	}
 }

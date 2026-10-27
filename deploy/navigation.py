@@ -45,10 +45,12 @@ from control_policy_api.observations_nav import (
 )
 
 from .checkpoint import MlpActorPolicy
+from .snn_checkpoint import PopSANPolicy
 
 __all__ = [
     "NAV_OBS_DIM",
     "NavigationPolicy",
+    "SnnNavigationPolicy",
     "build_nav_observation",
     "latent_dim_of",
     "nav_task_config",
@@ -123,36 +125,25 @@ class _MetricDepthVaeConfig:
         self.sensor_max_range = 1.0
 
 
-class NavigationPolicy(MlpActorPolicy):
-    """The dense navigation actor, with the DepthVAE encoder in front of it.
+class _NavigationObservation:
+    """Everything about the navigation policy except what computes mu.
 
     `state.depth` must be a (H, W) array of METRIC depth. Unlike the hover policy this one
     cannot produce an observation without an image: the vision channels have no defined
     value before the first frame, and zeros are not a neutral substitute (the VAE gate that
     once trained the policy against zeroed latents was removed).
+
+    A mixin for the same reason as hover's: the dense and spiking actors consume the SAME
+    49-D vector, and that is worth one definition rather than two.
     """
 
-    def __init__(
-        self,
-        checkpoint_path: str,
-        vae_checkpoint: Union[str, Path] = None,
-        device: str = "cpu",
-        activation: str = "elu",
-        distance_norm_m: float = DISTANCE_NORM_M,
-    ):
+    def _init_navigation_state(self, distance_norm_m: float) -> None:
         self.distance_norm_m = float(distance_norm_m)
         self._prev_action_transformed = np.zeros(4, dtype=np.float32)
         self._latent = np.zeros(NAV_LATENT_DIM, dtype=np.float32)
         self._have_latent = False
 
-        super().__init__(
-            checkpoint_path=checkpoint_path,
-            obs_dim=NAV_OBS_DIM,
-            action_dim=4,
-            activation=activation,
-            device=device,
-        )
-
+    def _init_encoder(self, vae_checkpoint: Union[str, Path, None], device: str) -> None:
         # Optional, so export_onnx can export the ACTOR without loading a VAE it never
         # touches. Anything that needs an observation needs the encoder and says so below.
         if vae_checkpoint is None:
@@ -232,3 +223,50 @@ class NavigationPolicy(MlpActorPolicy):
     def reset(self) -> None:
         super().reset()
         self._prev_action_transformed = np.zeros(4, dtype=np.float32)
+
+
+class NavigationPolicy(_NavigationObservation, MlpActorPolicy):
+    """The dense navigation actor, with the DepthVAE encoder in front of it."""
+
+    def __init__(
+        self,
+        checkpoint_path: str,
+        vae_checkpoint: Union[str, Path] = None,
+        device: str = "cpu",
+        activation: str = "elu",
+        distance_norm_m: float = DISTANCE_NORM_M,
+    ):
+        self._init_navigation_state(distance_norm_m)
+        super().__init__(
+            checkpoint_path=checkpoint_path,
+            obs_dim=NAV_OBS_DIM,
+            action_dim=4,
+            activation=activation,
+            device=device,
+        )
+        self._init_encoder(vae_checkpoint, device)
+
+
+class SnnNavigationPolicy(_NavigationObservation, PopSANPolicy):
+    """The PopSAN spiking navigation actor, with the same DepthVAE in front of it.
+
+    `config_path` is the run's frozen config.yaml -- see snn_checkpoint's docstring.
+    """
+
+    def __init__(
+        self,
+        checkpoint_path: str,
+        config_path: Union[str, Path],
+        vae_checkpoint: Union[str, Path] = None,
+        device: str = "cpu",
+        distance_norm_m: float = DISTANCE_NORM_M,
+    ):
+        self._init_navigation_state(distance_norm_m)
+        super().__init__(
+            checkpoint_path=checkpoint_path,
+            config_path=config_path,
+            obs_dim=NAV_OBS_DIM,
+            action_dim=4,
+            device=device,
+        )
+        self._init_encoder(vae_checkpoint, device)

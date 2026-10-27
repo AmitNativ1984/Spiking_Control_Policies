@@ -111,8 +111,6 @@ def main(argv=None) -> None:
         raise SystemExit(f"no checkpoint at {args.checkpoint}")
     if args.arch == "ann" and args.config is not None:
         raise SystemExit("--config applies to --arch snn only")
-    if args.task == "navigation" and args.arch != "ann":
-        raise SystemExit("the navigation policy has no spiking variant yet")
     if args.samples is None:
         args.samples = 32 if args.task == "navigation" else 256
 

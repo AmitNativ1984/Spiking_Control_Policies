@@ -56,7 +56,7 @@ import numpy as np
 
 from control_policy_api.base import DroneState
 from .hover import HoverPolicy, SnnHoverPolicy
-from .navigation import NavigationPolicy, nav_task_config
+from .navigation import NavigationPolicy, SnnNavigationPolicy, nav_task_config
 
 NUM_SAMPLES = 256
 
@@ -147,25 +147,28 @@ def main(argv=None) -> None:
 
     import torch  # imported late so the module docstring is readable without it
 
-    if args.task == "navigation":
-        if args.arch != "ann":
-            raise SystemExit("the navigation policy has no spiking variant yet")
+    if args.arch == "ann":
         if args.config is not None:
             raise SystemExit("--config applies to --arch snn only")
+    elif args.config is None:
+        raise SystemExit(
+            "--arch snn requires --config: num_steps is not recoverable from the "
+            "checkpoint. Pass the config.yaml in the checkpoint's own run directory."
+        )
+
+    if args.task == "navigation":
         if args.vae_checkpoint is None:
             args.vae_checkpoint = Path(nav_task_config().vae_config.model_file)
             print(f"--vae-checkpoint defaulted to the task config's: {args.vae_checkpoint}")
-        policy = NavigationPolicy(str(args.checkpoint), args.vae_checkpoint)
+        if args.arch == "ann":
+            policy = NavigationPolicy(str(args.checkpoint), args.vae_checkpoint)
+        else:
+            policy = SnnNavigationPolicy(
+                str(args.checkpoint), args.config, args.vae_checkpoint
+            )
     elif args.arch == "ann":
-        if args.config is not None:
-            raise SystemExit("--config applies to --arch snn only")
         policy = HoverPolicy(str(args.checkpoint))
     else:
-        if args.config is None:
-            raise SystemExit(
-                "--arch snn requires --config: num_steps is not recoverable from the "
-                "checkpoint. Pass the config.yaml in the checkpoint's own run directory."
-            )
         policy = SnnHoverPolicy(str(args.checkpoint), args.config)
     if args.samples is None:
         args.samples = NUM_SAMPLES_NAV if args.task == "navigation" else NUM_SAMPLES

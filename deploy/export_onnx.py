@@ -72,7 +72,7 @@ import numpy as np
 import torch
 
 from .hover import HoverPolicy, SnnHoverPolicy
-from .navigation import NavigationPolicy
+from .navigation import NavigationPolicy, SnnNavigationPolicy
 from .checkpoint import _NORM_CLAMP
 
 # ONNX opset 13 is old enough for any onnxruntime you will meet on a companion computer and
@@ -127,16 +127,11 @@ def build_policy(args):
     no work for. The encoder is a separate graph with a separate exporter -- see
     deploy/export_vae_onnx.py and the two-graph note in control_policy_api.onnx.
     """
-    if args.task == "navigation":
-        if args.arch != "ann":
-            raise SystemExit("the navigation policy has no spiking variant yet")
-        if args.config is not None:
-            raise SystemExit("--config applies to --arch snn only")
-        return NavigationPolicy(str(args.checkpoint))
-
     if args.arch == "ann":
         if args.config is not None:
             raise SystemExit("--config applies to --arch snn only")
+        if args.task == "navigation":
+            return NavigationPolicy(str(args.checkpoint))
         return HoverPolicy(str(args.checkpoint))
 
     if args.config is None:
@@ -144,6 +139,8 @@ def build_policy(args):
             "--arch snn requires --config: num_steps is not recoverable from the "
             "checkpoint. Pass the config.yaml in the checkpoint's own run directory."
         )
+    if args.task == "navigation":
+        return SnnNavigationPolicy(str(args.checkpoint), args.config)
     return SnnHoverPolicy(str(args.checkpoint), args.config)
 
 
