@@ -21,6 +21,7 @@ class GenX320EventCamConfig(BaseSensorConfig):
     fov_deg = 104.0
     fov_type = "diagonal"  # the vendor page does not say which; diagonal is the usual lens spec
     max_range = 20.0  # ray far plane [m]; misses see the sky
+    supersample = 1  # k x k sub-rays per pixel, averaged in linear intensity (cost x k^2)
 
     # --- DIFF3D output -------------------------------------------------------------------
     frame_period_s = 0.010  # DIFF3D integration period T
@@ -32,8 +33,8 @@ class GenX320EventCamConfig(BaseSensorConfig):
 
     # --- event model: L = log(max(I, eps)), N = floor(|L - L_ref| / C) -------------------
     log_eps = 1.0e-3
-    c_on_mean_range = [0.25, 0.25]
-    c_off_mean_range = [0.25, 0.25]
+    c_on_mean_range = [0.15, 0.35]
+    c_off_mean_range = [0.15, 0.35]
     c_sigma_pixel = 0.03  # per-pixel mismatch, fixed within an episode (v2e)
     c_sigma_temporal = 0.01  # redrawn every sample
     c_min = 0.10
@@ -49,6 +50,16 @@ class GenX320EventCamConfig(BaseSensorConfig):
     sky_intensity_range = [0.5, 1.0]  # I where a ray hits nothing
     light_elevation_deg_range = [20.0, 80.0]  # directional light; azimuth is U(0, 360)
     max_assets_per_env = 1024
+    smooth_normals = True  # interpolate corner normals; needs the env meshes (bind_meshes)
+    crease_angle_deg = 40.0  # faces meeting at a sharper angle than this keep a hard edge
+
+    # --- texture: rho *= exp(sigma * F(p / s)), F = unit-std fBm anchored to the hit point ----
+    texture_enabled = False
+    texture_scale_range = [0.2, 1.0]  # s [m], per asset per episode, log-uniform
+    texture_contrast_range = [0.05, 0.5]  # sigma = std of ln(rho); compare with C (~0.25)
+    texture_probability = 0.7  # chance each asset is textured this episode; the rest stay flat
+    texture_octaves = 2  # wavelengths s, s/2, s/4, s/8
+    texture_min_footprints = 2.0  # fade octaves whose wavelength < this many pixel footprints
 
     # --- mount (sensor frame -> robot base_link) -------------------------------------------
     euler_frame_rot_deg = [-90.0, 0.0, -90.0]  # optical (z forward) -> body (x forward)

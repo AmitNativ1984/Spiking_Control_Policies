@@ -47,10 +47,12 @@ def time_it(fn, reps):
     return 1000.0 * (time.perf_counter() - t0) / reps
 
 
-def bench_event(mesh_ids, n, res, period_ms, oversample, reps):
+def bench_event(scene, n, res, period_ms, oversample, reps, texture=False, supersample=1,
+                smooth=True):
     cfg = type("B", (GenX320EventCamConfig,), dict(
-        width=res, height=res, frame_period_s=period_ms * 1e-3, oversample=oversample))
-    cam = WarpEventCam(n, cfg, mesh_ids, DEV)
+        width=res, height=res, frame_period_s=period_ms * 1e-3, oversample=oversample,
+        texture_enabled=texture, supersample=supersample, smooth_normals=smooth))
+    cam = WarpEventCam(n, cfg, scene.mesh_ids_array, DEV, meshes=scene.meshes)
     pos, quat = poses(n, 0)
     cam.set_pose_tensor(pos, quat)
     cam.capture(0)
@@ -90,12 +92,17 @@ def main():
                    help="frame_period_ms x oversample")
     p.add_argument("--num_obstacles", type=int, default=40)
     p.add_argument("--reps", type=int, default=20)
+    p.add_argument("--texture", action="store_true", help="enable the procedural texture")
+    p.add_argument("--supersample", type=int, default=1, help="k x k sub-rays per pixel")
+    p.add_argument("--flat_normals", action="store_true", help="face normals instead of smooth")
     args = p.parse_args()
     wp.init()
 
     rng = np.random.default_rng(0)
     forests = [random_forest(rng, args.num_obstacles) for _ in range(8)]
-    print(f"{torch.cuda.get_device_name()} | {args.num_obstacles} obstacles/env | "
+    print(f"{torch.cuda.get_device_name()} | texture {'on' if args.texture else 'off'} | "
+          f"supersample {args.supersample} | {'flat' if args.flat_normals else 'smooth'} normals | "
+          f"{args.num_obstacles} obstacles/env | "
           f"{STEP_MS} ms env step | ms per env step\n")
     header = ["envs", "res", "depth 1 ray"] + [f"T={m.split('x')[0]}ms os={m.split('x')[1]}"
                                                for m in args.modes]
@@ -106,7 +113,8 @@ def main():
             row = [str(n), f"{res}x{res}", f"{bench_depth(scene.mesh_ids_array, n, res, args.reps):.2f}"]
             for m in args.modes:
                 period, os_ = (int(v) for v in m.split("x"))
-                ms = bench_event(scene.mesh_ids_array, n, res, period, os_, args.reps)
+                ms = bench_event(scene, n, res, period, os_, args.reps, args.texture,
+                                 args.supersample, not args.flat_normals)
                 row.append(f"{ms:.2f}")
             print(" | ".join(f"{c:>15}" for c in row))
         del scene

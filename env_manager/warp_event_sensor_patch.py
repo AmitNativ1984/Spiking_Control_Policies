@@ -52,6 +52,8 @@ class EventAwareWarpSensor(WarpSensor):
         self.pixels = global_tensor_dict.get("depth_range_pixels")
         self.segmentation_pixels = None
         _write_asset_indices(global_tensor_dict, self.cfg.max_assets_per_env)
+        # topology only: the BVH-rebuild patch makes new wp.Mesh objects over the same arrays
+        self.sensor.bind_meshes(global_tensor_dict["CONST_WARP_MESH_PER_ENV"])
         dt_ns = int(round(global_tensor_dict["dt"] * 1e9))
         global_tensor_dict.setdefault("physics_step_count", 0)
         self.sensor.clock = lambda: global_tensor_dict["physics_step_count"] * dt_ns

@@ -6,18 +6,22 @@ output does not depend on how many physics substeps the env step happened to tak
 
 The camera pose between two captures is interpolated (lerp + slerp); obstacles are
 static within an episode, so all events come from ego-motion.
+
+Shading uses crease-aware smooth normals when the env meshes are bound (bind_meshes), and
+averages `supersample`^2 sub-rays per pixel in linear intensity before the log.
 """
 import math
 
+import numpy as np
 import torch
 import warp as wp
 
-from .kernels import event_kernel
+from .kernels import VALUE_NOISE_STD, Geometry, Texture, corner_normals_kernel, event_kernel
 from .lens import intrinsics_from_fov, ray_lut
 
 
 class WarpEventCam:
-    def __init__(self, num_envs, config, mesh_ids_array, device="cuda:0"):
+    def __init__(self, num_envs, config, mesh_ids_array, device="cuda:0", meshes=None):
         cfg = config
         if cfg.num_sensors != 1:
             raise ValueError("WarpEventCam supports exactly one sensor per env")
@@ -53,7 +57,15 @@ class WarpEventCam:
         lut = ray_lut(cfg.width, cfg.height, self.fx, self.fy, self.cx, self.cy,
                       cfg.lens_model, cfg.kb4_coeffs)
         self.ray_lut_np = lut
-        self.ray_lut = wp.array(lut, dtype=wp.vec3, device=device)
+        self.depth_lut = wp.array(lut, dtype=wp.vec3, device=device)
+        k = int(cfg.supersample)
+        if k < 1:
+            raise ValueError(f"supersample must be >= 1, got {k}")
+        # k x k sub-rays on a regular grid inside each pixel; k = 1 is the pixel centre
+        offs = [(i + 0.5) / k - 0.5 for i in range(k)]
+        sub = [ray_lut(cfg.width, cfg.height, self.fx, self.fy, self.cx - dx, self.cy - dy,
+                       cfg.lens_model, cfg.kb4_coeffs) for dy in offs for dx in offs]
+        self.ray_lut = wp.array(np.stack(sub, axis=2), dtype=wp.vec3, device=device)  # (H, W, k*k)
 
         N, H, W = num_envs, cfg.height, cfg.width
         z = dict(device=device, requires_grad=False)
@@ -68,6 +80,8 @@ class WarpEventCam:
         self.depth = torch.zeros((N, H, W), dtype=torch.float32, **z)
 
         self.albedo = torch.zeros((N, cfg.max_assets_per_env), dtype=torch.float32, **z)
+        self.tex_scale = torch.ones((N, cfg.max_assets_per_env), dtype=torch.float32, **z)
+        self.tex_sigma = torch.zeros((N, cfg.max_assets_per_env), dtype=torch.float32, **z)
         self.light = torch.zeros((N, 3), dtype=torch.float32, **z)
         self.ambient = torch.zeros(N, dtype=torch.float32, **z)
         self.diffuse = torch.zeros(N, dtype=torch.float32, **z)
@@ -99,7 +113,82 @@ class WarpEventCam:
                 ("reinit", wp.int32), ("pos_prev", wp.vec3), ("quat_prev", wp.quat),
             )
         }
+        self.texture = Texture()
+        self.texture.enabled = int(cfg.texture_enabled)
+        self.texture.scale = wp.from_torch(self.tex_scale)
+        self.texture.sigma = wp.from_torch(self.tex_sigma)
+        self.texture.octaves = int(cfg.texture_octaves)
+        self.texture.norm = float(VALUE_NOISE_STD) * math.sqrt(
+            sum(0.25**k for k in range(cfg.texture_octaves))
+        )
+        self.texture.pixel_angle = 1.0 / (self.fx * k)  # sub-ray spacing at the image centre
+        self.texture.min_footprints = float(cfg.texture_min_footprints)
+
+        self.geometry = Geometry()
+        self.geometry.smooth = 0
+        self.geometry.corner_normals = wp.zeros(1, dtype=wp.vec3, device=device)
+        self.geometry.face_offset = wp.zeros(N, dtype=wp.int32, device=device)
+        self.normals_dirty = torch.ones(N, dtype=torch.int32, **z)
+        self._normals = None
+        if meshes is not None:
+            self.bind_meshes(meshes)
         self.reset_idx(torch.arange(N, device=device))
+
+    def bind_meshes(self, meshes):
+        """Enable smooth normals: build per-vertex face adjacency once (topology never changes).
+
+        Normals themselves are recomputed on the GPU from the current vertex positions after
+        every reset, so obstacles re-placed by aerial_gym are shaded correctly.
+        """
+        if not self.cfg.smooth_normals:
+            return
+        if len(meshes) != self.num_envs:
+            raise ValueError(f"{len(meshes)} meshes for {self.num_envs} envs")
+        face_off, n_faces, vert_off, starts, adj = [], [], [], [], []
+        f_base = v_base = a_base = 0
+        for mesh in meshes:
+            idx = mesh.indices.numpy().reshape(-1, 3)
+            nv = mesh.points.shape[0]
+            corners = idx.reshape(-1)
+            order = np.argsort(corners, kind="stable")
+            counts = np.bincount(corners, minlength=nv)
+            starts.append(a_base + np.concatenate([[0], np.cumsum(counts)[:-1]]))
+            adj.append(order // 3)
+            face_off.append(f_base)
+            n_faces.append(len(idx))
+            vert_off.append(v_base)
+            f_base += len(idx)
+            v_base += nv
+            a_base += len(corners)
+        starts.append(np.array([a_base]))
+        dev = self.device
+        i32 = lambda a: wp.array(np.asarray(a, dtype=np.int32), dtype=wp.int32, device=dev)
+        self._normals = dict(
+            face_offset=i32(face_off), num_faces=i32(n_faces), vert_offset=i32(vert_off),
+            adj_start=i32(np.concatenate(starts)), adj_faces=i32(np.concatenate(adj)),
+            max_faces=max(n_faces),
+        )
+        self.geometry.corner_normals = wp.zeros(3 * f_base, dtype=wp.vec3, device=dev)
+        self.geometry.face_offset = self._normals["face_offset"]
+        self.geometry.smooth = 1
+        self.normals_dirty[:] = 1
+        self._normals_pending = True
+        self._cmd = None
+
+    def _update_normals(self):
+        n = self._normals
+        wp.launch(
+            corner_normals_kernel,
+            dim=(self.num_envs, n["max_faces"]),
+            inputs=[self.mesh_ids_array, wp.from_torch(self.normals_dirty), n["face_offset"],
+                    n["num_faces"], n["vert_offset"], n["adj_start"], n["adj_faces"],
+                    float(math.cos(math.radians(self.cfg.crease_angle_deg))),
+                    self.geometry.corner_normals],
+            device=self.device,
+            stream=wp.stream_from_torch(self.device),
+        )
+        self.normals_dirty.zero_()
+        self._normals_pending = False
 
     # --- aerial_gym WarpSensor interface -------------------------------------------------
 
@@ -139,6 +228,11 @@ class WarpEventCam:
         self.diffuse[env_ids] = uniform(cfg.diffuse_range)
         self.sky[env_ids] = uniform(cfg.sky_intensity_range)
         self.albedo[env_ids] = uniform(cfg.albedo_range, (n, cfg.max_assets_per_env))
+        # feature sizes span decades, so sample them log-uniformly
+        log_s = uniform([math.log(v) for v in cfg.texture_scale_range], (n, cfg.max_assets_per_env))
+        self.tex_scale[env_ids] = torch.exp(log_s)
+        textured = torch.rand((n, cfg.max_assets_per_env), device=self.device) < cfg.texture_probability
+        self.tex_sigma[env_ids] = uniform(cfg.texture_contrast_range, (n, cfg.max_assets_per_env)) * textured
         self.c_on_mean[env_ids] = uniform(cfg.c_on_mean_range)
         self.c_off_mean[env_ids] = uniform(cfg.c_off_mean_range)
         self.ba_rate[env_ids] = uniform(cfg.ba_rate_hz_range)
@@ -146,6 +240,8 @@ class WarpEventCam:
             0, 2**30, (n,), device=self.device, dtype=torch.int32
         )
         self.reinit[env_ids] = 1
+        self.normals_dirty[env_ids] = 1  # aerial_gym moves this env's obstacles on reset
+        self._normals_pending = True
 
     def capture(self, t_now_ns=None):
         """Advance the sensor to t_now_ns and return the last num_frames DIFF3D frames.
@@ -171,6 +267,8 @@ class WarpEventCam:
         alpha0 = (s_first * self.sample_ns - self.t_ns) / dt if n_samples else 0.0
         dalpha = self.sample_ns / dt if n_samples else 0.0
 
+        if self._normals is not None and self._normals_pending:
+            self._update_normals()
         if self._cmd is None:
             self._cmd = self._record_launch()
         self._step += 1
@@ -199,7 +297,8 @@ class WarpEventCam:
             dim=(self.num_envs, self.height, self.width),
             inputs=[
                 self.mesh_ids_array, w["pos_prev"], w["quat_prev"], w["pos_curr"], w["quat_curr"],
-                self.ray_lut, float(cfg.max_range), w["albedo"], w["light"], w["ambient"],
+                self.ray_lut, self.depth_lut, float(cfg.max_range), w["albedo"], self.texture,
+                self.geometry, w["light"], w["ambient"],
                 w["diffuse"], w["sky"], w["c_on_mean"], w["c_off_mean"], w["ba_rate"],
                 w["env_seed"], w["reinit"], float(cfg.c_sigma_pixel), float(cfg.c_sigma_temporal),
                 float(cfg.c_min), float(cfg.c_max), float(cfg.log_eps), 0, 0.0, 0.0, 0,

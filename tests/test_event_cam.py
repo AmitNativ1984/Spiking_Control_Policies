@@ -33,7 +33,7 @@ CLEAN = dict(
 def make_cam(scene, num_envs=1, **overrides):
     wp.init()
     cfg = type("Cfg", (GenX320EventCamConfig,), {**CLEAN, **overrides})
-    cam = WarpEventCam(num_envs, cfg, scene.mesh_ids_array, DEV)
+    cam = WarpEventCam(num_envs, cfg, scene.mesh_ids_array, DEV, meshes=scene.meshes)
     cam.scene = scene  # the camera only holds mesh ids; a collected wp.Mesh frees its BVH
     return cam
 
@@ -385,7 +385,7 @@ def test_aerial_gym_env_produces_event_frames(tmp_path):
          "--seconds", "1", "--num_obstacles", "20", "--out", str(out)],
         cwd=repo, capture_output=True, text=True, timeout=900,
     )
-    assert "newest-frame stats" in r.stdout, r.stdout[-3000:] + r.stderr[-3000:]
+    assert "per-step sum stats" in r.stdout, r.stdout[-3000:] + r.stderr[-3000:]
     assert out.exists()
 
 
@@ -418,3 +418,186 @@ def test_dark_object_moving_over_bright_background_is_off_ahead_on_behind():
     assert set(row[on].tolist()) == {n} and set(row[off].tolist()) == {-n}
     assert int(on.max()) < int(post.min())  # ON trails the post
     assert int(post.min()) <= int(off.min()) and int(off.max()) <= int(post.max())  # OFF inside its new extent, at the front
+
+
+# --- procedural texture ----------------------------------------------------------------------
+
+TEX = dict(texture_enabled=True, texture_scale_range=[0.1, 0.1], texture_contrast_range=[0.3, 0.3],
+           texture_probability=1.0)
+
+
+def _log_albedo_on_wall(z, n=8, **overrides):
+    """ln(I) over a head-on wall at distance z, I = rho exactly; n envs = n independent patterns."""
+    scene = SyntheticScene([[wall_x(z, -50, 50, -50, 50)]] * n, DEV)
+    cam = make_cam(scene, num_envs=n, **{**TEX, **overrides})
+    cam.albedo[:, 0] = 0.05  # low enough that the rho <= 1 clip never binds
+    Pose(cam, n=n)
+    cam.capture(0)
+    return cam, cam.l_ref.clone()
+
+
+def test_texture_contrast_is_the_std_of_log_albedo():
+    _, logi = _log_albedo_on_wall(1.0)  # 1 m: all four octaves resolved
+    assert logi.std().item() == pytest.approx(0.3, rel=0.1)
+    assert logi.mean().item() == pytest.approx(math.log(0.05), abs=0.05)
+
+
+def test_texture_fades_with_distance_instead_of_aliasing():
+    _, near = _log_albedo_on_wall(1.0)
+    _, far = _log_albedo_on_wall(12.0)  # footprint 6.8 cm: octaves < 10 cm gone, 10 cm half-faded
+    assert far.std().item() < 0.5 * near.std().item()
+
+
+def test_textured_flat_wall_fires_inside_its_silhouette():
+    def active_fraction(texture):
+        cfg = TEX if texture else {}
+        cam = make_cam(SyntheticScene([[wall_x(2.0, -50, 50, -50, 50)]], DEV), **cfg)
+        cam.albedo[:, 0] = 0.5
+        pose = Pose(cam)
+        cam.capture(0)
+        pose.set(xyz=[0.0, 0.04, 0.0])  # 4 m/s sideways for 10 ms
+        return (cam.capture(10 * MS)[0, -1] != 0).float().mean().item()
+
+    assert active_fraction(texture=False) == 0.0
+    assert active_fraction(texture=True) > 0.1
+
+
+def test_texture_is_world_anchored():
+    """Static camera: silent. Leave and come back within an episode: same intensities."""
+    cam = make_cam(SyntheticScene([[wall_x(2.0, -50, 50, -50, 50)]], DEV), **TEX)
+    pose = Pose(cam)
+    cam.capture(0)
+    first = cam.l_ref[0].clone()
+    assert all(int(cam.capture(k * 10 * MS).abs().sum()) == 0 for k in range(1, 4))
+    pose.set(xyz=[0.0, 0.5, 0.0])
+    cam.capture(40 * MS)
+    pose.set(xyz=[0.0, 0.0, 0.0])
+    cam.reinit[:] = 1
+    cam.capture(50 * MS)
+    assert torch.allclose(cam.l_ref[0], first)
+
+
+def test_texture_pattern_changes_across_episodes():
+    cam, first = _log_albedo_on_wall(2.0, n=1)
+    cam.reset_idx([0])
+    cam.albedo[:, 0] = 0.05
+    cam.capture(10 * MS)
+    assert not torch.allclose(cam.l_ref, first, atol=1e-3)
+
+
+def test_texture_probability_mixes_textured_and_flat_assets():
+    """Many assets per env, p = 0.5: about half get sigma = 0 (flat), half keep their contrast."""
+    walls = [wall_x(2.0 + 0.01 * i, -50, 50, -50, 50) for i in range(200)]
+    cam = make_cam(SyntheticScene([walls], DEV), **{**TEX, "texture_probability": 0.5})
+    flat = (cam.tex_sigma[0, :200] == 0).float().mean().item()
+    assert 0.35 < flat < 0.65
+    kept = cam.tex_sigma[0, :200][cam.tex_sigma[0, :200] > 0]
+    assert torch.allclose(kept, torch.full_like(kept, 0.3))
+
+    cam.tex_sigma[0, 0] = 0.0  # the visible wall (asset 0) flat: no texture anywhere in the image
+    cam.albedo[:, 0] = 0.5
+    Pose(cam)
+    cam.capture(0)
+    assert torch.allclose(cam.l_ref[0], torch.full_like(cam.l_ref[0], math.log(0.5)))
+
+
+# --- smooth normals and supersampling ----------------------------------------------------------
+
+
+def _sphere_shading_error(smooth):
+    """Mean |ln I - ln I_true| over a tessellated sphere, against exact sphere normals."""
+    from sensors.event_camera.synthetic import _R_OPTICAL_TO_WORLD
+
+    centre = np.array([3.0, 0.0, 0.0])
+    sphere = tm.creation.icosphere(subdivisions=2, radius=1.0)
+    sphere.apply_translation(centre)
+    cam = make_cam(SyntheticScene([[sphere]], DEV), smooth_normals=smooth, write_depth=True,
+                   ambient_range=[0.2, 0.2], diffuse_range=[0.8, 0.8])
+    cam.albedo[:, 0] = 1.0
+    light = np.array([-1.0, 0.4, 0.5]) / np.linalg.norm([-1.0, 0.4, 0.5])
+    cam.light[:] = torch.tensor(light, dtype=torch.float32, device=DEV)
+    Pose(cam)
+    cam.capture(0)
+    d_world = cam.ray_lut_np @ _R_OPTICAL_TO_WORLD.T
+    depth = cam.depth[0].cpu().numpy()
+    hit = depth < cam.cfg.max_range
+    t = depth / cam.ray_lut_np[..., 2]
+    n_true = t[..., None] * d_world - centre
+    n_true /= np.linalg.norm(n_true, axis=-1, keepdims=True)
+    i_true = 0.2 + 0.8 * np.clip(n_true @ light, 0.0, None)
+    err = np.abs(cam.l_ref[0].cpu().numpy() - np.log(i_true))
+    return err[hit].mean()
+
+
+def test_smooth_normals_match_exact_sphere_shading():
+    flat, smooth = _sphere_shading_error(False), _sphere_shading_error(True)
+    assert smooth < 0.3 * flat, (flat, smooth)  # also fails if the barycentric order is wrong
+    assert smooth < 0.02
+
+
+def test_crease_keeps_box_faces_flat():
+    """A box's corners are shared by perpendicular faces; averaging them would curve the face."""
+    box = tm.creation.box(extents=[1.0, 1.0, 1.0])
+    box.apply_translation([3.0, 0.0, 0.0])
+    cam = make_cam(SyntheticScene([[box]], DEV), ambient_range=[0.2, 0.2], diffuse_range=[0.8, 0.8])
+    cam.albedo[:, 0] = 1.0
+    cam.light[:] = torch.tensor([-0.6, 0.48, 0.64], device=DEV)
+    Pose(cam)
+    cam.capture(0)
+    c, half = cam.height // 2, 20  # the front face spans about +-35 px around the centre
+    face = cam.l_ref[0, c - half:c + half, c - half:c + half]
+    assert float(face.max() - face.min()) < 1e-5
+
+
+def test_smooth_normals_follow_geometry_moved_on_reset():
+    """aerial_gym re-places obstacles on reset; the corner normals must be recomputed."""
+    scene = SyntheticScene([[wall_x(2.0, -1, 1, -1, 1)]], DEV)
+    cam = make_cam(scene, ambient_range=[0.0, 0.0], diffuse_range=[1.0, 1.0])
+    cam.albedo[:, 0] = 1.0
+    cam.light[:] = torch.tensor([-1.0, 0.0, 0.0], device=DEV)
+    Pose(cam)
+    cam.capture(0)
+    c = cam.height // 2
+    assert torch.exp(cam.l_ref[0, c, c]).item() == pytest.approx(1.0, rel=1e-4)
+
+    points = scene._buffers[0][0]  # rotate the wall 30 deg about z through its centre
+    a = math.radians(30.0)
+    R = torch.tensor([[math.cos(a), -math.sin(a), 0.0], [math.sin(a), math.cos(a), 0.0],
+                      [0.0, 0.0, 1.0]], device=DEV)
+    pivot = torch.tensor([2.0, 0.0, 0.0], device=DEV)
+    points[:] = (points - pivot) @ R.T + pivot
+    scene.meshes[0].refit()
+    cam.reset_idx([0])
+    cam.albedo[:, 0] = 1.0
+    cam.light[:] = torch.tensor([-1.0, 0.0, 0.0], device=DEV)
+    cam.capture(10 * MS)
+    assert torch.exp(cam.l_ref[0, c, c]).item() == pytest.approx(math.cos(a), rel=1e-3)
+
+
+def test_supersampling_averages_partial_pixel_coverage():
+    """Edge through a pixel centre: 2x2 sub-rays split 2/2, so I is the mean of both sides."""
+    z = 2.0
+    scene = edge_wall(z)
+    cam = make_cam(scene, supersample=2)
+    set_albedo(cam, 0.2, 0.8)
+    pose = Pose(cam)
+    pose.set(xyz=[0.0, 0.5 * z / cam.fx, 0.0])  # shift the edge half a pixel, onto column 160
+    cam.capture(0)
+    row = torch.exp(cam.l_ref[0, cam.height // 2]).cpu()
+    assert row[160].item() == pytest.approx(0.5, rel=1e-4)
+    assert row[159].item() == pytest.approx(0.8, rel=1e-4)
+    assert row[161].item() == pytest.approx(0.2, rel=1e-4)
+
+
+def test_supersampling_conserves_events_per_crossed_pixel():
+    """Partial coverage spreads an edge crossing over several frames, not its total count."""
+    cam, frames = run_sweep(2.0, 4.0, steps=10, supersample=2)
+    total = torch.stack(frames).to(torch.int32).sum(0)[cam.height // 2].cpu()
+    x_end = cam.cx + cam.fx * 4.0 * 0.1 / 2.0  # edge position after 100 ms
+    last = round(x_end)  # pixel the edge sits in: sub-rays at last -+ 0.25
+    assert x_end - (last - 0.25) > 0 and (last + 0.25) - x_end > 0  # exactly half covered
+    full = total[160:last]
+    assert len(full) > 20
+    assert set(full.tolist()) == {math.floor(math.log(0.8 / 0.2) / 0.25)}  # 0.2 -> 0.8: 5
+    assert total[last].item() == math.floor(math.log(0.5 / 0.2) / 0.25)  # 0.2 -> 0.5: 3
+    assert int((total[:160] != 0).sum()) == 0 and int((total[last + 1:] != 0).sum()) == 0
