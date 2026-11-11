@@ -7,7 +7,7 @@ import torch
 from event_snn.config import VARIANTS, load_config
 from event_snn.data import (AttitudeNoise, EventMaskTracker, body_to_optical, camera_velocity,
                             events_to_input, inv_ttc_target, inverse_depth_target, regime_labels, rotate)
-from event_snn.loss import depth_velocity_loss, scale_invariant, ttc_loss, valid_mask
+from event_snn.loss import depth_velocity_loss, episode_age, scale_invariant, ttc_loss, valid_mask
 from event_snn.model import EventSNN, Monitor, count_parameters, surrogate_half_width
 
 DEV = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -191,13 +191,25 @@ def test_monitor_records_grad_and_near_threshold():
 
 # --- loss -----------------------------------------------------------------------------
 
-def test_valid_mask_burn_in_and_episode_reset():
+def test_valid_mask_burn_in_only_after_resets():
     done = torch.zeros((30, 2), dtype=torch.bool)
     done[22, 1] = True
-    v = valid_mask(done, 5)
-    assert not v[:5].any() and v[5:, 0].all()
-    assert v[5:22, 1].all() and not v[22:28, 1].any() and v[28:, 1].all()
+    cold = valid_mask(done, 5)                                   # cold state: first 5 steps burned in
+    assert not cold[:5].any() and cold[5:, 0].all()
+    assert cold[5:22, 1].all() and not cold[22:28, 1].any() and cold[28:, 1].all()
+    warm = valid_mask(done, 5, torch.tensor([100, 3]))           # carried state: no window burn-in
+    assert warm[:, 0].all()
+    assert not warm[:2, 1].any() and warm[2:22, 1].all()         # env 1 was 3 steps into its episode
+    assert not warm[22:28, 1].any() and warm[28:, 1].all()
     assert valid_mask(done, 0).all()
+
+
+def test_episode_age_carries_across_windows():
+    done = torch.zeros((10, 2), dtype=torch.bool)
+    done[4, 1] = True
+    a1 = episode_age(done)[-1]
+    assert a1.tolist() == [10, 5]
+    assert episode_age(torch.zeros((3, 2), dtype=torch.bool), a1)[-1].tolist() == [13, 8]
 
 
 def test_scale_invariant_ignores_global_offset():

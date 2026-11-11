@@ -4,19 +4,26 @@ import torch
 from .data import log_rho
 
 
-def valid_mask(done, burn_in_steps):
-    """(T, B) bool: steps that count. Excludes the first burn_in_steps of the window and of
-    every episode that starts inside it (the state was just reset)."""
+def episode_age(done, age0=None):
+    """(T, B) long: steps since the network state was last reset, at each step of the window.
+    age0 (B,) is the age at the end of the previous window (None: the state is cold, age 0).
+    A done step resets the age to 0."""
     T, B = done.shape
-    if burn_in_steps <= 0:
-        return torch.ones_like(done)
+    a = torch.zeros(B, dtype=torch.long, device=done.device) if age0 is None else age0.to(done.device)
     age = torch.empty((T, B), dtype=torch.long, device=done.device)
-    a = torch.full((B,), burn_in_steps, dtype=torch.long, device=done.device)  # carried state is warm
     for t in range(T):
         a = torch.where(done[t], torch.zeros_like(a), a + 1)
         age[t] = a
-    t_idx = torch.arange(T, device=done.device)[:, None]
-    return (t_idx >= burn_in_steps) & (age > burn_in_steps)
+    return age
+
+
+def valid_mask(done, burn_in_steps, age0=None):
+    """(T, B) bool: steps that count. Burn-in applies only after a state reset (an episode start,
+    or a cold state when age0 is None); state carried from the previous window is already warm,
+    so a window boundary alone excludes nothing."""
+    if burn_in_steps <= 0:
+        return torch.ones_like(done)
+    return episode_age(done, age0) > burn_in_steps
 
 
 def scale_invariant(d, m=None):
@@ -35,11 +42,11 @@ def ttc_loss(pred, ttc, eps, ttc_max):
 
 
 def depth_velocity_loss(pred_depth, pred_vel, rates, batch, cfg_loss, eps, burn_in_steps,
-                        pred_ttc=None, ttc_eps=0.05, ttc_max=10.0):
+                        pred_ttc=None, ttc_eps=0.05, ttc_max=10.0, age0=None):
     """pred_depth (T, B, 32, 32) = log(rho_hat + eps); pred_vel (T, B, 3); batch holds
     rho, vel, done (and ttc when lambda_ttc > 0) with the same leading (T, B). Every cell of the
     current image counts equally in the depth term."""
-    valid = valid_mask(batch["done"], burn_in_steps).to(pred_depth.dtype)
+    valid = valid_mask(batch["done"], burn_in_steps, age0).to(pred_depth.dtype)
     nv = valid.sum().clamp(min=1.0)
 
     d = pred_depth - log_rho(batch["rho"].to(pred_depth.dtype), eps)

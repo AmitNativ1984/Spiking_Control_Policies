@@ -23,7 +23,7 @@ import yaml
 from torch.utils.tensorboard import SummaryWriter
 
 from .config import heldout_path, load_config, steps, to_dict
-from .loss import depth_velocity_loss, ttc_loss, valid_mask
+from .loss import depth_velocity_loss, episode_age, ttc_loss, valid_mask
 from .model import EventSNN, Monitor, count_parameters, surrogate_half_width
 from .data import log_rho, select_target, state_input
 from .sim import Rollout, measure_bounds, write_heldout
@@ -157,6 +157,7 @@ def train(cfg):
     burn = steps(cfg.loss.burn_in_s)
     half_width = surrogate_half_width(cfg.model.surrogate_alpha)
     state = model.init_state(N)
+    age = torch.zeros(N, dtype=torch.long, device=dev)   # steps since each drone's state was reset (cold: 0)
     best_val = math.inf
 
     for it in range(1, tc.iterations + 1):
@@ -175,6 +176,7 @@ def train(cfg):
                 ids = perm[i:i + mb]
                 b = {k: v[:, ids] for k, v in chunk.items()}
                 st = {k: v[ids] for k, v in s0.items()}
+                age0 = age[ids]
                 record = None
                 if p == 0 and i == 0 and it % tc.monitor_every == 0:
                     mon = record = Monitor(half_width)
@@ -182,7 +184,7 @@ def train(cfg):
                 d, v, st_end, rates = model.unroll(b["events"], state_input(b), b["done"], st,
                                                    grad_decay=tc.bptt_grad_decay, record=record, extras=ex)
                 loss, logs = depth_velocity_loss(d, v, rates, b, cfg.loss, cfg.data.inv_depth_eps, burn,
-                                                 ex.get("ttc"), cfg.data.ttc_eps, cfg.data.ttc_max)
+                                                 ex.get("ttc"), cfg.data.ttc_eps, cfg.data.ttc_max, age0)
                 if not torch.isfinite(loss):
                     print(f"it {it}: non-finite loss, batch skipped", flush=True)
                     continue
@@ -200,6 +202,7 @@ def train(cfg):
                     agg[k] = agg.get(k, 0.0) + x
                 n_mb += 1
         state = new_state
+        age = episode_age(chunk["done"], age)[-1]
         sched.step()
         t_train = time.time() - t0 - t_collect
 
