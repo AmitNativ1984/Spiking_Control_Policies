@@ -6,6 +6,8 @@ Conventions shared by rollout, training and evaluation, one 10 ms step at a time
   grav      (N, 3)         float   gravity direction in body frame from the noisy estimator
   rho       (N, 32, 32)    float   inverse depth 1/Z, 0 for sky / beyond the far plane
   vel       (N, 3)         float   body-frame linear velocity
+  ttc       (N, 32, 32)    float   inverse time-to-contact [1/s] along each cell's rays, 0 = not closing
+  near      (N, 32, 32)    float   speed / range [1/s], same clip; 0 only at rest or for sky
   m_now     (N, 32, 32)    bool    >= 1 event in the cell this step
   m_recent  (N, 32, 32)    bool    events in the cell within recent_s, not this step
   done      (N,)           bool    this step is the first of a new episode: reset state first
@@ -37,6 +39,58 @@ def inverse_depth_target(depth, grid=32, far_m=20.0, min_m=0.1, pool="mean"):
     rho = rho.unsqueeze(1)
     rho = F.avg_pool2d(rho, k) if pool == "mean" else F.max_pool2d(rho, k)
     return rho.squeeze(1)
+
+
+def body_to_optical(v):
+    """Body (x forward, y left, z up) -> camera optical (x right, y down, z forward), forward mount."""
+    return torch.stack([-v[..., 1], -v[..., 2], v[..., 0]], dim=-1)
+
+
+def camera_velocity(v_body, w_body, mount_xyz):
+    """Velocity of the camera centre in the optical frame: v + w x r_mount (static scene, so this
+    is also the velocity relative to every surface)."""
+    r = torch.as_tensor(mount_xyz, dtype=v_body.dtype, device=v_body.device).expand_as(v_body)
+    return body_to_optical(v_body + torch.cross(w_body, r, dim=-1))
+
+
+def inv_ttc_target(depth, rays, v_cam, grid=32, far_m=20.0, drone_radius_m=0.3, ttc_max=10.0,
+                   min_gap_m=0.05, pool="max", mode="radial"):
+    """Inverse time-to-contact per ray, clip(max(0, v.d) / max(r - r_drone, min_gap), 0, ttc_max).
+
+    mode="speed" replaces the closing speed v.d by the speed |v|: speed / range, the scale-free
+    nearness that translational image motion measures in every direction (sideways included).
+
+    depth (N, H, W) metric z-depth; rays (H, W, 3) unit rays in the optical frame; v_cam (N, 3)
+    camera velocity in the optical frame. Range r = z / d_z. Misses (>= far_m) -> 0. Pooled to
+    (N, grid, grid): max keeps the most imminent surface of each cell, mean averages it away.
+    """
+    d = depth.to(torch.float32)
+    rays = rays.to(d)
+    r = d / rays[..., 2].clamp(min=1e-6)
+    if mode == "speed":
+        closing = v_cam.to(d).norm(dim=-1)[:, None, None].expand_as(r)
+    else:
+        closing = torch.einsum("nc,hwc->nhw", v_cam.to(d), rays).clamp(min=0.0)
+    ttc = (closing / (r - drone_radius_m).clamp(min=min_gap_m)).clamp(max=ttc_max)
+    ttc = torch.where(d >= far_m * 0.999, torch.zeros_like(ttc), ttc)
+    k = d.shape[-1] // grid
+    if d.shape[-1] != k * grid or d.shape[-2] != k * grid:
+        raise ValueError(f"depth {tuple(d.shape[-2:])} is not a multiple of grid {grid}")
+    ttc = ttc.unsqueeze(1)
+    ttc = F.max_pool2d(ttc, k) if pool == "max" else F.avg_pool2d(ttc, k)
+    return ttc.squeeze(1)
+
+
+def select_target(chunk, name):
+    """The map the ttc head is trained on: 'ttc' (radial) or 'near' (speed / range). Returns the
+    chunk with that map under "ttc", so loss and evaluation need not know which one it is."""
+    if name == "ttc":
+        return chunk
+    if name not in chunk:
+        raise SystemExit(f"data has no {name!r} map: rerun `python -m event_snn.sim --heldout`")
+    out = dict(chunk)
+    out["ttc"] = chunk[name]
+    return out
 
 
 def log_rho(rho, eps):

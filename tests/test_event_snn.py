@@ -5,9 +5,9 @@ import pytest
 import torch
 
 from event_snn.config import VARIANTS, load_config
-from event_snn.data import (AttitudeNoise, EventMaskTracker, events_to_input, inverse_depth_target,
-                            regime_labels, rotate)
-from event_snn.loss import depth_velocity_loss, scale_invariant, valid_mask
+from event_snn.data import (AttitudeNoise, EventMaskTracker, body_to_optical, camera_velocity,
+                            events_to_input, inv_ttc_target, inverse_depth_target, regime_labels, rotate)
+from event_snn.loss import depth_velocity_loss, scale_invariant, ttc_loss, valid_mask
 from event_snn.model import EventSNN, Monitor, count_parameters, surrogate_half_width
 
 DEV = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -116,7 +116,8 @@ def test_shapes_and_param_count(variant):
     ev, st, done = random_batch(5, 3)
     d, v, s, rates = m.unroll(ev, st, done, m.init_state(3))
     assert d.shape == (5, 3, 32, 32) and v.shape == (5, 3, 3)
-    assert set(rates) == {"c1", "c2", "c3", "mem", "d1"}
+    assert set(rates) == set(m.spiking_layers)
+    assert ("bn" in rates) == (variant[:3] in ("bn_", "mb_"))
     if variant == "a_rec":
         assert 100_000 < count_parameters(m) < 140_000
 
@@ -302,3 +303,170 @@ def test_recurrent_gain_is_capped():
     (d[-1].sum() + v_[-1].sum()).backward()
     g = mon.grad["mem"]
     assert g[0] < g[40]
+
+
+# --- inverse time-to-contact target, bottleneck interface ---------------------------------
+
+def _rays(n=64, fov=104.0):
+    from sensors.event_camera.lens import intrinsics_from_fov, ray_lut
+    return torch.as_tensor(ray_lut(n, n, *intrinsics_from_fov(n, n, fov, "diagonal")))
+
+
+def test_inv_ttc_wall_approach_hover_recede_miss():
+    rays, Z, v, r0 = _rays(), 4.0, 2.0, 0.3
+    depth = torch.full((4, 64, 64), Z)
+    depth[3] = 20.0                                             # env 3 looks at the sky
+    v_cam = torch.tensor([[0.0, 0.0, v], [0.0, 0.0, 0.0], [0.0, 0.0, -v], [0.0, 0.0, v]])
+    t = inv_ttc_target(depth, rays, v_cam, grid=64, drone_radius_m=r0)
+    assert t.shape == (4, 64, 64)
+    assert float(t[0, 32, 32]) == pytest.approx(v / (Z - r0), rel=0.02)   # gate G1 of the plan
+    assert float(t[1].abs().max()) == 0.0 and float(t[2].abs().max()) == 0.0 and float(t[3].abs().max()) == 0.0
+    # a flat wall is hit first on the optical axis: the centre is the most imminent cell
+    assert float(t[0].max()) == pytest.approx(float(t[0, 31:33, 31:33].max()))
+    # clip, and max-pooling keeps the most imminent pixel of a cell
+    assert float(inv_ttc_target(torch.full((1, 64, 64), 0.31), rays, v_cam[:1], grid=32).max()) == 10.0
+    d2 = depth[:1].clone()
+    d2[0, 0, 0] = 1.0
+    pooled = inv_ttc_target(d2, rays, v_cam[:1], grid=32, pool="max")
+    full = inv_ttc_target(d2, rays, v_cam[:1], grid=64)
+    assert float(pooled[0, 0, 0]) == pytest.approx(float(full[0, 0, 0]))
+
+
+def test_camera_velocity_frames():
+    fwd = torch.tensor([[1.0, 0.0, 0.0]])
+    assert body_to_optical(fwd).tolist() == [[0.0, 0.0, 1.0]]
+    assert body_to_optical(torch.tensor([[0.0, 1.0, 0.0]])).tolist() == [[-1.0, 0.0, 0.0]]   # left = -x
+    assert body_to_optical(torch.tensor([[0.0, 0.0, 1.0]])).tolist() == [[0.0, -1.0, 0.0]]   # up = -y
+    # pure yaw: the camera 10 cm ahead of the centre of mass swings sideways, it does not close in
+    v = camera_velocity(torch.zeros(1, 3), torch.tensor([[0.0, 0.0, 1.0]]), [0.10, 0.0, -0.03])
+    assert v[0].tolist() == pytest.approx([-0.10, 0.0, 0.0], abs=1e-6)
+    t = inv_ttc_target(torch.full((1, 64, 64), 4.0), _rays(), v, grid=32)
+    assert float(t.max()) < 0.03                                # gate G1: near zero under pure yaw
+
+
+def test_ttc_loss_zero_when_exact_and_weights_danger():
+    ttc = torch.zeros((2, 1, 32, 32))
+    ttc[..., :16, :] = 5.0
+    exact = torch.log(ttc + 0.05)
+    assert float(ttc_loss(exact, ttc, 0.05, 10.0).abs().max()) < 1e-6
+    off_danger, off_safe = exact.clone(), exact.clone()
+    off_danger[..., :16, :] += 1.0
+    off_safe[..., 16:, :] += 1.0
+    assert float(ttc_loss(off_danger, ttc, 0.05, 10.0).mean()) > float(ttc_loss(off_safe, ttc, 0.05, 10.0).mean())
+
+
+@pytest.mark.parametrize("variant", ["bn_depth", "bn_ttc", "bn_both"])
+def test_bottleneck_is_the_only_path_to_the_heads(variant):
+    cfg, m = make_model(variant)
+    assert m.interface == "bn" and m.n_bottleneck == 128
+    T, B = 12, 2
+    ev, st, done = random_batch(T, B, p_event=0.1)
+    ex = {}
+    d, v, s, rates = m.unroll(ev, st, done, m.init_state(B), extras=ex)
+    assert s["bn"].shape == (B, 128)
+    assert ("ttc" in ex) == m.ttc_head
+    if m.ttc_head:
+        assert ex["ttc"].shape == (T, B, 32, 32)
+    batch = dict(rho=torch.rand((T, B, 32, 32), device=DEV), ttc=torch.rand((T, B, 32, 32), device=DEV) * 3,
+                 vel=torch.zeros((T, B, 3), device=DEV), done=done)
+    loss, logs = depth_velocity_loss(d, v, rates, batch, cfg.loss, cfg.data.inv_depth_eps, 2,
+                                     ex.get("ttc"), cfg.data.ttc_eps, cfg.data.ttc_max)
+    assert (float(logs["ttc"]) > 0) == m.ttc_head
+    loss.backward()
+    assert m.conv1.weight.grad.abs().sum() > 0 and m.bn_fc.weight.grad.abs().sum() > 0
+    # silence the bottleneck: nothing downstream may still depend on the events
+    with torch.no_grad():
+        m.bn_fc.weight.zero_()
+        m.bn_fc.bias.fill_(-1.0)
+        a = m.unroll(ev, st, done, m.init_state(B))
+        b = m.unroll(torch.zeros_like(ev), st, done, m.init_state(B))
+    assert torch.equal(a[0], b[0]) and torch.equal(a[1], b[1])
+
+
+def test_tiny_overfit_ttc_through_bottleneck():
+    cfg, m = make_model("bn_ttc")
+    T, B = 40, 2
+    ev, st, done = random_batch(T, B, p_event=0.1)
+    g = torch.Generator(device="cpu").manual_seed(1)
+    # one fixed map per sequence: 128 spikes per step cannot carry fresh per-cell noise every step
+    ttc = (torch.rand((1, B, 32, 32), generator=g) * 2.0).expand(T, B, 32, 32).contiguous().to(DEV)
+    batch = dict(rho=torch.zeros_like(ttc), ttc=ttc, vel=torch.zeros((T, B, 3), device=DEV), done=done)
+    opt = torch.optim.Adam(m.parameters(), lr=3e-3)
+    first = None
+    for it in range(150):
+        ex = {}
+        d, v, _, rates = m.unroll(ev, st, done, m.init_state(B), extras=ex)
+        loss, logs = depth_velocity_loss(d, v, rates, batch, cfg.loss, cfg.data.inv_depth_eps, 5,
+                                         ex["ttc"], cfg.data.ttc_eps, cfg.data.ttc_max)
+        opt.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(m.parameters(), 1.0)
+        opt.step()
+        first = first if first is not None else float(logs["ttc"])
+    assert float(logs["ttc"]) < 0.6 * first
+
+
+# --- bottleneck-as-memory architecture, speed / range target ------------------------------
+
+def test_speed_over_range_sees_a_wall_the_drone_flies_along():
+    rays = _rays()
+    depth = torch.full((1, 64, 64), 4.0)
+    sideways = torch.tensor([[2.0, 0.0, 0.0]])                  # optical x: moving right, wall ahead
+    radial = inv_ttc_target(depth, rays, sideways, grid=64)
+    near = inv_ttc_target(depth, rays, sideways, grid=64, mode="speed")
+    assert float(radial[0, 32, 32]) < 0.02                      # not closing on the wall ahead
+    assert float(near[0, 32, 32]) == pytest.approx(2.0 / (4.0 - 0.3), rel=0.02)
+    assert float(inv_ttc_target(depth, rays, torch.zeros(1, 3), grid=64, mode="speed").max()) == 0.0
+
+
+@pytest.mark.parametrize("variant", ["mb_ttc_snn", "mb_ttc_ann", "mb_near_snn", "mb_near_ann"])
+def test_memory_bottleneck_architecture(variant):
+    cfg, m = make_model(variant)
+    assert m.interface == "bn" and not m.vel_head and not hasattr(m, "vel_fc")
+    assert m.memory.ff.in_features == 64 * 64 + 90 and m.memory.ff.out_features == 128
+    assert ("d1" in m.spiking_layers) == variant.endswith("snn") and "mem" not in m.spiking_layers
+    assert cfg.data.target_map == ("near" if "near" in variant else "ttc") and cfg.loss.lambda_v == 0.0
+    T, B = 12, 2
+    ev, st, done = random_batch(T, B, p_event=0.1)
+    ex = {}
+    d, v, s, rates = m.unroll(ev, st, done, m.init_state(B), extras=ex)
+    assert ex["ttc"].shape == (T, B, 32, 32) and s["mem_s"].shape == (B, 128)
+    assert float(v.abs().max()) == 0.0
+    batch = dict(rho=torch.zeros((T, B, 32, 32), device=DEV), ttc=torch.rand((T, B, 32, 32), device=DEV) * 3,
+                 vel=torch.zeros((T, B, 3), device=DEV), done=done)
+    loss, logs = depth_velocity_loss(d, v, rates, batch, cfg.loss, cfg.data.inv_depth_eps, 2,
+                                     ex["ttc"], cfg.data.ttc_eps, cfg.data.ttc_max)
+    assert float(logs["ttc"]) > 0 and float(logs["vel"]) == 0.0
+    loss.backward()
+    g = m.memory.ff.weight.grad
+    assert m.conv1.weight.grad.abs().sum() > 0 and m.memory.rec.weight.grad.abs().sum() > 0
+    assert g[:, :4096].abs().sum() > 0 and g[:, 4096:].abs().sum() > 0     # conv-3 and inertial columns
+    # state carries: a warm start changes the output; the inertial input changes it too
+    with torch.no_grad():
+        a = m.unroll(ev[:1], st[:1], done[:1], s, extras=(ea := {}))
+        b = m.unroll(ev[:1], st[:1], done[:1], m.init_state(B), extras=(eb := {}))
+        c = m.unroll(ev, st * 0.0, done, m.init_state(B), extras=(ec := {}))
+    assert not torch.equal(ea["ttc"], eb["ttc"])
+    assert not torch.equal(ec["ttc"], ex["ttc"])
+
+
+def test_tiny_overfit_memory_bottleneck_ann_decoder():
+    cfg, m = make_model("mb_near_ann")
+    T, B = 40, 2
+    ev, st, done = random_batch(T, B, p_event=0.1)
+    g = torch.Generator(device="cpu").manual_seed(1)
+    ttc = (torch.rand((1, B, 32, 32), generator=g) * 2.0).expand(T, B, 32, 32).contiguous().to(DEV)
+    batch = dict(rho=torch.zeros_like(ttc), ttc=ttc, vel=torch.zeros((T, B, 3), device=DEV), done=done)
+    opt = torch.optim.Adam(m.parameters(), lr=3e-3)
+    first = None
+    for it in range(150):
+        ex = {}
+        d, v, _, rates = m.unroll(ev, st, done, m.init_state(B), extras=ex)
+        loss, logs = depth_velocity_loss(d, v, rates, batch, cfg.loss, cfg.data.inv_depth_eps, 5,
+                                         ex["ttc"], cfg.data.ttc_eps, cfg.data.ttc_max)
+        opt.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(m.parameters(), 1.0)
+        opt.step()
+        first = first if first is not None else float(logs["ttc"])
+    assert float(logs["ttc"]) < 0.6 * first

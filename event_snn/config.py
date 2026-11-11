@@ -7,6 +7,8 @@ import yaml
 
 DEFAULT_PATH = os.path.join(os.path.dirname(__file__), "cfg", "default.yaml")
 
+_A_REC = {"recurrent": True, "stateful": True, "state_inputs": ["acc", "gyro", "grav"]}
+
 VARIANTS = {
     "a_rec": {"model": {"recurrent": True, "stateful": True, "state_inputs": ["acc", "gyro", "grav"]}},
     "a_ff": {"model": {"recurrent": False, "stateful": True, "state_inputs": ["acc", "gyro", "grav"]}},
@@ -14,6 +16,20 @@ VARIANTS = {
           "loss": {"burn_in_s": 0.0}},
     "a_rec_noimu": {"model": {"recurrent": True, "stateful": True, "state_inputs": ["grav"]}},
     "a_rec_rawimu": {"model": {"recurrent": True, "stateful": True, "state_inputs": ["acc", "gyro"]}},
+    # Representation study: a_rec with a 128-neuron spiking bottleneck as the policy interface;
+    # the three differ only in what the training-only heads must decode from those spikes.
+    "bn_depth": {"model": {**_A_REC, "bottleneck": 128}},
+    "bn_ttc": {"model": {**_A_REC, "bottleneck": 128, "ttc_head": True},
+               "loss": {"lambda_d": 0.0, "lambda_ttc": 1.0}},
+    "bn_both": {"model": {**_A_REC, "bottleneck": 128, "ttc_head": True},
+                "loss": {"lambda_d": 1.0, "lambda_ttc": 1.0}},
+    # Scale-free study: conv3 -> flatten -> concat inertial spikes -> 128 recurrent adaptive-LIF
+    # neurons (memory and policy interface in one) -> decoder. Loss on one map only.
+    **{f"mb_{t}_{d}": {"model": {**_A_REC, "bottleneck": 128, "ttc_head": True, "memory": "bottleneck",
+                                 "vel_head": False, "decoder": {"snn": "spiking", "ann": "ann"}[d]},
+                       "loss": {"lambda_d": 0.0, "lambda_ttc": 1.0, "lambda_v": 0.0, "lambda_s": 0.1},
+                       "data": {"target_map": t}}
+       for t in ("ttc", "near") for d in ("snn", "ann")},
 }
 
 

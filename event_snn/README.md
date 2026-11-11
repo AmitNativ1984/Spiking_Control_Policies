@@ -14,6 +14,49 @@ inverse depth (32×32) and body velocity by supervised BPTT.
 | `visualize.py` | Held-out flight video: events, target vs predicted 1/Z, error, cell weights, velocity |
 | `evaluate.py` | Held-out metrics, blackout, attitude sweep, regimes, linear probes, plots, `--compare` |
 
+## Scale-free encoder (current design)
+
+`mb_*` variants: conv 1-3 -> 128 recurrent adaptive-LIF neurons (conv-3 spikes and the 90 inertial
+spikes both feed them directly) -> training-only decoder. The 128 spikes are the memory and the
+policy interface. No depth and no velocity output; the loss is one 32x32 map plus the rate penalty.
+
+| Variant | Map | Decoder |
+|---|---|---|
+| `mb_ttc_snn` / `mb_ttc_ann` | inverse time-to-contact: closing speed / range | spiking / ReLU convs on a leaky spike trace |
+| `mb_near_snn` / `mb_near_ann` | speed / range (non-zero sideways too) | spiking / ReLU convs on a leaky spike trace |
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest tests/test_event_snn.py
+python -m event_snn.sim --heldout                              # once; holds both maps
+python -m event_snn.train --variant mb_ttc_ann --set train.wandb=true
+python -m event_snn.evaluate runs/event_snn/<run>/best.pt
+python -m event_snn.grad_diag runs/event_snn/<run>/last.pt     # per-parameter gradient norms
+```
+
+Validation prints the map loss next to `constant map`, the loss of one value everywhere: a run
+that stays near it has learned the average level and nothing spatial. `evaluate` still scores
+blackout, attitude sweep and regimes on the depth output, which `mb_*` does not train.
+
+## Representation study with the 8x8 grid memory (superseded)
+
+`bn_*` variants put a 128-neuron spiking bottleneck between the memory and the heads. Those spikes
+are what a spiking policy will read; the heads are training-only and see nothing else.
+
+| Variant | Heads must decode |
+|---|---|
+| `bn_depth` | inverse depth + body velocity |
+| `bn_ttc` | inverse time-to-contact (invTTC) + body velocity |
+| `bn_both` | all three |
+
+`evaluate` scores each on the same held-out flights: invTTC error in the danger region (direct head,
+and rebuilt from depth × velocity), and `act recov`, the share of the teacher's depth-latent
+contribution to its action that a linear readout recovers from the bottleneck spikes.
+
+```bash
+MODE=check   sbatch slurm/event_snn.sbatch                    # teacher flight, invTTC frame check, throughput
+MODE=train VARIANT=bn_both SEED=0 sbatch slurm/event_snn.sbatch
+```
+
 ```bash
 python -m event_snn.sim --check_teacher --seconds 30          # does the teacher fly at 100 Hz?
 python -m event_snn.sim --heldout                             # fixed evaluation flights (once)

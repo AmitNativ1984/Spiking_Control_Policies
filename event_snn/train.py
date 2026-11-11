@@ -23,13 +23,13 @@ import yaml
 from torch.utils.tensorboard import SummaryWriter
 
 from .config import heldout_path, load_config, steps, to_dict
-from .loss import depth_velocity_loss
-from .model import SPIKING_LAYERS, EventSNN, Monitor, count_parameters, surrogate_half_width
-from .data import log_rho, state_input
+from .loss import depth_velocity_loss, ttc_loss, valid_mask
+from .model import EventSNN, Monitor, count_parameters, surrogate_half_width
+from .data import log_rho, select_target, state_input
 from .sim import Rollout, measure_bounds, write_heldout
 from .visualize import _cmap, events_panel, label
 
-TRAIN_KEYS = ("events", "imu", "grav", "rho", "vel", "done")
+TRAIN_KEYS = ("events", "imu", "grav", "rho", "ttc", "near", "vel", "done")
 
 
 def to_device(chunk, dev, t=slice(None), e=slice(None)):
@@ -43,28 +43,50 @@ def validate(model, heldout, cfg):
     E, T = min(cfg.train.val_envs, heldout["done"].shape[1]), steps(cfg.train.val_seconds)
     b = to_device(heldout, dev, slice(0, T), slice(0, E))
     b["rho"] = b["rho"].float()
-    d, v, _, rates = model.unroll(b["events"], state_input(b), b["done"], model.init_state(E))
-    _, logs = depth_velocity_loss(d, v, rates, b, cfg.loss, cfg.data.inv_depth_eps, steps(cfg.loss.burn_in_s))
+    if "ttc" in b:
+        b["ttc"] = b["ttc"].float()
+    ex = {}
+    d, v, _, rates = model.unroll(b["events"], state_input(b), b["done"], model.init_state(E), extras=ex)
+    _, logs = depth_velocity_loss(d, v, rates, b, cfg.loss, cfg.data.inv_depth_eps, steps(cfg.loss.burn_in_s),
+                                  ex.get("ttc"), cfg.data.ttc_eps, cfg.data.ttc_max)
     logs.update({f"rate/{k}": r for k, r in rates.items()})
-    return {k: float(x) for k, x in logs.items()}, (b, d)
+    if "ttc" in ex:
+        # reference: the same loss for one constant value everywhere (the median log target).
+        # A model near this number has learned the average level and nothing spatial.
+        valid = valid_mask(b["done"], steps(cfg.loss.burn_in_s)).to(ex["ttc"].dtype)
+        const = torch.log(b["ttc"] + cfg.data.ttc_eps)[valid.bool()].median()
+        ref = ttc_loss(torch.full_like(ex["ttc"], float(const)), b["ttc"], cfg.data.ttc_eps, cfg.data.ttc_max)
+        logs["ttc_const"] = (ref * valid).sum() / valid.sum().clamp(min=1.0)
+    return {k: float(x) for k, x in logs.items()}, (b, d, ex.get("ttc"))
 
 
-def depth_image(b, d, eps, n_envs=4, rho_max=1.0):
+def depth_image(b, d, eps, n_envs=4, rho_max=1.0, ttc=None, ttc_eps=0.05, ttc_show=3.0, depth=True,
+                ttc_name="invTTC"):
     """(H, W, 3) uint8 RGB: one row per held-out env at the last validation step:
-    events | target 1/Z | predicted 1/Z | |log error| (0-2)."""
+    events | target 1/Z | predicted 1/Z | |log error| (0-2) | target invTTC | predicted invTTC (0-3 /s).
+    The depth panels are dropped when depth is not trained, the invTTC panels when there is no head."""
     t = d.shape[0] - 1
     rho = b["rho"][t].cpu()
     pred = d[t].float().cpu()
     rho_hat = (pred.exp() - eps).clamp(min=0.0)
     err = (pred - log_rho(rho, eps)).abs()
+    if ttc is not None:
+        ttc_true = b["ttc"][t].float().cpu()
+        ttc_hat = (ttc[t].float().cpu().exp() - ttc_eps).clamp(min=0.0)
     rows = []
     for e in range(min(n_envs, d.shape[1])):
-        panels = [events_panel(b["events"][t, e].cpu().numpy()),
-                  _cmap(rho[e].numpy(), rho_max, cv2.COLORMAP_VIRIDIS),
-                  _cmap(rho_hat[e].numpy(), rho_max, cv2.COLORMAP_VIRIDIS),
-                  _cmap(err[e].numpy(), 2.0, cv2.COLORMAP_INFERNO)]
+        panels, names = [events_panel(b["events"][t, e].cpu().numpy())], ["events"]
+        if depth:
+            panels += [_cmap(rho[e].numpy(), rho_max, cv2.COLORMAP_VIRIDIS),
+                       _cmap(rho_hat[e].numpy(), rho_max, cv2.COLORMAP_VIRIDIS),
+                       _cmap(err[e].numpy(), 2.0, cv2.COLORMAP_INFERNO)]
+            names += ["target 1/Z", "predicted 1/Z", "|log err| (0-2)"]
+        if ttc is not None:
+            panels += [_cmap(ttc_true[e].numpy(), ttc_show, cv2.COLORMAP_MAGMA),
+                       _cmap(ttc_hat[e].numpy(), ttc_show, cv2.COLORMAP_MAGMA)]
+            names += [f"target {ttc_name}", f"predicted {ttc_name}"]
         if e == 0:
-            for img, text in zip(panels, ("events", "target 1/Z", "predicted 1/Z", "|log err| (0-2)")):
+            for img, text in zip(panels, names):
                 label(img, text)
         rows.append(np.concatenate(panels, axis=1))
     return cv2.cvtColor(np.concatenate(rows, axis=0), cv2.COLOR_BGR2RGB)
@@ -107,10 +129,14 @@ def train(cfg):
             raise SystemExit(f"held-out set needs {cfg.data.heldout_envs} envs; run "
                              "`python -m event_snn.sim --heldout` first")
         write_heldout(cfg, rollout)
-    heldout = torch.load(hp)
+    heldout = select_target(torch.load(hp), cfg.data.target_map)
     print(f"held-out set {hp}: {tuple(heldout['done'].shape)} (steps, envs)")
 
     lo, hi = measure_bounds(rollout, cfg.data.bounds_steps, cfg.data.bounds_percentiles)
+    if cfg.loss.lambda_ttc > 0 and not cfg.model.ttc_head:
+        raise SystemExit("loss.lambda_ttc > 0 needs model.ttc_head=true")
+    if cfg.loss.lambda_ttc > 0 and "ttc" not in heldout:
+        raise SystemExit(f"{hp} predates the invTTC target; delete it or rerun `python -m event_snn.sim --heldout`")
     model = EventSNN(cfg.model).to(dev)
     model.set_input_bounds(lo, hi)
     print(f"{cfg.variant}: {count_parameters(model)} parameters; state bounds lo {lo.tolist()} hi {hi.tolist()}")
@@ -136,7 +162,7 @@ def train(cfg):
     for it in range(1, tc.iterations + 1):
         T = curriculum.T
         t0 = time.time()
-        chunk = rollout.collect(T, keys=TRAIN_KEYS)
+        chunk = select_target(rollout.collect(T, keys=TRAIN_KEYS), cfg.data.target_map)
         t_collect = time.time() - t0
 
         s0 = model.detach_state(state)
@@ -152,9 +178,14 @@ def train(cfg):
                 record = None
                 if p == 0 and i == 0 and it % tc.monitor_every == 0:
                     mon = record = Monitor(half_width)
+                ex = {}
                 d, v, st_end, rates = model.unroll(b["events"], state_input(b), b["done"], st,
-                                                   grad_decay=tc.bptt_grad_decay, record=record)
-                loss, logs = depth_velocity_loss(d, v, rates, b, cfg.loss, cfg.data.inv_depth_eps, burn)
+                                                   grad_decay=tc.bptt_grad_decay, record=record, extras=ex)
+                loss, logs = depth_velocity_loss(d, v, rates, b, cfg.loss, cfg.data.inv_depth_eps, burn,
+                                                 ex.get("ttc"), cfg.data.ttc_eps, cfg.data.ttc_max)
+                if not torch.isfinite(loss):
+                    print(f"it {it}: non-finite loss, batch skipped", flush=True)
+                    continue
                 opt.zero_grad(set_to_none=True)
                 loss.backward()
                 gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), tc.grad_clip)
@@ -172,7 +203,7 @@ def train(cfg):
         sched.step()
         t_train = time.time() - t0 - t_collect
 
-        if it % tc.log_every == 0 or it == 1:
+        if (it % tc.log_every == 0 or it == 1) and n_mb:
             scal = {f"train/{k}": float(x) / n_mb for k, x in agg.items()}
             scal.update({"train/lr": sched.get_last_lr()[0], "train/window_steps": T,
                          "time/collect_s": t_collect, "time/train_s": t_train})
@@ -181,14 +212,15 @@ def train(cfg):
             if wb:
                 wb.log(scal, step=it)
             print(f"it {it:5d}  T {T:3d}  loss {scal['train/loss']:.4f}  depth {scal['train/depth']:.4f}  "
-                  f"vel {scal['train/vel']:.4f}  mem rate {scal['train/rate/mem']:.3f}  "
+                  f"ttc {scal['train/ttc']:.4f}  vel {scal['train/vel']:.4f}  "
+                  f"{model.interface} rate {scal['train/rate/' + model.interface]:.3f}  "
                   f"collect {t_collect:.1f}s train {t_train:.1f}s", flush=True)
 
         if mon is not None:
             rec = {"it": it, "T": T, "grad": mon.grad, "near": mon.near}
             monitor_log.write(json.dumps(rec) + "\n")
             monitor_log.flush()
-            for k in SPIKING_LAYERS:
+            for k in model.spiking_layers:
                 g = mon.grad[k]
                 writer.add_scalar(f"monitor/near_threshold/{k}", sum(mon.near[k]) / len(mon.near[k]), it)
                 if g and g[-1] > 0:
@@ -197,15 +229,19 @@ def train(cfg):
 
         if it % tc.val_every == 0:
             model.eval()
-            val, (vb, vd) = validate(model, heldout, cfg)
-            writer.add_image("val/depth", depth_image(vb, vd, cfg.data.inv_depth_eps), it, dataformats="HWC")
+            val, (vb, vd, vt) = validate(model, heldout, cfg)
+            maps = depth_image(vb, vd, cfg.data.inv_depth_eps, ttc=vt, ttc_eps=cfg.data.ttc_eps,
+                               depth=cfg.loss.lambda_d > 0,
+                               ttc_name="speed/range" if cfg.data.target_map == "near" else "invTTC")
+            writer.add_image("val/depth", maps, it, dataformats="HWC")
             model.train()
             for k, x in val.items():
                 writer.add_scalar(f"val/{k}", x, it)
             if wb:
                 wb.log({f"val/{k}": x for k, x in val.items()}, step=it)
+                wb.log({"val/maps": wandb.Image(maps)}, step=it)
             grew = curriculum.update(val["loss"])
-            print(f"  val loss {val['loss']:.4f} depth {val['depth']:.4f} vel {val['vel']:.4f}"
+            print(f"  val loss {val['loss']:.4f} depth {val['depth']:.4f} ttc {val['ttc']:.4f} (constant map: {val.get('ttc_const', float('nan')):.4f}) vel {val['vel']:.4f}"
                   + (f"  -> BPTT window {curriculum.T} steps" if grew else ""), flush=True)
             if val["loss"] < best_val:
                 best_val = val["loss"]

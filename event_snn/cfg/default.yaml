@@ -1,5 +1,5 @@
 run_name: null          # default: <variant>_<timestamp>
-variant: a_rec          # a_rec | a_ff | b | a_rec_noimu | a_rec_rawimu (see VARIANTS in config.py)
+variant: a_rec          # see VARIANTS in config.py
 seed: 0
 device: cuda:0
 out_dir: runs/event_snn
@@ -46,6 +46,11 @@ data:
   recent_s: 0.1
   inv_depth_eps: 0.02         # log(rho + eps); sky/far rho = 0
   min_depth_m: 0.1
+  ttc_max: 10.0               # 1/s, clip of the inverse time-to-contact target (TTC 0.1 s)
+  ttc_eps: 0.05               # 1/s, log(ttc + eps); 0.05 = "20 s away" floor
+  ttc_drone_radius_m: 0.3     # subtracted from the range, as the collision image inflates obstacles
+  ttc_pool: max               # max | mean, over the pixels of one target cell
+  target_map: ttc             # map the ttc head learns: ttc (closing speed / range) | near (speed / range)
   bounds_steps: 300           # rollout steps used to measure the state-encoder bounds
   bounds_percentiles: [1.0, 99.0]
   heldout_envs: 16
@@ -66,12 +71,21 @@ model:
   surrogate_alpha: 2.0
   rec_init_scale: 0.1          # memory recurrent conv weights x this at init
   rec_max_gain: 0.5            # cap on its operator norm; null = no cap
+  bottleneck: 0                # >0: spiking FC layer of this many neurons between memory and heads;
+                               # its spikes are the policy interface and the heads see nothing else
+  ttc_head: false              # second decoder channel: log(invTTC + eps)
+  memory: grid                 # grid: adaptive LIF on the 8x8 grid | bottleneck: conv3 -> flatten ->
+                               # concat inertial spikes -> recurrent adaptive-LIF bottleneck (the memory)
+  vel_head: true               # body-velocity output (needs metric scale from the IMU)
+  decoder: spiking             # spiking: LIF + leaky readouts | ann: ReLU convs on a leaky spike trace
   # set by the variant
   recurrent: true
   stateful: true
   state_inputs: [acc, gyro, grav]
 
 loss:
+  lambda_d: 1.0               # inverse-depth term
+  lambda_ttc: 0.0             # inverse time-to-contact term (needs model.ttc_head)
   lambda_si: 0.5
   lambda_v: 1.0
   lambda_s: 0.01

@@ -24,7 +24,7 @@ from aerial_gym.registry.env_registry import env_config_registry
 from aerial_gym.registry.robot_registry import robot_registry
 from aerial_gym.registry.task_registry import task_registry
 from aerial_gym.robots import BaseMultirotor
-from aerial_gym.utils.math import quat_rotate_inverse
+from aerial_gym.utils.math import quat_rotate, quat_rotate_inverse
 
 from analysis.crash_cause_eval import _NORM_CLAMP, _NORM_EPS, build_actor
 from config.robot_config.f450_event_cam_config import F450EventCamConfig
@@ -34,7 +34,8 @@ from config.task_config import F450NavTaskConfig
 from task.attitude_navigation_task import NavigationWithObstaclesTask
 
 from .config import heldout_path, load_config, steps
-from .data import AttitudeNoise, EventMaskTracker, events_to_input, inverse_depth_target, state_input
+from .data import (AttitudeNoise, EventMaskTracker, camera_velocity, events_to_input, inv_ttc_target,
+                   inverse_depth_target, state_input)
 
 ROBOT = "f450_event_cam_snn"
 TASK = "f450_event_snn_task"
@@ -195,8 +196,8 @@ class Perturbations:
 class Rollout:
     """Flies num_envs drones and returns (T, N, ...) chunks of inputs and targets on the GPU."""
 
-    KEYS = ("events", "imu", "grav", "grav_true", "rho", "vel", "m_now", "m_recent", "done",
-            "yaw_rate", "mode", "age")
+    KEYS = ("events", "imu", "grav", "grav_true", "rho", "ttc", "near", "vel", "m_now", "m_recent", "done",
+            "yaw_rate", "mode", "age", "action", "tobs")
 
     def __init__(self, cfg, num_envs=None, seed=None):
         self.cfg = cfg
@@ -210,6 +211,8 @@ class Rollout:
         self.obs_dict = self.task.obs_dict
         self.cam = self.env.robot_manager.warp_sensor.sensor
         self.far_m = float(cam_cfg.max_range)
+        self.rays = torch.as_tensor(self.cam.ray_lut_np, device=self.dev)  # (H, W, 3) optical frame
+        self.mount = [float(x) for x in cam_cfg.min_translation]
 
         self.teacher = Teacher(cfg.sim.teacher_checkpoint, self.dev)
         if self.teacher.obs_dim != self.task.task_config.observation_space_dim:
@@ -232,6 +235,7 @@ class Rollout:
 
         self.obs = self.task.reset()[0]["observations"]
         self.action = torch.zeros((n, 4), device=self.dev)
+        self.teacher_obs = torch.zeros((n, self.teacher.obs_dim), device=self.dev)
         self.k = 0
         self.age = torch.zeros(n, dtype=torch.long, device=self.dev)
         self.pending_done = torch.ones(n, dtype=torch.bool, device=self.dev)
@@ -243,6 +247,7 @@ class Rollout:
         obs = self.obs.clone()
         obs[:, 17:49] = self.vae.encode(self.remap(self.cam.depth))
         self.action = self.teacher(obs)
+        self.teacher_obs = obs
 
     @torch.no_grad()
     def step(self):
@@ -269,6 +274,12 @@ class Rollout:
         d = self.cfg.data
         events = events_to_input(self.env.global_tensor_dict["event_frames"][:, -1], d.event_clip)
         rho = inverse_depth_target(self.cam.depth, d.depth_grid, self.far_m, d.min_depth_m, d.depth_pool)
+        v_cam = camera_velocity(self.obs_dict["robot_body_linvel"], self.obs_dict["robot_body_angvel"],
+                                self.mount)
+        ttc = inv_ttc_target(self.cam.depth, self.rays, v_cam, d.depth_grid, self.far_m,
+                             d.ttc_drone_radius_m, d.ttc_max, pool=d.ttc_pool)
+        near = inv_ttc_target(self.cam.depth, self.rays, v_cam, d.depth_grid, self.far_m,
+                              d.ttc_drone_radius_m, d.ttc_max, pool=d.ttc_pool, mode="speed")
         m_now, m_recent = self.masks.update(events, done)
         g = quat_rotate_inverse(self.obs_dict["robot_orientation"], self.obs_dict["gravity"])
         g_true = g / g.norm(dim=-1, keepdim=True).clamp(min=1e-6)
@@ -276,7 +287,9 @@ class Rollout:
         c = rho.shape[-1]
         self.centre_rho = rho[:, c * 3 // 8: c * 5 // 8, c * 3 // 8: c * 5 // 8].flatten(1).max(1).values
         return dict(events=events, imu=self.imu.imu_meas.clone(), grav=self.attitude(g_true, done),
-                    grav_true=g_true, rho=rho, vel=vel, m_now=m_now, m_recent=m_recent, done=done,
+                    grav_true=g_true, rho=rho, ttc=ttc, near=near, vel=vel, m_now=m_now, m_recent=m_recent, done=done,
+                    # what the teacher last saw (17 state + 32 depth latent) and commanded: probe targets
+                    action=self.action.clone(), tobs=self.teacher_obs.clone(),
                     yaw_rate=self.obs_dict["robot_body_angvel"][:, 2].clone(),
                     mode=self.perturb.mode.to(torch.int8), age=self.age.to(torch.int32))
 
@@ -309,8 +322,14 @@ def write_heldout(cfg, rollout=None):
     ch = ro.collect(T)
     out = {k: v[:, :E].cpu() for k, v in ch.items()}
     out["rho"] = out["rho"].half()
+    out["ttc"] = out["ttc"].half()
+    out["near"] = out["near"].half()
+    k = ro.rays.shape[0] // d.depth_grid
+    rays_grid = F.normalize(F.avg_pool2d(ro.rays.permute(2, 0, 1)[None], k)[0].permute(1, 2, 0), dim=-1)
     out["meta"] = dict(level=cfg.sim.curriculum_level, seed=d.heldout_seed, dt=0.01,
-                       attitude=vars(cfg.attitude), far_m=ro.far_m)
+                       attitude=vars(cfg.attitude), far_m=ro.far_m,
+                       geom=dict(rays_grid=rays_grid.cpu(), drone_radius_m=d.ttc_drone_radius_m,
+                                 ttc_max=d.ttc_max, far_m=ro.far_m, mount=ro.mount))
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     torch.save(out, path)
     print(f"wrote held-out set {path}: {E} envs x {T} steps")
@@ -324,8 +343,24 @@ def check_teacher(cfg, seconds):
     t0 = time.time()
     T = steps(seconds)
     speed, ev = [], []
+    # invTTC self-check: the world point the centre ray hits at step k is P = c + R d r. Its
+    # distance from the camera one step later shrinks at the closing speed, which must equal the
+    # analytic v.d built from body velocity, body rates and the mount offset. Tests the frames.
+    cy, cx = ro.cam.height // 2, ro.cam.width // 2
+    ray_c = ro.rays[cy, cx]
+    prev, pairs, ttc_hist = None, [], torch.zeros(4)
     for k in range(T):
         s = ro.step()
+        pos, quat = ro.cam.pos_curr.clone(), ro.cam.quat_curr.clone()
+        r = ro.cam.depth[:, cy, cx] / ray_c[2]
+        v_cam = camera_velocity(ro.obs_dict["robot_body_linvel"], ro.obs_dict["robot_body_angvel"], ro.mount)
+        if prev is not None:
+            P, r0, vd0 = prev
+            ok = (~s["done"]) & (r0 < 0.9 * ro.far_m)
+            pairs.append(torch.stack([vd0[ok], ((r0 - (P - pos).norm(dim=-1)) / 0.01)[ok]], 1).cpu())
+        prev = (pos + quat_rotate(quat, ray_c.expand_as(pos)) * r[:, None], r.clone(), v_cam @ ray_c)
+        t = s["ttc"].flatten()
+        ttc_hist += torch.tensor([float((t > x).float().mean()) for x in (0.0, 0.5, 1.0, 0.999 * cfg.data.ttc_max)])
         speed.append(float(s["vel"].norm(dim=-1).mean()))
         ev.append(float((s["events"].float().sum((1, 2, 3))).mean()))
     n = ro.outcomes
@@ -334,6 +369,14 @@ def check_teacher(cfg, seconds):
     print(f"episodes {tot}: arrive {100 * n['arrive'] / tot:.1f}%  crash {100 * n['crash'] / tot:.1f}%  "
           f"timeout {100 * n['timeout'] / tot:.1f}%")
     print(f"mean speed {sum(speed) / T:.2f} m/s, events/step/env {sum(ev) / T:.0f}")
+    h = (ttc_hist / T * 100).tolist()
+    print(f"invTTC cells: {h[0]:.1f}% > 0, {h[1]:.1f}% > 0.5/s, {h[2]:.1f}% > 1/s (danger), {h[3]:.2f}% clipped")
+    p = torch.cat(pairs) if pairs else torch.zeros((0, 2))
+    if len(p) > 100:
+        slope = float((p[:, 0] * p[:, 1]).sum() / (p[:, 0] ** 2).sum().clamp(min=1e-9))
+        corr = float(torch.corrcoef(p.T)[0, 1])
+        print(f"invTTC check, centre ray, {len(p)} samples: measured closing speed = {slope:.3f} x (v.d), "
+              f"corr {corr:.3f} (both ~1.0 when frames and mount offset are right)")
 
 
 def main():
