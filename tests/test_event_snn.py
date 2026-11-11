@@ -505,3 +505,22 @@ def test_tiny_overfit_memory_bottleneck_ann_decoder():
         opt.step()
         first = first if first is not None else float(logs["ttc"])
     assert float(logs["ttc"]) < 0.6 * first
+
+
+def test_pick_frames_spans_the_target_range():
+    from event_snn.visualize import depth_image, pick_frames
+    T, E = 200, 3
+    ttc = torch.zeros((T, E, 32, 32))
+    for t in range(T):
+        ttc[t, :, :8, :8] = t / 20.0                       # nearest obstacle grows with t
+    valid = torch.ones((T, E), dtype=torch.bool)
+    valid[:20] = False
+    fr = pick_frames(ttc, valid, n=5)
+    assert len(fr) == 5 and all(t >= 20 for t, _, _ in fr)
+    scores = [s for _, _, s in fr]
+    assert scores == sorted(scores) and scores[0] < 2.0 and scores[-1] > 8.0
+    for i, (t, e, _) in enumerate(fr):                     # min_gap within one env
+        assert all(e != e2 or abs(t - t2) >= 50 for t2, e2, _ in fr[i + 1:])
+    b = {"events": torch.zeros((T, E, 2, 64, 64), dtype=torch.int8), "ttc": ttc, "rho": torch.zeros((T, E, 32, 32))}
+    img = depth_image(b, torch.zeros((T, E, 32, 32)), 0.02, ttc=torch.log(ttc + 0.05), depth=False, frames=fr)
+    assert img.shape == (5 * 256, 4 * 256, 3)

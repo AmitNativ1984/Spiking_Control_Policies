@@ -34,7 +34,7 @@ from .config import heldout_path, load_config, steps, to_dict
 from .data import select_target, state_input
 from .loss import depth_velocity_loss, ttc_loss, valid_mask
 from .model import EventSNN, count_parameters
-from .visualize import depth_image
+from .visualize import depth_image, pick_frames
 
 KEYS = ("events", "imu", "grav", "rho", "ttc", "vel", "done")
 
@@ -71,10 +71,13 @@ def run(model, b, cfg, burn):
     return loss, logs, rates, d, ex["ttc"]
 
 
-def maps_image(b, d, pred, cfg, n_envs=4):
-    return depth_image(b, d.detach(), cfg.data.inv_depth_eps, n_envs=n_envs, ttc=pred.detach(),
-                       ttc_eps=cfg.data.ttc_eps, depth=False,
-                       ttc_name="speed/range" if cfg.data.target_map == "near" else "invTTC")
+def maps_image(b, d, pred, cfg, valid=None, n=6):
+    """Validation: n frames spanning open space to imminent contact (pick_frames).
+    Without a mask (overfit clip): the last step of the first 4 envs."""
+    frames = pick_frames(b["ttc"], valid, n) if valid is not None else None
+    return depth_image(b, d.detach(), cfg.data.inv_depth_eps, ttc=pred.detach(), ttc_eps=cfg.data.ttc_eps,
+                       depth=False, ttc_name="speed/range" if cfg.data.target_map == "near" else "invTTC",
+                       frames=frames)
 
 
 def main():
@@ -203,7 +206,7 @@ def main():
             best = min(best, v)
             scal.update({f"{mode}/val_ttc": v, f"{mode}/best": best,
                          **{f"{mode}/val_rate/{k}": float(r) for k, r in vrates.items()}})
-            img = maps_image(va, vd, vpred, cfg)
+            img = maps_image(va, vd, vpred, cfg, va_valid)
             print(f"  val ttc {v:.4f} (best {best:.4f})  vs per-pixel {ref['per_pixel']:.4f}, "
                   f"constant {ref['constant']:.4f}", flush=True)
         elif not a.generalize:

@@ -52,34 +52,68 @@ def label(img, text):
 
 
 
+def pick_frames(ttc, valid, n=6, pct=0.98, min_gap=50):
+    """(t, e, score) for n frames spanning the range of the target map, from open space to
+    imminent contact. score = the pct-quantile of the frame's map (how close the nearest
+    obstacle is, ignoring single cells); frames are taken at evenly spaced score quantiles
+    over all valid steps, at least min_gap steps apart within one env. Depends only on the
+    targets, so a fixed held-out set gives the same frames at every validation."""
+    T, E = ttc.shape[:2]
+    flat = ttc.float().reshape(T, E, -1)
+    k = max(1, int(round(pct * flat.shape[-1])))
+    score = flat.kthvalue(k, dim=-1).values.cpu()                     # (T, E)
+    ok = valid.bool().cpu()
+    cand = ok.nonzero().tolist()
+    if not cand:
+        return []
+    cand.sort(key=lambda te: float(score[te[0], te[1]]))
+    picked = []
+    for i in range(n):
+        target = round(i * (len(cand) - 1) / max(n - 1, 1))
+        for off in range(len(cand)):                                     # nearest free candidate
+            for j in (target - off, target + off):
+                if 0 <= j < len(cand):
+                    t, e = cand[j]
+                    if all(e != pe or abs(t - pt) >= min_gap for pt, pe, _ in picked):
+                        picked.append((t, e, float(score[t, e])))
+                        break
+            else:
+                continue
+            break
+    return sorted(picked, key=lambda x: x[2])
+
+
 def depth_image(b, d, eps, n_envs=4, rho_max=1.0, ttc=None, ttc_eps=0.05, ttc_show=3.0, depth=True,
-                ttc_name="invTTC"):
-    """(H, W, 3) uint8 RGB: one row per held-out env at the last validation step:
-    events | target 1/Z | predicted 1/Z | |log error| (0-2) | target invTTC | predicted invTTC (0-3 /s).
-    The depth panels are dropped when depth is not trained, the invTTC panels when there is no head."""
-    t = d.shape[0] - 1
-    rho = b["rho"][t].cpu()
-    pred = d[t].float().cpu()
-    rho_hat = (pred.exp() - eps).clamp(min=0.0)
-    err = (pred - log_rho(rho, eps)).abs()
-    if ttc is not None:
-        ttc_true = b["ttc"][t].float().cpu()
-        ttc_hat = (ttc[t].float().cpu().exp() - ttc_eps).clamp(min=0.0)
+                ttc_name="invTTC", frames=None):
+    """(H, W, 3) uint8 RGB, one row per frame:
+    events | target 1/Z | predicted 1/Z | |log err| | target invTTC | predicted invTTC | |log err|.
+    frames: [(t, e, score)] from pick_frames; default the last step of the first n_envs envs.
+    The depth panels are dropped when depth is not trained, the invTTC panels when there is no head.
+    invTTC panels share one colour scale, 0-ttc_show 1/s (brighter = sooner contact)."""
+    if frames is None:
+        frames = [(d.shape[0] - 1, e, None) for e in range(min(n_envs, d.shape[1]))]
     rows = []
-    for e in range(min(n_envs, d.shape[1])):
+    for i, (t, e, score) in enumerate(frames):
         panels, names = [events_panel(b["events"][t, e].cpu().numpy())], ["events"]
         if depth:
-            panels += [_cmap(rho[e].numpy(), rho_max, cv2.COLORMAP_VIRIDIS),
-                       _cmap(rho_hat[e].numpy(), rho_max, cv2.COLORMAP_VIRIDIS),
-                       _cmap(err[e].numpy(), 2.0, cv2.COLORMAP_INFERNO)]
+            rho = b["rho"][t, e].float().cpu()
+            pred = d[t, e].float().cpu()
+            panels += [_cmap(rho.numpy(), rho_max, cv2.COLORMAP_VIRIDIS),
+                       _cmap((pred.exp() - eps).clamp(min=0.0).numpy(), rho_max, cv2.COLORMAP_VIRIDIS),
+                       _cmap((pred - log_rho(rho, eps)).abs().numpy(), 2.0, cv2.COLORMAP_INFERNO)]
             names += ["target 1/Z", "predicted 1/Z", "|log err| (0-2)"]
         if ttc is not None:
-            panels += [_cmap(ttc_true[e].numpy(), ttc_show, cv2.COLORMAP_MAGMA),
-                       _cmap(ttc_hat[e].numpy(), ttc_show, cv2.COLORMAP_MAGMA)]
-            names += [f"target {ttc_name}", f"predicted {ttc_name}"]
-        if e == 0:
+            y = b["ttc"][t, e].float().cpu()
+            lp = ttc[t, e].float().cpu()
+            panels += [_cmap(y.numpy(), ttc_show, cv2.COLORMAP_MAGMA),
+                       _cmap((lp.exp() - ttc_eps).clamp(min=0.0).numpy(), ttc_show, cv2.COLORMAP_MAGMA),
+                       _cmap((lp - torch.log(y + ttc_eps)).abs().numpy(), 2.0, cv2.COLORMAP_INFERNO)]
+            names += [f"target {ttc_name} (0-{ttc_show:g}/s)", f"predicted {ttc_name}", "|log err| (0-2)"]
+        if i == 0:
             for img, text in zip(panels, names):
                 label(img, text)
+        tag = f"env {e}  t {t / 100:.2f}s" + (f"  p98 {score:.2f}/s" if score is not None else "")
+        cv2.putText(panels[0], tag, (6, PANEL - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
         rows.append(np.concatenate(panels, axis=1))
     return cv2.cvtColor(np.concatenate(rows, axis=0), cv2.COLOR_BGR2RGB)
 

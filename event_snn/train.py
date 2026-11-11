@@ -27,7 +27,7 @@ from .loss import depth_velocity_loss, episode_age, ttc_loss, valid_mask
 from .model import EventSNN, Monitor, count_parameters, surrogate_half_width
 from .data import log_rho, select_target, state_input
 from .sim import Rollout, measure_bounds, write_heldout
-from .visualize import depth_image
+from .visualize import depth_image, pick_frames
 
 TRAIN_KEYS = ("events", "imu", "grav", "rho", "ttc", "near", "vel", "done")
 
@@ -202,8 +202,9 @@ def train(cfg):
         if it % tc.val_every == 0:
             model.eval()
             val, (vb, vd, vt) = validate(model, heldout, cfg)
+            frames = pick_frames(vb["ttc"], valid_mask(vb["done"], steps(cfg.loss.burn_in_s))) if vt is not None else None
             maps = depth_image(vb, vd, cfg.data.inv_depth_eps, ttc=vt, ttc_eps=cfg.data.ttc_eps,
-                               depth=cfg.loss.lambda_d > 0,
+                               depth=cfg.loss.lambda_d > 0, frames=frames,
                                ttc_name="speed/range" if cfg.data.target_map == "near" else "invTTC")
             writer.add_image("val/depth", maps, it, dataformats="HWC")
             model.train()
