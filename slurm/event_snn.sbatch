@@ -49,8 +49,8 @@ case "${MODE}" in
                 && python -m event_snn.evaluate runs/event_snn/${RUN_NAME}/best.pt" ;;
   eval)    [[ -n "${CKPT}" ]] || { echo "MODE=eval needs CKPT" >&2; exit 1; }
            CMD="python -m event_snn.evaluate ${CKPT}" ;;
-  overfit) CMD="python -m event_snn.overfit --variant ${VARIANT} --set ${SET} \
-                && python -m event_snn.overfit --variant ${VARIANT} --no_events --set ${SET}" ;;
+  overfit) CMD="python -m event_snn.overfit --variant ${VARIANT} --wandb --set ${SET} \
+                && python -m event_snn.overfit --variant ${VARIANT} --no_events --wandb --set ${SET}" ;;
   *) echo "unknown MODE=${MODE}" >&2; exit 1 ;;
 esac
 
