@@ -442,7 +442,11 @@ def test_memory_bottleneck_architecture(variant):
     T, B = 12, 2
     ev, st, done = random_batch(T, B, p_event=0.1)
     ex = {}
-    d, v, s, rates = m.unroll(ev, st, done, m.init_state(B), extras=ex)
+    # start with some bottleneck spikes: with random weights and weak input the bottleneck can stay
+    # silent for 12 steps, and then the recurrent weights get exactly zero gradient
+    init = m.init_state(B)
+    init["mem_s"] = (torch.rand_like(init["mem_s"]) < 0.5).float()
+    d, v, s, rates = m.unroll(ev, st, done, init, extras=ex)
     assert ex["ttc"].shape == (T, B, 32, 32) and s["mem_s"].shape == (B, 128)
     assert float(d.abs().max()) == 0.0
     assert float(v.abs().max()) == 0.0
