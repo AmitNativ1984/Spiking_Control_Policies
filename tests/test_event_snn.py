@@ -567,3 +567,24 @@ def test_stacked_cnn_baseline_history_and_resets():
         net.unroll(ev2, None, done, net.init_state(B, "cpu"), extras=ex3)
         assert torch.allclose(ex3["ttc"][6:, 1], ex["ttc"][6:, 1], atol=1e-5)
         assert not torch.allclose(ex3["ttc"][3:6, 1], ex["ttc"][3:6, 1])
+
+
+def test_stacked_cnn_baseline_with_imu():
+    from event_snn.baseline import StackedEventCNN
+    torch.manual_seed(0)
+    T, B, K = 8, 2, 3
+    net = StackedEventCNN(k=K, width=8, chunk=3, imu=True).eval()
+    net.set_input_bounds(-torch.ones(9), torch.ones(9))
+    ev = torch.randint(0, 3, (T, B, 2, 64, 64), dtype=torch.uint8)
+    si = torch.randn(T, B, 9)
+    done = torch.zeros((T, B), dtype=torch.bool)
+    with torch.no_grad():
+        ex, ex1, ex2, ex3 = {}, {}, {}, {}
+        net.unroll(ev, si, done, net.init_state(B, "cpu"), extras=ex)
+        _, _, s1, _ = net.unroll(ev[:4], si[:4], done[:4], net.init_state(B, "cpu"), extras=ex1)
+        net.unroll(ev[4:], si[4:], done[4:], s1, extras=ex2)
+        assert torch.allclose(torch.cat([ex1["ttc"], ex2["ttc"]]), ex["ttc"], atol=1e-5)
+        si2 = si.clone()
+        si2[:, :, 3:6] += 1.0                                # gyro changes the output
+        net.unroll(ev, si2, done, net.init_state(B, "cpu"), extras=ex3)
+        assert not torch.allclose(ex3["ttc"], ex["ttc"])

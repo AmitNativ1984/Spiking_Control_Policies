@@ -1,7 +1,8 @@
 """Non-spiking reference: a plain CNN on a stack of the last K event frames -> target map.
 
-It answers one question: can the target map be read from these events at all? It sees only
-the events (no IMU), has no spiking neurons and no state other than the frame history, and
+It answers one question: can the target map be read from these events at all? By default it sees
+only the events; with imu=True also the last K steps of [acc, gyro, grav] (the gyro tells image
+motion from rotation apart from motion toward obstacles). It has no spiking neurons and no state other than the frame history, and
 a U-Net with a wide-context middle, so it is not limited by receptive field or by rate coding.
 If it cannot draw obstacles either, the problem is the data, target or loss, not the SNN.
 
@@ -24,9 +25,9 @@ class StackedEventCNN(nn.Module):
     spiking_layers = ()
     interface = None
 
-    def __init__(self, k=30, width=64, chunk=64):
+    def __init__(self, k=30, width=64, chunk=64, imu=False):
         super().__init__()
-        self.k, self.chunk = k, chunk
+        self.k, self.chunk, self.imu = k, chunk, imu
         w = width
         self.e1 = nn.Sequential(nn.Conv2d(2 * k, w, 5, 2, 2), nn.GroupNorm(8, w), nn.ReLU(inplace=True),
                                 _block(w, w))                                    # 32x32
@@ -35,27 +36,40 @@ class StackedEventCNN(nn.Module):
         # wide context at 8x8: dilated convs (receptive field = whole image) + a global feature
         self.mid = nn.Sequential(_block(4 * w, 4 * w, dilation=2), _block(4 * w, 4 * w, dilation=4))
         self.glob = nn.Linear(4 * w, 4 * w)
+        if imu:
+            # the last K steps of [acc, gyro, grav] (normalised to about -1..1 by the data bounds),
+            # added to every cell of the 8x8 middle: rotation over the window and attitude
+            self.imu_fc = nn.Sequential(nn.Linear(9 * k, 4 * w), nn.ReLU(inplace=True), nn.Linear(4 * w, 4 * w))
+            self.register_buffer("imu_mid", torch.zeros(9))
+            self.register_buffer("imu_half", torch.ones(9))
         self.d2 = nn.Sequential(_block(4 * w + 2 * w, 2 * w), _block(2 * w, 2 * w))  # 16x16, skip e2
         self.d1 = nn.Sequential(_block(2 * w + w, w), _block(w, w))                  # 32x32, skip e1
         self.out = nn.Conv2d(w, 1, 1)
 
-    def set_input_bounds(self, lo, hi):   # no inertial input
-        pass
+    @torch.no_grad()
+    def set_input_bounds(self, lo, hi):
+        if self.imu:
+            lo, hi = torch.as_tensor(lo, dtype=torch.float32), torch.as_tensor(hi, dtype=torch.float32)
+            self.imu_mid.copy_((lo + hi) / 2)
+            self.imu_half.copy_(((hi - lo) / 2).clamp(min=1e-6))
 
     def init_state(self, batch, device=None):
         device = device or next(self.parameters()).device
         return {"hist": torch.zeros((self.k - 1, batch, 2, 64, 64), device=device),
+                "hist_imu": torch.zeros((self.k - 1, batch, 9), device=device),
                 "hist_ok": torch.zeros((self.k - 1, batch), dtype=torch.bool, device=device)}
 
     @staticmethod
     def detach_state(st):
         return {k: v.detach() for k, v in st.items()}
 
-    def net(self, x):
+    def net(self, x, imu=None):
         h1 = self.e1(x)
         h2 = self.e2(h1)
         h3 = self.mid(self.e3(h2))
         h3 = h3 + self.glob(h3.mean((2, 3)))[:, :, None, None]
+        if imu is not None:
+            h3 = h3 + self.imu_fc(imu)[:, :, None, None]
         u = F.interpolate(h3, scale_factor=2, mode="nearest")
         u = self.d2(torch.cat([u, h2], 1))
         u = F.interpolate(u, scale_factor=2, mode="nearest")
@@ -68,6 +82,9 @@ class StackedEventCNN(nn.Module):
         T, B = done.shape
         K = self.k
         full = torch.cat([st["hist"], torch.log1p(events.float())], 0)            # (K-1+T, B, 2, 64, 64)
+        if self.imu:
+            si = ((state_in.float() - self.imu_mid) / self.imu_half).clamp(-3.0, 3.0)
+            full_imu = torch.cat([st["hist_imu"], si], 0)                         # (K-1+T, B, 9)
         # episode id per frame: history = -1 if invalid else 0, current steps 0 + resets so far
         ep_cur = torch.cumsum(done.long(), 0)                                    # (T, B)
         ep_hist = torch.where(st["hist_ok"], torch.zeros_like(st["hist_ok"], dtype=torch.long),
@@ -82,10 +99,14 @@ class StackedEventCNN(nn.Module):
             x = x * keep[..., None, None, None]
             n = t1 - t0
             x = x.permute(0, 2, 1, 3, 4, 5).reshape(n * B, 2 * K, 64, 64)       # oldest .. newest
-            outs.append(self.net(x).view(n, B, 32, 32))
+            imu = None
+            if self.imu:
+                imu = (full_imu[idx] * keep[..., None]).permute(0, 2, 1, 3).reshape(n * B, 9 * K)
+            outs.append(self.net(x, imu).view(n, B, 32, 32))
         ttc = torch.cat(outs, 0)
         last_ep = ep_cur[-1]
-        new = {"hist": full[-(K - 1):].detach(), "hist_ok": ep[-(K - 1):] == last_ep[None]}
+        new = {"hist": full[-(K - 1):].detach(), "hist_ok": ep[-(K - 1):] == last_ep[None],
+               "hist_imu": full_imu[-(K - 1):].detach() if self.imu else st["hist_imu"]}
         if extras is not None:
             extras["ttc"] = ttc
         return torch.zeros_like(ttc), torch.zeros((T, B, 3), device=ttc.device), new, {}
