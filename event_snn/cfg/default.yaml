@@ -1,0 +1,98 @@
+run_name: null          # default: <variant>_<timestamp>
+variant: a_rec          # a_rec | a_ff | b | a_rec_noimu | a_rec_rawimu (see VARIANTS in config.py)
+seed: 0
+device: cuda:0
+out_dir: runs/event_snn
+
+sim:
+  num_envs: 8
+  curriculum_level: 20
+  episode_seconds: 24.0       # teacher was trained with 800 steps x 30 ms
+  teacher_checkpoint: runs/f450_nav_ann/f450_nav_lat_pfov/2026-10-07_13-37-08/nn/f450_nav_lat_pfov.pth
+  teacher_every: 3            # teacher acts every 3rd 10 ms step (~33 Hz), action held between
+  camera:
+    width: 128
+    height: 128
+    texture_enabled: true
+    supersample: 1
+
+perturb:
+  rate_hz: 0.25               # chance per second that a teacher-flown env starts a perturbation
+  probs: {yaw_burst: 0.2, speed: 0.2, hover: 0.2, approach: 0.2, excursion: 0.2}
+  yaw_burst_s: [0.3, 1.0]
+  speed_s: [1.0, 3.0]
+  speed_scale: [0.3, 1.6]     # multiplies the teacher's roll/pitch commands
+  hover_s: [1.0, 3.0]
+  approach_s: [1.0, 2.5]
+  approach_speed: [1.0, 3.0]
+  approach_abort_depth_m: 1.2 # hand back to the teacher when the centre of view is this close
+  excursion_s: [0.5, 2.0]
+  excursion_speed: [0.5, 3.0]
+  vel_gain: 2.0               # 1/s, velocity-hold P gain used by hover/approach/excursion
+
+imu:
+  accel_bias_rw: 0.003        # m/s^2/sqrt(s)
+  gyro_bias_rw: 0.0003        # rad/s/sqrt(s)
+
+attitude:
+  noise_deg: 1.5              # white, per step
+  bias_init_deg: 1.0          # per episode
+  bias_rw_deg: 0.2            # deg/sqrt(s)
+
+data:
+  event_clip: 7
+  depth_grid: 32
+  depth_pool: mean            # mean | max (max of 1/Z = min-pool of depth)
+  recent_s: 0.1
+  inv_depth_eps: 0.02         # log(rho + eps); sky/far rho = 0
+  min_depth_m: 0.1
+  bounds_steps: 300           # rollout steps used to measure the state-encoder bounds
+  bounds_percentiles: [1.0, 99.0]
+  heldout_envs: 16
+  heldout_seconds: 15.0
+  heldout_seed: 12345
+  heldout_path: null          # default: <out_dir>/heldout_level<L>_seed<S>.pt
+
+model:
+  conv_channels: [16, 32, 64]
+  mem_channels: 64
+  pop_dim: 10
+  encoder_threshold: 0.5
+  beta_init: 0.85
+  tau_mem_init_s: 0.1
+  tau_adapt_init_s: 0.5
+  adapt_strength: 0.5
+  readout_beta_init: 0.8
+  surrogate_alpha: 2.0
+  rec_init_scale: 0.1          # memory recurrent conv weights x this at init
+  rec_max_gain: 0.5            # cap on its operator norm; null = no cap
+  # set by the variant
+  recurrent: true
+  stateful: true
+  state_inputs: [acc, gyro, grav]
+
+loss:
+  lambda_si: 0.5
+  lambda_v: 1.0
+  lambda_s: 0.01
+  rate_target: 0.1
+  burn_in_s: 0.2              # per window, and after every in-window episode reset
+
+train:
+  iterations: 4000
+  lr: 1.0e-3
+  lr_min: 1.0e-5
+  grad_clip: 1.0
+  passes: 2
+  minibatch_envs: 16
+  bptt_curriculum_s: [0.32, 1.28, 2.0]
+  bptt_grad_decay: 1.0        # 1.0 = off
+  plateau_patience: 4         # validations without a 1% improvement before the window grows
+  plateau_rel: 0.01
+  val_every: 50
+  val_envs: 16
+  val_seconds: 6.0
+  ckpt_every: 250
+  monitor_every: 50
+  log_every: 10
+  wandb: false

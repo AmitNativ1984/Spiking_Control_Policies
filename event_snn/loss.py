@@ -1,0 +1,44 @@
+"""Loss of docs/event_snn_experiment_plan.md section 3 and the shared depth/velocity error metrics."""
+import torch
+
+from .data import log_rho
+
+
+def valid_mask(done, burn_in_steps):
+    """(T, B) bool: steps that count. Excludes the first burn_in_steps of the window and of
+    every episode that starts inside it (the state was just reset)."""
+    T, B = done.shape
+    if burn_in_steps <= 0:
+        return torch.ones_like(done)
+    age = torch.empty((T, B), dtype=torch.long, device=done.device)
+    a = torch.full((B,), burn_in_steps, dtype=torch.long, device=done.device)  # carried state is warm
+    for t in range(T):
+        a = torch.where(done[t], torch.zeros_like(a), a + 1)
+        age[t] = a
+    t_idx = torch.arange(T, device=done.device)[:, None]
+    return (t_idx >= burn_in_steps) & (age > burn_in_steps)
+
+
+def scale_invariant(d, m=None):
+    """Eigen et al. 2014 per image, over the cells in m (all if None): mean(d^2) - mean(d)^2."""
+    m = torch.ones_like(d) if m is None else m.to(d.dtype)
+    n = m.sum((-2, -1)).clamp(min=1.0)
+    mean = (d * m).sum((-2, -1)) / n
+    return (d * d * m).sum((-2, -1)) / n - mean * mean
+
+
+def depth_velocity_loss(pred_depth, pred_vel, rates, batch, cfg_loss, eps, burn_in_steps):
+    """pred_depth (T, B, 32, 32) = log(rho_hat + eps); pred_vel (T, B, 3); batch holds
+    rho, vel, done with the same leading (T, B). Every cell of the current image counts equally."""
+    valid = valid_mask(batch["done"], burn_in_steps).to(pred_depth.dtype)
+    nv = valid.sum().clamp(min=1.0)
+
+    d = pred_depth - log_rho(batch["rho"].to(pred_depth.dtype), eps)
+    per_image = d.abs().mean((-2, -1)) + cfg_loss.lambda_si * scale_invariant(d)
+    depth = (per_image * valid).sum() / nv
+
+    vel = (((pred_vel - batch["vel"]) ** 2).sum(-1) * valid).sum() / nv
+    rate = sum((r - cfg_loss.rate_target) ** 2 for r in rates.values())
+    total = depth + cfg_loss.lambda_v * vel + cfg_loss.lambda_s * rate
+    return total, {"loss": total.detach(), "depth": depth.detach(), "vel": vel.detach(),
+                   "rate_reg": rate.detach(), "valid_frac": valid.mean().detach()}
