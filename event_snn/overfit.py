@@ -34,6 +34,7 @@ import torch
 from .config import heldout_path, load_config, steps, to_dict
 from .data import select_target, state_input
 from .loss import depth_velocity_loss, ttc_loss, valid_mask
+from .baseline import StackedEventCNN
 from .model import EventSNN, count_parameters
 from .visualize import depth_image, pick_frames
 
@@ -103,6 +104,10 @@ def main():
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--no_events", action="store_true")
     p.add_argument("--no_inertial", action="store_true")
+    p.add_argument("--baseline", action="store_true",
+                   help="non-spiking reference instead of the SNN: CNN on the last --k event frames, no IMU")
+    p.add_argument("--k", type=int, default=30, help="baseline: event frames stacked (10 ms each)")
+    p.add_argument("--width", type=int, default=64, help="baseline: channels of the first CNN stage")
     p.add_argument("--out", default=None)
     p.add_argument("--wandb", action="store_true", help="log to W&B (project event_snn)")
     a = p.parse_args()
@@ -112,6 +117,11 @@ def main():
     torch.manual_seed(cfg.seed)
     dev = cfg.device
     T, burn = steps(a.seconds), steps(cfg.loss.burn_in_s)
+    if a.baseline:
+        # the CNN needs k-1 frames of history: windows start k-1 steps earlier and, after any
+        # reset or cold start, steps without a full history are not scored (validation and references too)
+        burn = max(burn, a.k - 1)
+        T += a.k - 1
     eps, tmax = cfg.data.ttc_eps, cfg.data.ttc_max
     H = select_target(torch.load(heldout_path(cfg)), cfg.data.target_map)
     H = {k: H[k] for k in KEYS if k in H}
@@ -158,18 +168,21 @@ def main():
         tr = ablate(tr, a.no_events, a.no_inertial, mean)
         ref = ref_losses(tr, tr_valid.float(), const, pix, eps, tmax)
 
-    model = EventSNN(cfg.model).to(dev)
+    model = (StackedEventCNN(a.k, a.width) if a.baseline else EventSNN(cfg.model)).to(dev)
     model.set_input_bounds(lo, hi)
     model.train()
     opt = torch.optim.Adam(model.parameters(), lr=a.lr)
 
     mode = "generalize" if a.generalize else "overfit"
     tag = ("_noev" if a.no_events else "") + ("_noimu" if a.no_inertial else "")
-    name = f"{mode}_{cfg.variant}{tag}_{time.strftime('%Y%m%d_%H%M%S')}"
+    net = f"cnn_k{a.k}_{cfg.data.target_map}" if a.baseline else cfg.variant
+    name = f"{mode}_{net}{tag}_{time.strftime('%Y%m%d_%H%M%S')}"
     out = a.out or os.path.join(cfg.out_dir, mode, name)
     os.makedirs(out, exist_ok=True)
     inputs = "events only" if a.no_inertial and not a.no_events else "inertial only" if a.no_events and not a.no_inertial \
         else "NO inputs" if a.no_events else "events + inertial"
+    if a.baseline:
+        inputs = f"last {a.k} event frames only (non-spiking CNN baseline, no IMU)" if not a.no_events else "NO inputs"
     if a.generalize:
         src_txt = (f"recorded {', '.join(os.path.basename(f) for f in a.train_data)} ({tr['done'].shape[1]} drones"
                    if a.train_data else f"drones 0-{a.train_envs - 1} ({a.train_envs} drones")
@@ -178,7 +191,7 @@ def main():
                 f"validate drones {a.train_envs}-{Eall - 1} whole flights")
     else:
         what = f"one fixed clip, {a.envs} drones x {a.seconds} s from {a.start_s} s"
-    print(f"{mode} {cfg.variant}: {count_parameters(model)} parameters; {what}; inputs: {inputs}; lr {a.lr}")
+    print(f"{mode} {net}: {count_parameters(model)} parameters; {what}; inputs: {inputs}; lr {a.lr}")
     print(f"references{' on the validation drones' if a.generalize else ''}: "
           f"constant {ref['constant']:.4f}  per-pixel {ref['per_pixel']:.4f}")
     print(f"writing images to {out}")
@@ -187,7 +200,7 @@ def main():
         import wandb
         wb = wandb.init(project="event_snn", group=mode, name=name, dir=out,
                         config={**to_dict(cfg), mode: vars(a)},
-                        notes=os.environ.get("WANDB_NOTES") or f"{mode} test: {cfg.variant}, {what}; inputs: {inputs}; "
+                        notes=os.environ.get("WANDB_NOTES") or f"{mode} test: {net}, {what}; inputs: {inputs}; "
                         f"lr {a.lr}; references constant {ref['constant']:.3f}, per-pixel {ref['per_pixel']:.3f}")
         wb.summary.update({"ref/constant": ref["constant"], "ref/per_pixel": ref["per_pixel"]})
 

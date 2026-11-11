@@ -540,3 +540,30 @@ def test_event_sequence_shows_the_window_before_t():
         assert img.shape == (26 + 3 * 64, 6 * 64, 3)
     img = event_sequence(b, 5, 0, None, window_s=0.3, every=2, panel=64)   # near the start: fewer panels
     assert img.shape == (26 + 64, 6 * 64, 3)
+
+
+def test_stacked_cnn_baseline_history_and_resets():
+    from event_snn.baseline import StackedEventCNN
+    torch.manual_seed(0)
+    T, B, K = 12, 2, 4
+    net = StackedEventCNN(k=K, width=8, chunk=5).eval()
+    ev = torch.randint(0, 3, (T, B, 2, 64, 64), dtype=torch.uint8)
+    done = torch.zeros((T, B), dtype=torch.bool)
+    done[6, 1] = True                                       # env 1 resets at step 6
+    with torch.no_grad():
+        ex = {}
+        d, v, st, rates = net.unroll(ev, None, done, net.init_state(B, "cpu"), extras=ex)
+        assert ex["ttc"].shape == (T, B, 32, 32) and d.shape == (T, B, 32, 32) and v.shape == (T, B, 3)
+        assert rates == {}
+        # one call == two calls with the frame history carried in the state
+        ex1, ex2 = {}, {}
+        _, _, s1, _ = net.unroll(ev[:5], None, done[:5], net.init_state(B, "cpu"), extras=ex1)
+        net.unroll(ev[5:], None, done[5:], s1, extras=ex2)
+        assert torch.allclose(torch.cat([ex1["ttc"], ex2["ttc"]]), ex["ttc"], atol=1e-5)
+        # frames from before the reset are ignored: changing them leaves env 1's output from step 6 on unchanged
+        ev2 = ev.clone()
+        ev2[:6, 1] = 0
+        ex3 = {}
+        net.unroll(ev2, None, done, net.init_state(B, "cpu"), extras=ex3)
+        assert torch.allclose(ex3["ttc"][6:, 1], ex["ttc"][6:, 1], atol=1e-5)
+        assert not torch.allclose(ex3["ttc"][3:6, 1], ex["ttc"][3:6, 1])

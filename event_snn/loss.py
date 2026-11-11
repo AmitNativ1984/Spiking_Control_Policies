@@ -64,7 +64,7 @@ def depth_velocity_loss(pred_depth, pred_vel, rates, batch, cfg_loss, eps, burn_
         depth = depth.new_zeros(())
     if cfg_loss.lambda_v == 0:
         vel = vel.new_zeros(())
-    rate = sum((r - cfg_loss.rate_target) ** 2 for r in rates.values())
+    rate = sum(((r - cfg_loss.rate_target) ** 2 for r in rates.values()), depth.new_zeros(()))
     total = lam_d * depth + lam_ttc * ttc + cfg_loss.lambda_v * vel + cfg_loss.lambda_s * rate
     return total, {"loss": total.detach(), "depth": depth.detach(), "ttc": ttc.detach(), "vel": vel.detach(),
                    "rate_reg": rate.detach(), "valid_frac": valid.mean().detach()}
