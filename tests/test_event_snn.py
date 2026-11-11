@@ -524,3 +524,19 @@ def test_pick_frames_spans_the_target_range():
     b = {"events": torch.zeros((T, E, 2, 64, 64), dtype=torch.int8), "ttc": ttc, "rho": torch.zeros((T, E, 32, 32))}
     img = depth_image(b, torch.zeros((T, E, 32, 32)), 0.02, ttc=torch.log(ttc + 0.05), depth=False, frames=fr)
     assert img.shape == (5 * 256, 4 * 256, 3)
+
+
+def test_event_sequence_shows_the_window_before_t():
+    from event_snn.visualize import event_sequence
+    T, E = 100, 2
+    b = {"events": torch.zeros((T, E, 2, 64, 64), dtype=torch.int8), "ttc": torch.rand((T, E, 32, 32)),
+         "done": torch.zeros((T, E), dtype=torch.bool)}
+    b["done"][0] = True
+    b["done"][80, 1] = True                                 # env 1 reset 10 steps before t: older panels dimmed
+    pred = torch.zeros((T, E, 32, 32))
+    # 0.3 s at 2 steps per panel = 15 event panels + target + prediction = 17 -> 3 rows of 6
+    for e in range(E):
+        img = event_sequence(b, 90, e, pred, window_s=0.3, every=2, panel=64)
+        assert img.shape == (26 + 3 * 64, 6 * 64, 3)
+    img = event_sequence(b, 5, 0, None, window_s=0.3, every=2, panel=64)   # near the start: fewer panels
+    assert img.shape == (26 + 64, 6 * 64, 3)

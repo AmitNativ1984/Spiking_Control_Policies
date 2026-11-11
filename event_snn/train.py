@@ -27,7 +27,7 @@ from .loss import depth_velocity_loss, episode_age, ttc_loss, valid_mask
 from .model import EventSNN, Monitor, count_parameters, surrogate_half_width
 from .data import log_rho, select_target, state_input
 from .sim import Rollout, measure_bounds, write_heldout
-from .visualize import depth_image, pick_frames
+from .visualize import depth_image, event_sequence, pick_frames
 
 TRAIN_KEYS = ("events", "imu", "grav", "rho", "ttc", "near", "vel", "done")
 
@@ -208,12 +208,19 @@ def train(cfg):
                                depth=cfg.loss.lambda_d > 0, frames=frames,
                                ttc_name="speed/range" if cfg.data.target_map == "near" else "invTTC")
             writer.add_image("val/depth", maps, it, dataformats="HWC")
+            seq = None
+            if frames:                               # events leading up to the nearest-contact frame shown
+                seq = event_sequence(vb, frames[-1][0], frames[-1][1], vt, cfg.data.ttc_eps,
+                                     ttc_name="speed/range" if cfg.data.target_map == "near" else "invTTC")
+                writer.add_image("val/sequence", seq, it, dataformats="HWC")
             model.train()
             for k, x in val.items():
                 writer.add_scalar(f"val/{k}", x, it)
             if wb:
                 wb.log({f"val/{k}": x for k, x in val.items()}, step=it)
                 wb.log({"val/maps": wandb.Image(maps)}, step=it)
+                if seq is not None:
+                    wb.log({"val/sequence": wandb.Image(seq)}, step=it)
             # the same panels on the newest training window (fresh sim data, drawn after this iteration's update)
             tb, td, tt, tage = last
             tframes = pick_frames(tb["ttc"], valid_mask(tb["done"], burn, tage)) if tt is not None else None
@@ -224,7 +231,9 @@ def train(cfg):
             if wb:
                 wb.log({"train/maps": wandb.Image(tmaps)}, step=it)
             os.makedirs(os.path.join(run_dir, "maps"), exist_ok=True)
-            for nm, im in (("val", maps), ("train", tmaps)):
+            for nm, im in (("val", maps), ("train", tmaps), ("val_sequence", seq)):
+                if im is None:
+                    continue
                 cv2.imwrite(os.path.join(run_dir, "maps", f"{nm}_{it:05d}.png"), cv2.cvtColor(im, cv2.COLOR_RGB2BGR))
             grew = curriculum.update(val["loss"])
             vparts = [f"{n} {val[n]:.4f}" for n, w in (("depth", cfg.loss.lambda_d), ("ttc", cfg.loss.lambda_ttc),

@@ -35,7 +35,7 @@ from .config import heldout_path, load_config, steps, to_dict
 from .data import select_target, state_input
 from .loss import depth_velocity_loss, ttc_loss, valid_mask
 from .model import EventSNN, count_parameters
-from .visualize import depth_image, pick_frames
+from .visualize import depth_image, event_sequence, pick_frames
 
 KEYS = ("events", "imu", "grav", "rho", "ttc", "vel", "done")
 
@@ -191,8 +191,8 @@ def main():
                         f"lr {a.lr}; references constant {ref['constant']:.3f}, per-pixel {ref['per_pixel']:.3f}")
         wb.summary.update({"ref/constant": ref["constant"], "ref/per_pixel": ref["per_pixel"]})
 
-    def log(d, it, img=None, train_img=None):
-        imgs = {k: v for k, v in (("maps", img), ("train_maps", train_img)) if v is not None}
+    def log(d, it, img=None, train_img=None, seq_img=None):
+        imgs = {k: v for k, v in (("maps", img), ("train_maps", train_img), ("sequence", seq_img)) if v is not None}
         if wb:
             d = {**d, "ref/constant": ref["constant"], "ref/per_pixel": ref["per_pixel"]}
             d.update({f"{mode}/{k}": wandb.Image(v) for k, v in imgs.items()})
@@ -229,7 +229,7 @@ def main():
                 f"{mode}/grad_norm": gn, **{f"{mode}/rate/{k}": float(r) for k, r in rates.items()}}
         if pg:  # pre-clip gradient norm of every parameter: which one dominates the total
             scal.update({f"grad/{n}": g for n, g in pg.items()})
-        img = train_img = None
+        img = train_img = seq_img = None
         if a.generalize and (it % a.val_every == 0 or it == iters):
             model.eval()
             with torch.no_grad():
@@ -244,6 +244,11 @@ def main():
             scal.update({f"{mode}/val_ttc": v, f"{mode}/best": best,
                          **{f"{mode}/val_rate/{k}": float(r) for k, r in vrates.items()}})
             img = maps_image(va, vd, vpred, cfg, va_valid)
+            fr = pick_frames(va["ttc"], va_valid)
+            if fr:                                   # events leading up to the nearest-contact frame shown
+                t_s, e_s, _ = fr[-1]
+                seq_img = event_sequence(va, t_s, e_s, vpred, eps,
+                                         ttc_name="speed/range" if cfg.data.target_map == "near" else "invTTC")
             print(f"  val ttc {v:.4f} (best {best:.4f})  train probe {pv:.4f}  vs per-pixel {ref['per_pixel']:.4f}, "
                   f"constant {ref['constant']:.4f}", flush=True)
         elif not a.generalize:
@@ -251,7 +256,7 @@ def main():
             if it % 250 == 0 or it == iters:
                 img = maps_image(b, d, pred, cfg)
         if it % 5 == 0 or it == 1 or img is not None:
-            log(scal, it, img, train_img)
+            log(scal, it, img, train_img, seq_img)
         if it % 25 == 0 or it == 1:
             r = "  ".join(f"{k} {float(x):.3f}" for k, x in rates.items())
             print(f"it {it:5d}  train ttc {train_ttc:.4f}  grad {gn:8.2f}  rates {r}  {time.time() - t_start:.0f}s",

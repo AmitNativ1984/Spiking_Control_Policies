@@ -118,6 +118,55 @@ def depth_image(b, d, eps, n_envs=4, rho_max=1.0, ttc=None, ttc_eps=0.05, ttc_sh
     return cv2.cvtColor(np.concatenate(rows, axis=0), cv2.COLOR_BGR2RGB)
 
 
+def event_sequence(b, t, e, ttc=None, ttc_eps=0.05, window_s=0.3, every=2, ttc_show=3.0, ttc_name="invTTC",
+                   per_row=6, panel=192, env_name=None):
+    """(H, W, 3) uint8 RGB: the event frames that lead up to one target map, oldest first, then
+    the target map at step t and (if ttc, the head's log output) the prediction.
+    Each event panel sums `every` consecutive 10 ms frames and is labelled by its age relative to t.
+    Frames before the drone's last reset (another episode, which the network never saw with
+    this state) are dimmed and tagged "prev ep". window_s ~ 0.3 s covers the conv (62 ms) and
+    memory (100 ms) membrane time constants a few times over."""
+    n = max(1, int(round(window_s / 0.01)) // every)
+    done = b["done"][:t + 1, e].bool().cpu()
+    resets = done.nonzero().flatten()
+    t_reset = int(resets[-1]) if len(resets) else 0          # first step of the current episode
+    small = lambda img: cv2.resize(img, (panel, panel), interpolation=cv2.INTER_NEAREST)
+    tiles = []
+    for i in range(n - 1, -1, -1):
+        t1 = t - i * every                                      # newest step in this panel
+        t0 = t1 - every + 1
+        if t1 < 0:
+            continue
+        ev = b["events"][max(t0, 0):t1 + 1, e].float().sum(0).cpu().numpy()
+        img = small(events_panel(ev))
+        old = t1 < t_reset
+        if old:
+            img = (img * 0.35).astype(np.uint8)
+        txt = f"{-(t - t1) * 10:d} ms" if every == 1 else f"{-(t - t0) * 10:d}..{-(t - t1) * 10:d} ms"
+        label(img, txt + ("  prev ep" if old else ""))
+        n_ev = int(ev.sum())
+        cv2.putText(img, f"{n_ev} ev", (6, panel - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1,
+                    cv2.LINE_AA)
+        tiles.append(img)
+    y = b["ttc"][t, e].float().cpu()
+    tiles.append(label(small(_cmap(y.numpy(), ttc_show, cv2.COLORMAP_MAGMA)), f"target {ttc_name} t=0"))
+    if ttc is not None:
+        lp = ttc[t, e].float().cpu()
+        tiles.append(label(small(_cmap((lp.exp() - ttc_eps).clamp(min=0.0).numpy(), ttc_show,
+                                       cv2.COLORMAP_MAGMA)), "predicted"))
+    while len(tiles) % per_row:
+        tiles.append(np.zeros_like(tiles[0]))
+    rows = [np.concatenate(tiles[i:i + per_row], axis=1) for i in range(0, len(tiles), per_row)]
+    img = np.concatenate(rows, axis=0)
+    flat = y.flatten()
+    bar = np.zeros((26, img.shape[1], 3), np.uint8)
+    cv2.putText(bar, f"env {e if env_name is None else env_name}  t {t / 100:.2f}s  episode age {(t - t_reset) / 100:.2f}s  "
+                f"target p98 {float(flat.kthvalue(max(1, int(round(0.98 * flat.numel())))).values):.2f}/s  "
+                f"(0-{ttc_show:g}/s; events summed over {every * 10} ms per panel)",
+                (6, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+    return cv2.cvtColor(np.concatenate([bar, img], axis=0), cv2.COLOR_BGR2RGB)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("checkpoint")
