@@ -3,7 +3,8 @@
 It answers one question: can the target map be read from these events at all? By default it sees
 only the events; with imu=True also the last K steps of [acc, gyro, grav] (the gyro tells image
 motion from rotation apart from motion toward obstacles). It has no spiking neurons and no state other than the frame history, and
-a U-Net with a wide-context middle, so it is not limited by receptive field or by rate coding.
+an encoder -> 8x8 wide-context middle -> decoder with no skip connections, so everything reaches the
+map through the same 8x8 grid as in the SNN; it is not limited by receptive field or by rate coding.
 If it cannot draw obstacles either, the problem is the data, target or loss, not the SNN.
 
 Drop-in for EventSNN in event_snn.overfit (`--baseline`): same unroll() signature and outputs.
@@ -42,8 +43,9 @@ class StackedEventCNN(nn.Module):
             self.imu_fc = nn.Sequential(nn.Linear(9 * k, 4 * w), nn.ReLU(inplace=True), nn.Linear(4 * w, 4 * w))
             self.register_buffer("imu_mid", torch.zeros(9))
             self.register_buffer("imu_half", torch.ones(9))
-        self.d2 = nn.Sequential(_block(4 * w + 2 * w, 2 * w), _block(2 * w, 2 * w))  # 16x16, skip e2
-        self.d1 = nn.Sequential(_block(2 * w + w, w), _block(w, w))                  # 32x32, skip e1
+        # decoder reads only the 8x8 middle (no skip connections), as the SNN's decoder reads only its 8x8 memory
+        self.d2 = nn.Sequential(_block(4 * w, 2 * w), _block(2 * w, 2 * w))          # 16x16
+        self.d1 = nn.Sequential(_block(2 * w, w), _block(w, w))                      # 32x32
         self.out = nn.Conv2d(w, 1, 1)
 
     @torch.no_grad()
@@ -71,9 +73,9 @@ class StackedEventCNN(nn.Module):
         if imu is not None:
             h3 = h3 + self.imu_fc(imu)[:, :, None, None]
         u = F.interpolate(h3, scale_factor=2, mode="nearest")
-        u = self.d2(torch.cat([u, h2], 1))
+        u = self.d2(u)
         u = F.interpolate(u, scale_factor=2, mode="nearest")
-        u = self.d1(torch.cat([u, h1], 1))
+        u = self.d1(u)
         return self.out(u)[:, 0]
 
     def unroll(self, events, state_in, done, st, grad_decay=1.0, record=None, extras=None):
