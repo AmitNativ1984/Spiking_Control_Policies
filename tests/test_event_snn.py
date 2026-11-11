@@ -610,3 +610,54 @@ def test_rate_twin_has_the_same_structure_and_continuous_outputs():
     assert rate_m.conv1.weight.grad is not None and float(rate_m.conv1.weight.grad.abs().sum()) > 0
     s1 = rate_m.lif1(rate_m.conv1(ev[0].float() * 3), torch.zeros(B, 16, 32, 32))[0]
     assert ((s1 > 0) & (s1 != 1)).any()                     # rates, not spikes
+
+
+def test_e2e_event_stack_gae_and_ppo_update():
+    from event_snn.e2e_policy import EventPolicy, EventStack, ReturnScale, gae, ppo_update
+    torch.manual_seed(0)
+    # event stack: signed frames, oldest first; a finished episode is wiped and its last tick dropped
+    N = 2
+    st = EventStack(N, "cpu")
+    ev = torch.zeros((N, 2, 64, 64), dtype=torch.uint8)
+    ev[:, 0, 0, 0], ev[:, 1, 1, 1] = 2, 3
+    none = torch.zeros(N, dtype=torch.bool)
+    st.add(ev, none)
+    st.add(ev, none)
+    f1 = st.roll()
+    assert f1.dtype == torch.int8 and f1.shape == (N, 3, 64, 64)
+    assert f1[0, -1, 0, 0] == 4 and f1[0, -1, 1, 1] == -6 and not f1[:, :-1].any()
+    st.add(ev, torch.tensor([False, True]))
+    f2 = st.roll()
+    assert f2[0, -1, 0, 0] == 2 and f2[0, -2, 0, 0] == 4      # env 0: history kept
+    assert not f2[1].any()                                   # env 1: new episode, nothing carried
+    # GAE against a hand computation, with an episode end in the middle
+    rew = torch.tensor([[1.0], [1.0], [1.0]])
+    val = torch.tensor([[0.5], [0.5], [0.5]])
+    done = torch.tensor([[False], [True], [False]])
+    adv, ret = gae(rew, val, done, torch.tensor([2.0]), gamma=0.9, lam=0.5)
+    d2 = 1.0 + 0.9 * 2.0 - 0.5
+    d1 = 1.0 - 0.5
+    d0 = 1.0 + 0.9 * 0.5 - 0.5
+    assert torch.allclose(adv[:, 0], torch.tensor([d0 + 0.45 * d1, d1, d2]), atol=1e-6)
+    assert torch.allclose(ret, adv + val)
+    # policy shapes, parameter count near the paper's 1.12 M, and one PPO update changes the weights
+    pol = EventPolicy()
+    n_par = sum(q.numel() for q in pol.parameters())
+    assert 0.9e6 < n_par < 1.5e6
+    B = 64
+    frames = torch.randint(-5, 6, (B, 3, 64, 64), dtype=torch.int8)
+    state = torch.randn(B, 17)
+    pol.state_norm.update(state)
+    act, logp, v = pol.act(frames, state)
+    assert act.shape == (B, 4) and logp.shape == (B,) and v.shape == (B,)
+    mu_det = pol.act(frames, state, deterministic=True)[0]
+    assert torch.allclose(mu_det, pol(frames, state)[0])
+    opt = torch.optim.Adam(pol.parameters(), lr=3e-4)
+    before = pol.mu.weight.clone()
+    stats = ppo_update(pol, opt, dict(frames=frames, state=state, act=act, logp=logp,
+                                      adv=torch.randn(B), ret=torch.randn(B)), epochs=2, minibatches=4)
+    assert not torch.equal(before, pol.mu.weight) and all(math.isfinite(x) for x in stats.values())
+    # reward scaling keeps the sign and is finite from the first call
+    rs = ReturnScale(4, "cpu")
+    r = rs(torch.tensor([1.0, -2.0, 0.0, 3.0]), torch.zeros(4, dtype=torch.bool))
+    assert torch.isfinite(r).all() and r[0] > 0 > r[1]

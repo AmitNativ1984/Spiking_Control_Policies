@@ -7,6 +7,7 @@ out_dir: runs/event_snn
 sim:
   num_envs: 8
   curriculum_level: 20
+  curriculum_free: false      # true: the task's own success-driven curriculum from level 0 (e2e_ppo training)
   episode_seconds: 24.0       # teacher was trained with 800 steps x 30 ms
   teacher_checkpoint: runs/f450_nav_ann/f450_nav_lat_pfov/2026-10-07_13-37-08/nn/f450_nav_lat_pfov.pth
   teacher_every: 3            # teacher acts every 3rd 10 ms step (~33 Hz), action held between

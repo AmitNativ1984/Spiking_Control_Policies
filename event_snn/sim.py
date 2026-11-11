@@ -68,7 +68,11 @@ def register(cfg):
     env_cfg.env.num_physics_steps_per_env_step_std = 0
 
     level = int(cfg.sim.curriculum_level)
-    curriculum = type("curriculum", (F450NavTaskConfig.curriculum,), dict(min_level=level, max_level=level))
+    if getattr(cfg.sim, "curriculum_free", False):
+        # end-to-end RL (event_snn.e2e_ppo): the task's own curriculum, from its first level upward
+        curriculum = F450NavTaskConfig.curriculum
+    else:
+        curriculum = type("curriculum", (F450NavTaskConfig.curriculum,), dict(min_level=level, max_level=level))
     task = type("EventSNNTaskConfig", (F450NavTaskConfig,), dict(
         robot_name=ROBOT, episode_len_steps=steps(cfg.sim.episode_seconds), curriculum=curriculum,
     ))
