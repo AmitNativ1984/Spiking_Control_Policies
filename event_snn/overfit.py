@@ -182,6 +182,8 @@ def main():
         loss, logs, rates, d, pred = run(model, b, cfg, burn)
         opt.zero_grad(set_to_none=True)
         loss.backward()
+        pg = {n: float(q.grad.norm()) for n, q in model.named_parameters() if q.grad is not None} \
+            if (it % 5 == 0 or it == 1) else None
         gn = float(torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.train.grad_clip))
         opt.step()
         train_ttc = float(logs["ttc"])
@@ -189,6 +191,8 @@ def main():
             best = min(best, train_ttc)
         scal = {f"{mode}/train_ttc": train_ttc, f"{mode}/rate_reg": float(logs["rate_reg"]),
                 f"{mode}/grad_norm": gn, **{f"{mode}/rate/{k}": float(r) for k, r in rates.items()}}
+        if pg:  # pre-clip gradient norm of every parameter: which one dominates the total
+            scal.update({f"grad/{n}": g for n, g in pg.items()})
         img = None
         if a.generalize and (it % a.val_every == 0 or it == iters):
             model.eval()
@@ -212,6 +216,9 @@ def main():
             r = "  ".join(f"{k} {float(x):.3f}" for k, x in rates.items())
             print(f"it {it:5d}  train ttc {train_ttc:.4f}  grad {gn:8.2f}  rates {r}  {time.time() - t_start:.0f}s",
                   flush=True)
+            top = sorted(pg.items(), key=lambda kv: -kv[1])[:3]
+            print("           top grads: " + "  ".join(f"{n} {g:.3g} ({100 * g * g / max(gn * gn, 1e-30):.0f}%)"
+                                               for n, g in top), flush=True)
 
     pp = ref["per_pixel"]
     if a.generalize:
