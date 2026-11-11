@@ -26,7 +26,7 @@ VARIANTS = {
     # Scale-free study: conv3 -> flatten -> concat inertial spikes -> 128 recurrent adaptive-LIF
     # neurons (memory and policy interface in one) -> decoder. Loss on one map only.
     **{f"mb_{t}_{d}": {"model": {**_A_REC, "bottleneck": 128, "ttc_head": True, "memory": "bottleneck",
-                                 "vel_head": False, "decoder": {"snn": "spiking", "ann": "ann"}[d]},
+                                 "vel_head": False, "depth_head": False, "decoder": {"snn": "spiking", "ann": "ann"}[d]},
                        "loss": {"lambda_d": 0.0, "lambda_ttc": 1.0, "lambda_v": 0.0, "lambda_s": 0.1},
                        "data": {"target_map": t}}
        for t in ("ttc", "near") for d in ("snn", "ann")},

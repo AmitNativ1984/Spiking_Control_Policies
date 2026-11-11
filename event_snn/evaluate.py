@@ -383,7 +383,7 @@ def evaluate(ckpt, heldout=None, out_dir=None, device=None):
         m["action_probe"] = action_probe(base, H)
     if "ttc" in H:
         te = cfg.data.ttc_eps
-        if "geom" in H["meta"]:
+        if "geom" in H["meta"] and model.depth_head and model.vel_head:
             m["ttc_derived"] = ttc_errors(derived_ttc(base, H, eps, te), H, te, valid)
         if "ttc" in base:
             m["ttc"] = ttc_errors(base["ttc"], H, te, valid)

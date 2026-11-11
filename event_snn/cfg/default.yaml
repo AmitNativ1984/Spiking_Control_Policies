@@ -76,6 +76,7 @@ model:
   ttc_head: false              # second decoder channel: log(invTTC + eps)
   memory: grid                 # grid: adaptive LIF on the 8x8 grid | bottleneck: conv3 -> flatten ->
                                # concat inertial spikes -> recurrent adaptive-LIF bottleneck (the memory)
+  depth_head: true             # inverse-depth output channel
   vel_head: true               # body-velocity output (needs metric scale from the IMU)
   decoder: spiking             # spiking: LIF + leaky readouts | ann: ReLU convs on a leaky spike trace
   # set by the variant

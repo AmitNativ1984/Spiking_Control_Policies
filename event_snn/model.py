@@ -237,7 +237,12 @@ class EventSNN(nn.Module):
             raise ValueError("decoder='ann' needs model.bottleneck > 0")
         self.spiking_layers = (("c1", "c2", "c3") + (("mem",) if self.memory_kind == "grid" else ())
                                + (("bn",) if nb else ()) + (("d1",) if self.decoder_kind == "spiking" else ()))
-        n_maps = 2 if self.ttc_head else 1
+        # decoder output channels: [inverse depth] [invTTC or speed/range map], each only if trained
+        self.depth_head = bool(getattr(cfg, "depth_head", True))
+        n_maps = int(self.depth_head) + int(self.ttc_head)
+        if n_maps == 0:
+            raise ValueError("the decoder needs model.depth_head or model.ttc_head")
+        self.n_maps, self.ttc_ch = n_maps, n_maps - 1
         self.deconv1 = nn.ConvTranspose2d(m, 32, 4, stride=2, padding=1)
         self.deconv2 = nn.ConvTranspose2d(32, n_maps, 4, stride=2, padding=1)
         if self.decoder_kind == "spiking":
@@ -268,7 +273,7 @@ class EventSNN(nn.Module):
         ms = (self.n_bottleneck,) if self.memory_kind == "bottleneck" else (m, 8, 8)
         st = dict(c1=z(c1, 32, 32), c2=z(c2, 16, 16), c3=z(c3, 8, 8),
                   mem_u=z(*ms), mem_b=z(*ms), mem_s=z(*ms),
-                  y_depth=z(2 if self.ttc_head else 1, 32, 32), y_vel=z(3))
+                  y_depth=z(self.n_maps, 32, 32), y_vel=z(3))
         if self.decoder_kind == "spiking":
             st["d1"] = z(32, 16, 16)
         else:
@@ -298,8 +303,8 @@ class EventSNN(nn.Module):
     def step(self, events, state_in, st, record=None):
         """events (B, 2, 64, 64) counts; state_in (B, 9) raw [acc, gyro, grav]. Returns
         (log(rho+eps) prediction (B, 32, 32), velocity (B, 3), new state, spikes per layer).
-        With ttc_head, log(invTTC+eps) is new_state["y_depth"][:, 1]. The policy interface is
-        spikes[self.interface]."""
+        With ttc_head, the log map is new_state["y_depth"][:, self.ttc_ch]; without depth_head the
+        depth prediction returned is zeros. The policy interface is spikes[self.interface]."""
         x = events.to(torch.float32)
         s1, m1 = self.lif1(self.conv1(x), st["c1"])
         s2, m2 = self.lif2(self.conv2(s1), st["c2"])
@@ -348,7 +353,8 @@ class EventSNN(nn.Module):
 
         if record is not None:
             record.step(mems, spikes)
-        return new["y_depth"][:, 0], new["y_vel"], new, spikes
+        depth = new["y_depth"][:, 0]
+        return (depth if self.depth_head else torch.zeros_like(depth)), new["y_vel"], new, spikes
 
     @property
     def interface(self):
@@ -378,7 +384,7 @@ class EventSNN(nn.Module):
             depth.append(d)
             vel.append(v)
             if self.ttc_head and extras is not None:
-                ttc.append(st["y_depth"][:, 1])
+                ttc.append(st["y_depth"][:, self.ttc_ch])
             for k, s in spikes.items():
                 rate_sum[k] = rate_sum[k] + s.mean()
         rates = {k: v / T for k, v in rate_sum.items()}

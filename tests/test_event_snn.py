@@ -423,6 +423,7 @@ def test_speed_over_range_sees_a_wall_the_drone_flies_along():
 def test_memory_bottleneck_architecture(variant):
     cfg, m = make_model(variant)
     assert m.interface == "bn" and not m.vel_head and not hasattr(m, "vel_fc")
+    assert not m.depth_head and m.deconv2.out_channels == 1 and m.init_state(1)["y_depth"].shape[1] == 1
     assert m.memory.ff.in_features == 64 * 64 + 90 and m.memory.ff.out_features == 128
     assert ("d1" in m.spiking_layers) == variant.endswith("snn") and "mem" not in m.spiking_layers
     assert cfg.data.target_map == ("near" if "near" in variant else "ttc") and cfg.loss.lambda_v == 0.0
@@ -431,6 +432,7 @@ def test_memory_bottleneck_architecture(variant):
     ex = {}
     d, v, s, rates = m.unroll(ev, st, done, m.init_state(B), extras=ex)
     assert ex["ttc"].shape == (T, B, 32, 32) and s["mem_s"].shape == (B, 128)
+    assert float(d.abs().max()) == 0.0
     assert float(v.abs().max()) == 0.0
     batch = dict(rho=torch.zeros((T, B, 32, 32), device=DEV), ttc=torch.rand((T, B, 32, 32), device=DEV) * 3,
                  vel=torch.zeros((T, B, 3), device=DEV), done=done)
