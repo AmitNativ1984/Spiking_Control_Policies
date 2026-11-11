@@ -145,6 +145,15 @@ def main():
         va = ablate(va, a.no_events, a.no_inertial, mean)
         va_valid = valid_mask(va["done"], burn).float()
         ref = ref_losses(va, va_valid, const.to(dev), pix.to(dev), eps, tmax)
+        # fixed training probe, scored and drawn like validation: is the net learning the events on data it
+        # trains on? (whole flights of the first training drones, as long as the validation flights)
+        Tp, Ep = min(tr["done"].shape[0], va["done"].shape[0]), min(Eall - a.train_envs, tr["done"].shape[1])
+        pr = {k: x[:Tp, :Ep].to(dev) for k, x in tr.items()}
+        pr["ttc"] = pr["ttc"].float()
+        if "rho" not in pr:
+            pr["rho"] = torch.zeros_like(pr["ttc"])
+        pr = ablate(pr, a.no_events, a.no_inertial, mean)
+        pr_valid = valid_mask(pr["done"], burn).float()
     else:
         tr = ablate(tr, a.no_events, a.no_inertial, mean)
         ref = ref_losses(tr, tr_valid.float(), const, pix, eps, tmax)
@@ -182,14 +191,14 @@ def main():
                         f"lr {a.lr}; references constant {ref['constant']:.3f}, per-pixel {ref['per_pixel']:.3f}")
         wb.summary.update({"ref/constant": ref["constant"], "ref/per_pixel": ref["per_pixel"]})
 
-    def log(d, it, img=None):
+    def log(d, it, img=None, train_img=None):
+        imgs = {k: v for k, v in (("maps", img), ("train_maps", train_img)) if v is not None}
         if wb:
             d = {**d, "ref/constant": ref["constant"], "ref/per_pixel": ref["per_pixel"]}
-            if img is not None:
-                d[f"{mode}/maps"] = wandb.Image(img)
+            d.update({f"{mode}/{k}": wandb.Image(v) for k, v in imgs.items()})
             wb.log(d, step=it)
-        if img is not None:
-            cv2.imwrite(os.path.join(out, f"maps_{it:05d}.png"), cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+        for k, v in imgs.items():
+            cv2.imwrite(os.path.join(out, f"{k}_{it:05d}.png"), cv2.cvtColor(v, cv2.COLOR_RGB2BGR))
 
     best, t_start = float("inf"), time.time()
     ar = torch.arange(T)
@@ -220,25 +229,29 @@ def main():
                 f"{mode}/grad_norm": gn, **{f"{mode}/rate/{k}": float(r) for k, r in rates.items()}}
         if pg:  # pre-clip gradient norm of every parameter: which one dominates the total
             scal.update({f"grad/{n}": g for n, g in pg.items()})
-        img = None
+        img = train_img = None
         if a.generalize and (it % a.val_every == 0 or it == iters):
             model.eval()
             with torch.no_grad():
                 _, vlogs, vrates, vd, vpred = run(model, va, cfg, burn)
+                _, plogs, _, pd, ppred = run(model, pr, cfg, burn)
             model.train()
+            pv = float(plogs["ttc"])
+            scal[f"{mode}/train_probe_ttc"] = pv
+            train_img = maps_image(pr, pd, ppred, cfg, pr_valid)
             v = float(vlogs["ttc"])
             best = min(best, v)
             scal.update({f"{mode}/val_ttc": v, f"{mode}/best": best,
                          **{f"{mode}/val_rate/{k}": float(r) for k, r in vrates.items()}})
             img = maps_image(va, vd, vpred, cfg, va_valid)
-            print(f"  val ttc {v:.4f} (best {best:.4f})  vs per-pixel {ref['per_pixel']:.4f}, "
+            print(f"  val ttc {v:.4f} (best {best:.4f})  train probe {pv:.4f}  vs per-pixel {ref['per_pixel']:.4f}, "
                   f"constant {ref['constant']:.4f}", flush=True)
         elif not a.generalize:
             scal[f"{mode}/best"] = best
             if it % 250 == 0 or it == iters:
                 img = maps_image(b, d, pred, cfg)
         if it % 5 == 0 or it == 1 or img is not None:
-            log(scal, it, img)
+            log(scal, it, img, train_img)
         if it % 25 == 0 or it == 1:
             r = "  ".join(f"{k} {float(x):.3f}" for k, x in rates.items())
             print(f"it {it:5d}  train ttc {train_ttc:.4f}  grad {gn:8.2f}  rates {r}  {time.time() - t_start:.0f}s",
