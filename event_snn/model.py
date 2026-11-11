@@ -21,7 +21,25 @@ STATE_INPUTS = {"acc": slice(0, 3), "gyro": slice(3, 6), "grav": slice(6, 9)}
 SPIKING_LAYERS = ("c1", "c2", "c3", "mem", "d1")  # + "bn" when model.bottleneck > 0: see EventSNN.spiking_layers
 
 
-def _leaky(channels, beta_init, spike_grad):
+class LeakyRate(nn.Module):
+    """Non-spiking twin of snn.Leaky(threshold=1, reset_mechanism="subtract"): the same membrane
+    U = beta*U + I - reset, but the output is the continuous rate relu(U - 1) instead of a spike,
+    and the reset subtracts that rate (detached, as snnTorch detaches its reset). For a constant
+    input I the output settles near I, as a spiking neuron's rate does."""
+
+    def __init__(self, shape, beta_init):
+        super().__init__()
+        self.beta = nn.Parameter(torch.full(shape, float(beta_init)))
+
+    def forward(self, x, mem):
+        r_prev = F.relu(mem - 1.0).detach()
+        mem = self.beta.clamp(0.0, 1.0) * mem + x - r_prev
+        return F.relu(mem - 1.0), mem
+
+
+def _leaky(channels, beta_init, spike_grad, spiking=True):
+    if not spiking:
+        return LeakyRate((channels, 1, 1), beta_init)
     return snn.Leaky(beta=torch.full((channels, 1, 1), beta_init), learn_beta=True, threshold=1.0,
                      spike_grad=spike_grad, reset_mechanism="subtract")
 
@@ -37,9 +55,9 @@ class PopEncoder(nn.Module):
     Bounds are measured on the student's own data (set_bounds) and stored as buffers.
     """
 
-    def __init__(self, n_in, pop_dim, threshold):
+    def __init__(self, n_in, pop_dim, threshold, spiking=True):
         super().__init__()
-        self.n_in, self.pop_dim, self.threshold = n_in, pop_dim, threshold
+        self.n_in, self.pop_dim, self.threshold, self.spiking = n_in, pop_dim, threshold, spiking
         self.register_buffer("means", torch.zeros(n_in, pop_dim))
         self.register_buffer("stds", torch.ones(n_in, pop_dim))
         self.register_buffer("lo", torch.full((n_in,), -1.0))
@@ -62,6 +80,8 @@ class PopEncoder(nn.Module):
     def forward(self, x, mem):
         x = torch.max(torch.min(x, self.hi), self.lo)
         a = torch.exp(-0.5 * ((x[..., None] - self.means) / self.stds) ** 2).flatten(1)
+        if not self.spiking:  # the IF neuron's rate: a / threshold spikes per step, at most one
+            return (a / self.threshold).clamp(max=1.0), mem
         mem = mem + a
         spk = (mem >= self.threshold).to(a.dtype)
         mem = (mem - spk * self.threshold).clamp(max=self.threshold)
@@ -201,14 +221,17 @@ class EventSNN(nn.Module):
             [torch.arange(9)[STATE_INPUTS[k]] for k in self.state_inputs]) if self.state_inputs
             else torch.zeros(0, dtype=torch.long))
 
-        sg = surrogate.atan(alpha=float(cfg.surrogate_alpha))
+        # model.spiking false: the same network with every spike replaced by a continuous rate
+        # (relu(U - threshold)); membranes, leaks, resets, adaptation and time constants unchanged
+        self.spiking = bool(getattr(cfg, "spiking", True))
+        sg = surrogate.atan(alpha=float(cfg.surrogate_alpha)) if self.spiking else F.relu
         c1, c2, c3 = cfg.conv_channels
         m = cfg.mem_channels
         self.conv1 = nn.Conv2d(2, c1, 5, stride=2, padding=2)
         self.conv2 = nn.Conv2d(c1, c2, 3, stride=2, padding=1)
         self.conv3 = nn.Conv2d(c2, c3, 3, stride=2, padding=1)
-        self.lif1, self.lif2, self.lif3 = (_leaky(c, cfg.beta_init, sg) for c in (c1, c2, c3))
-        self.encoder = PopEncoder(len(self.state_index), cfg.pop_dim, cfg.encoder_threshold) \
+        self.lif1, self.lif2, self.lif3 = (_leaky(c, cfg.beta_init, sg, self.spiking) for c in (c1, c2, c3))
+        self.encoder = PopEncoder(len(self.state_index), cfg.pop_dim, cfg.encoder_threshold, self.spiking) \
             if self.state_inputs else None
         n_pop = self.encoder.n_out if self.encoder is not None else 0
         self.n_bottleneck = int(getattr(cfg, "bottleneck", 0) or 0)
@@ -230,7 +253,8 @@ class EventSNN(nn.Module):
             if nb:
                 self.bn_fc = nn.Linear(m * 64, nb)
                 self.lif_bn = snn.Leaky(beta=torch.full((nb,), float(cfg.beta_init)), learn_beta=True,
-                                        threshold=1.0, spike_grad=sg, reset_mechanism="subtract")
+                                        threshold=1.0, spike_grad=sg, reset_mechanism="subtract") \
+                    if self.spiking else LeakyRate((nb,), cfg.beta_init)
         if nb:
             self.bn_expand = nn.Linear(nb, m * 64)
         self.spiking_layers = (("c1", "c2", "c3") + (("mem",) if self.memory_kind == "grid" else ())
@@ -244,7 +268,7 @@ class EventSNN(nn.Module):
         self.deconv1 = nn.ConvTranspose2d(m, 32, 4, stride=2, padding=1)
         self.deconv2 = nn.ConvTranspose2d(32, n_maps, 4, stride=2, padding=1)
         if self.decoder_kind == "spiking":
-            self.lif_d1 = _leaky(32, cfg.beta_init, sg)
+            self.lif_d1 = _leaky(32, cfg.beta_init, sg, self.spiking)
             self.depth_out = _readout((n_maps, 1, 1), cfg.readout_beta_init)
         else:
             # non-spiking decoder on a leaky trace of the interface spikes; no state of its own.

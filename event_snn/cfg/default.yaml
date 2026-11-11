@@ -69,6 +69,7 @@ model:
   adapt_strength: 0.5
   readout_beta_init: 0.8
   surrogate_alpha: 2.0
+  spiking: true                # false: identical network, every spike replaced by a continuous rate relu(U - threshold)
   rec_init_scale: 0.1          # memory recurrent conv weights x this at init
   rec_max_gain: 0.5            # cap on its operator norm; null = no cap
   bottleneck: 0                # >0: spiking FC layer of this many neurons between memory and heads;

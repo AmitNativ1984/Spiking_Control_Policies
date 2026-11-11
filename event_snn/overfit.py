@@ -176,7 +176,8 @@ def main():
     opt = torch.optim.Adam(model.parameters(), lr=a.lr)
 
     mode = "generalize" if a.generalize else "overfit"
-    tag = ("_noev" if a.no_events else "") + ("_noimu" if a.no_inertial else "")
+    tag = ("_noev" if a.no_events else "") + ("_noimu" if a.no_inertial else "") \
+        + ("" if a.baseline or getattr(cfg.model, "spiking", True) else "_rate")
     net = f"cnn_k{a.k}{'_imu' if not a.baseline_events_only else ''}_{cfg.data.target_map}" if a.baseline else cfg.variant
     name = f"{mode}_{net}{tag}_{time.strftime('%Y%m%d_%H%M%S')}"
     out = a.out or os.path.join(cfg.out_dir, mode, name)

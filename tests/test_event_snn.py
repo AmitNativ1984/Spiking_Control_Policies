@@ -588,3 +588,25 @@ def test_stacked_cnn_baseline_with_imu():
         si2[:, :, 3:6] += 1.0                                # gyro changes the output
         net.unroll(ev, si2, done, net.init_state(B, "cpu"), extras=ex3)
         assert not torch.allclose(ex3["ttc"], ex["ttc"])
+
+
+def test_rate_twin_has_the_same_structure_and_continuous_outputs():
+    from event_snn.config import load_config
+    from event_snn.data import state_input
+    from event_snn.model import EventSNN, count_parameters
+    torch.manual_seed(0)
+    snn_m = EventSNN(load_config(variant="grid_ttc_ann").model)
+    rate_m = EventSNN(load_config(variant="grid_ttc_ann", overrides=["model.spiking=false"]).model)
+    assert count_parameters(snn_m) == count_parameters(rate_m)
+    assert [n for n, _ in snn_m.named_parameters()] == [n for n, _ in rate_m.named_parameters()]
+    T, B = 6, 2
+    ev = torch.randint(0, 4, (T, B, 2, 64, 64), dtype=torch.uint8)
+    si = torch.randn(T, B, 9)
+    done = torch.zeros((T, B), dtype=torch.bool)
+    rate_m.set_input_bounds(-torch.ones(9) * 3, torch.ones(9) * 3)
+    ex = {}
+    _, _, _, rates = rate_m.unroll(ev, si, done, rate_m.init_state(B), extras=ex)
+    ex["ttc"].sum().backward()
+    assert rate_m.conv1.weight.grad is not None and float(rate_m.conv1.weight.grad.abs().sum()) > 0
+    s1 = rate_m.lif1(rate_m.conv1(ev[0].float() * 3), torch.zeros(B, 16, 32, 32))[0]
+    assert ((s1 > 0) & (s1 != 1)).any()                     # rates, not spikes

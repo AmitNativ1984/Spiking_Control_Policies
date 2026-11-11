@@ -84,7 +84,7 @@ class WindowCurriculum:
 def train(cfg):
     torch.manual_seed(cfg.seed)
     dev = cfg.device
-    run_name = cfg.run_name or f"{cfg.variant}_{time.strftime('%Y%m%d_%H%M%S')}"
+    run_name = cfg.run_name or f"{cfg.variant}{'' if getattr(cfg.model, 'spiking', True) else '_rate'}_{time.strftime('%Y%m%d_%H%M%S')}"
     run_dir = os.path.join(cfg.out_dir, run_name)
     os.makedirs(run_dir, exist_ok=True)
     with open(os.path.join(run_dir, "config.yaml"), "w") as f:
