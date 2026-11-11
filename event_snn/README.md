@@ -10,7 +10,7 @@ inverse depth (32×32) and body velocity by supervised BPTT.
 | `sim.py` | Isaac Gym rollout at 100 Hz: teacher (~33 Hz, D435 depth resampled from the event camera) + perturbations, IMU bias walk, attitude noise, targets and masks; held-out writer |
 | `model.py` | `EventSNN`: 3 spiking convs → adaptive-LIF 8×8 memory (+ population-coded state) → depth / velocity leaky readouts |
 | `loss.py` | Whole-image log-inverse-depth L1 + scale-invariant term, velocity MSE, spike-rate regulariser, burn-in mask |
-| `train.py` | Fly a window, 2 BPTT passes in env mini-batches, carry detached state; window curriculum on validation plateau |
+| `train.py` | Fly a window, 2 BPTT passes in env mini-batches, carry detached state; window curriculum (0.3, 0.6, 1.0 s) on validation plateau |
 | `visualize.py` | Held-out flight video: events, target vs predicted 1/Z, error, cell weights, velocity |
 | `evaluate.py` | Held-out metrics, blackout, attitude sweep, regimes, linear probes, plots, `--compare` |
 

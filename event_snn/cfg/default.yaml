@@ -100,7 +100,7 @@ train:
   grad_clip: 1.0
   passes: 2
   minibatch_envs: 16
-  bptt_curriculum_s: [0.32, 1.28, 2.0]
+  bptt_curriculum_s: [0.3, 0.6, 1.0]   # 30, 60, 100 steps; the first 0.2 s of each window is burn-in
   bptt_grad_decay: 1.0        # 1.0 = off
   plateau_patience: 4         # validations without a 1% improvement before the window grows
   plateau_rel: 0.01
