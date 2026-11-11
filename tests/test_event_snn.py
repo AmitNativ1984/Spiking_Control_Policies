@@ -464,6 +464,27 @@ def test_memory_bottleneck_architecture(variant):
     assert not torch.equal(ec["ttc"], ex["ttc"])
 
 
+@pytest.mark.parametrize("variant", ["grid_ttc_snn", "grid_ttc_ann", "grid_near_ann"])
+def test_grid_memory_without_bottleneck(variant):
+    cfg, m = make_model(variant)
+    assert m.interface == "mem" and m.n_bottleneck == 0 and not hasattr(m, "bn_expand")
+    assert ("d1" in m.spiking_layers) == variant.endswith("snn") and "bn" not in m.spiking_layers
+    T, B = 12, 2
+    ev, st, done = random_batch(T, B, p_event=0.1)
+    s0 = m.init_state(B)
+    if variant.endswith("ann"):
+        assert s0["dec_tr"].shape == (B, cfg.model.mem_channels, 8, 8)
+    ex = {}
+    d, v, s, rates = m.unroll(ev, st, done, s0, extras=ex)
+    assert ex["ttc"].shape == (T, B, 32, 32) and s["mem_s"].shape == (B, cfg.model.mem_channels, 8, 8)
+    batch = dict(rho=torch.zeros((T, B, 32, 32), device=DEV), ttc=torch.rand((T, B, 32, 32), device=DEV) * 3,
+                 vel=torch.zeros((T, B, 3), device=DEV), done=done)
+    loss, logs = depth_velocity_loss(d, v, rates, batch, cfg.loss, cfg.data.inv_depth_eps, 2,
+                                     ex["ttc"], cfg.data.ttc_eps, cfg.data.ttc_max)
+    loss.backward()
+    assert m.conv1.weight.grad.abs().sum() > 0 and float(logs["ttc"]) > 0
+
+
 def test_tiny_overfit_memory_bottleneck_ann_decoder():
     cfg, m = make_model("mb_near_ann")
     T, B = 40, 2

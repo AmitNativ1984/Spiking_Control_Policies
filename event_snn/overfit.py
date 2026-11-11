@@ -11,6 +11,7 @@ Generalise (--generalize): train on random windows of held-out drones 0..train_e
 validate on the remaining drones' whole flights, which the network never sees.
     python -m event_snn.overfit --generalize --variant mb_ttc_ann --wandb
     python -m event_snn.overfit --generalize --variant mb_ttc_ann --no_inertial --wandb
+    python -m event_snn.overfit --generalize --variant grid_ttc_ann --wandb     # no bottleneck: 8x8 grid
 Memorising (drone identity, time since start) does not help here, so the validation error
 below the per-pixel reference is what the inputs genuinely predict.
 

@@ -233,8 +233,6 @@ class EventSNN(nn.Module):
                                         threshold=1.0, spike_grad=sg, reset_mechanism="subtract")
         if nb:
             self.bn_expand = nn.Linear(nb, m * 64)
-        elif self.decoder_kind == "ann":
-            raise ValueError("decoder='ann' needs model.bottleneck > 0")
         self.spiking_layers = (("c1", "c2", "c3") + (("mem",) if self.memory_kind == "grid" else ())
                                + (("bn",) if nb else ()) + (("d1",) if self.decoder_kind == "spiking" else ()))
         # decoder output channels: [inverse depth] [invTTC or speed/range map], each only if trained
@@ -249,8 +247,9 @@ class EventSNN(nn.Module):
             self.lif_d1 = _leaky(32, cfg.beta_init, sg)
             self.depth_out = _readout((n_maps, 1, 1), cfg.readout_beta_init)
         else:
-            # non-spiking decoder on a leaky trace of the interface spikes; no state of its own
-            self.dec_trace = _readout((nb,), cfg.readout_beta_init)
+            # non-spiking decoder on a leaky trace of the interface spikes; no state of its own.
+            # Without a bottleneck it reads the 8x8 memory grid's spikes directly (one beta per channel).
+            self.dec_trace = _readout((nb,) if nb else (m, 1, 1), cfg.readout_beta_init)
         self.vel_head = bool(getattr(cfg, "vel_head", True))
         if self.vel_head:
             self.vel_fc = nn.Linear(nb or m, 3)
@@ -277,7 +276,7 @@ class EventSNN(nn.Module):
         if self.decoder_kind == "spiking":
             st["d1"] = z(32, 16, 16)
         else:
-            st["dec_tr"] = z(self.n_bottleneck)
+            st["dec_tr"] = z(self.n_bottleneck) if self.n_bottleneck else z(m, 8, 8)
         if self.n_bottleneck and self.memory_kind == "grid":
             st["bn"] = z(self.n_bottleneck)
         if self.encoder is not None:
@@ -343,8 +342,12 @@ class EventSNN(nn.Module):
             _, new["y_depth"] = self.depth_out(self.deconv2(sd), st["y_depth"])
             spikes["d1"], mems["d1"] = sd, (md, 1.0)
         else:
-            _, new["dec_tr"] = self.dec_trace(sb, st["dec_tr"])
-            h = F.relu(self.bn_expand(new["dec_tr"])).view(grid)
+            if sb is not None:
+                _, new["dec_tr"] = self.dec_trace(sb, st["dec_tr"])
+                h = F.relu(self.bn_expand(new["dec_tr"])).view(grid)
+            else:  # grid memory, no bottleneck: the trace keeps the 8x8 layout
+                _, new["dec_tr"] = self.dec_trace(sm, st["dec_tr"])
+                h = new["dec_tr"]
             new["y_depth"] = self.deconv2(F.relu(self.deconv1(h)))
         if self.vel_head:
             _, new["y_vel"] = self.vel_out(self.vel_fc(vel_in), st["y_vel"])

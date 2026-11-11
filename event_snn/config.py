@@ -30,6 +30,14 @@ VARIANTS = {
                        "loss": {"lambda_d": 0.0, "lambda_ttc": 1.0, "lambda_v": 0.0, "lambda_s": 0.1},
                        "data": {"target_map": t}}
        for t in ("ttc", "near") for d in ("snn", "ann")},
+    # Spatial control for the scale-free study: conv3 + inertial spikes -> 8x8 conv-recurrent
+    # adaptive-LIF memory grid -> decoder, no 128-neuron bottleneck. The ann decoder reads a leaky
+    # trace of the grid's spikes, so only the bottleneck differs from mb_*.
+    **{f"grid_{t}_{d}": {"model": {**_A_REC, "bottleneck": 0, "ttc_head": True, "memory": "grid",
+                                   "vel_head": False, "depth_head": False, "decoder": {"snn": "spiking", "ann": "ann"}[d]},
+                         "loss": {"lambda_d": 0.0, "lambda_ttc": 1.0, "lambda_v": 0.0, "lambda_s": 0.1},
+                         "data": {"target_map": t}}
+       for t in ("ttc", "near") for d in ("snn", "ann")},
 }
 
 
