@@ -51,6 +51,39 @@ def label(img, text):
     return img
 
 
+
+def depth_image(b, d, eps, n_envs=4, rho_max=1.0, ttc=None, ttc_eps=0.05, ttc_show=3.0, depth=True,
+                ttc_name="invTTC"):
+    """(H, W, 3) uint8 RGB: one row per held-out env at the last validation step:
+    events | target 1/Z | predicted 1/Z | |log error| (0-2) | target invTTC | predicted invTTC (0-3 /s).
+    The depth panels are dropped when depth is not trained, the invTTC panels when there is no head."""
+    t = d.shape[0] - 1
+    rho = b["rho"][t].cpu()
+    pred = d[t].float().cpu()
+    rho_hat = (pred.exp() - eps).clamp(min=0.0)
+    err = (pred - log_rho(rho, eps)).abs()
+    if ttc is not None:
+        ttc_true = b["ttc"][t].float().cpu()
+        ttc_hat = (ttc[t].float().cpu().exp() - ttc_eps).clamp(min=0.0)
+    rows = []
+    for e in range(min(n_envs, d.shape[1])):
+        panels, names = [events_panel(b["events"][t, e].cpu().numpy())], ["events"]
+        if depth:
+            panels += [_cmap(rho[e].numpy(), rho_max, cv2.COLORMAP_VIRIDIS),
+                       _cmap(rho_hat[e].numpy(), rho_max, cv2.COLORMAP_VIRIDIS),
+                       _cmap(err[e].numpy(), 2.0, cv2.COLORMAP_INFERNO)]
+            names += ["target 1/Z", "predicted 1/Z", "|log err| (0-2)"]
+        if ttc is not None:
+            panels += [_cmap(ttc_true[e].numpy(), ttc_show, cv2.COLORMAP_MAGMA),
+                       _cmap(ttc_hat[e].numpy(), ttc_show, cv2.COLORMAP_MAGMA)]
+            names += [f"target {ttc_name}", f"predicted {ttc_name}"]
+        if e == 0:
+            for img, text in zip(panels, names):
+                label(img, text)
+        rows.append(np.concatenate(panels, axis=1))
+    return cv2.cvtColor(np.concatenate(rows, axis=0), cv2.COLOR_BGR2RGB)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("checkpoint")

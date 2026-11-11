@@ -24,7 +24,7 @@ from .config import heldout_path, load_config, steps, to_dict
 from .data import select_target, state_input
 from .loss import depth_velocity_loss, ttc_loss, valid_mask
 from .model import EventSNN, count_parameters
-from .train import depth_image
+from .visualize import depth_image
 
 KEYS = ("events", "imu", "grav", "rho", "ttc", "vel", "done")
 
