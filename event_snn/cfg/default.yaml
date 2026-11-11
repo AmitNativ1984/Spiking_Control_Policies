@@ -100,7 +100,7 @@ train:
   grad_clip: 1.0
   passes: 2
   minibatch_envs: 16
-  bptt_curriculum_s: [0.3, 0.6, 1.0]   # 30, 60, 100 steps; every step is supervised except after a reset
+  bptt_curriculum_s: [0.6, 1.0]        # 60, 100 steps; every step is supervised except after a reset
   bptt_grad_decay: 1.0        # 1.0 = off
   plateau_patience: 4         # validations without a 1% improvement before the window grows
   plateau_rel: 0.01
