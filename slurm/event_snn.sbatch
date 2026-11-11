@@ -17,7 +17,8 @@
 #   MODE=heldout sbatch slurm/event_snn.sbatch       # fixed evaluation flights (once per level/seed)
 #   MODE=train VARIANT=bn_both SEED=0 sbatch slurm/event_snn.sbatch
 #   MODE=eval  CKPT=runs/event_snn/<run>/best.pt sbatch slurm/event_snn.sbatch
-#   MODE=overfit VARIANT=mb_ttc_ann sbatch --time=0:30:00 slurm/event_snn.sbatch   # with and without events
+#   MODE=overfit VARIANT=mb_ttc_ann sbatch --time=0:45:00 slurm/event_snn.sbatch   # all inputs / no events / no inertial
+#   MODE=generalize VARIANT=mb_ttc_ann sbatch --time=1:30:00 slurm/event_snn.sbatch
 #
 # NUM_ENVS (default 64) and SET="key=value ..." (dotted overrides, see event_snn/cfg/default.yaml)
 # apply to check / heldout / train. A train run evaluates its best checkpoint when it ends.
@@ -49,8 +50,11 @@ case "${MODE}" in
                 && python -m event_snn.evaluate runs/event_snn/${RUN_NAME}/best.pt" ;;
   eval)    [[ -n "${CKPT}" ]] || { echo "MODE=eval needs CKPT" >&2; exit 1; }
            CMD="python -m event_snn.evaluate ${CKPT}" ;;
-  overfit) CMD="python -m event_snn.overfit --variant ${VARIANT} --wandb --set ${SET} \
-                && python -m event_snn.overfit --variant ${VARIANT} --no_events --wandb --set ${SET}" ;;
+  overfit|generalize)
+           G=""; [[ "${MODE}" == generalize ]] && G="--generalize"
+           CMD="python -m event_snn.overfit ${G} --variant ${VARIANT} --wandb --set ${SET} \
+                ; python -m event_snn.overfit ${G} --variant ${VARIANT} --no_events --wandb --set ${SET} \
+                ; python -m event_snn.overfit ${G} --variant ${VARIANT} --no_inertial --wandb --set ${SET}" ;;
   *) echo "unknown MODE=${MODE}" >&2; exit 1 ;;
 esac
 
