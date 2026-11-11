@@ -8,6 +8,8 @@ camera's own z-depth (same pose, pinhole -> pinhole, nearest), encoded by its fr
 CLI:
     python -m event_snn.sim --check_teacher [--seconds 60]     teacher-only flight report
     python -m event_snn.sim --heldout                          write the held-out set
+    python -m event_snn.sim --record runs/event_snn/train_s1000.pt --envs 16 --seconds 120 --seed 1000
+                                                               record a training set (offline tests)
 """
 import isaacgym  # noqa: F401  -- must precede torch
 
@@ -336,6 +338,39 @@ def write_heldout(cfg, rollout=None):
     return path
 
 
+RECORD_KEYS = ("events", "imu", "grav", "ttc", "near", "vel", "done")
+
+
+def record_dataset(cfg, path, num_envs, seconds, seed, chunk_s=5.0):
+    """Training flights for the offline tests (event_snn.overfit --train_data): num_envs drones
+    for `seconds`, collected in chunks and moved to CPU as they come, so a long recording fits in
+    GPU memory. Maps are stored as float16; inverse depth is not stored (no depth head is trained).
+    About 12 KB per drone-step: 16 drones x 120 s = 2.4 GB."""
+    torch.manual_seed(seed)
+    ro = Rollout(cfg, num_envs=num_envs, seed=seed)
+    T, C = steps(seconds), steps(chunk_s)
+    parts, t0, done_steps = [], time.time(), 0
+    while done_steps < T:
+        n = min(C, T - done_steps)
+        ch = ro.collect(n, keys=RECORD_KEYS)
+        part = {k: v.cpu() for k, v in ch.items()}
+        for k in ("ttc", "near"):
+            part[k] = part[k].half()
+        parts.append(part)
+        done_steps += n
+        rate = done_steps * num_envs / (time.time() - t0)
+        print(f"  {done_steps / 100:6.1f} / {T / 100:.0f} s  ({rate:.0f} drone-steps/s, "
+              f"{(T - done_steps) * num_envs / rate / 60:.1f} min left)", flush=True)
+    out = {k: torch.cat([q[k] for q in parts]) for k in RECORD_KEYS}
+    out["meta"] = dict(level=cfg.sim.curriculum_level, seed=seed, dt=0.01, kind="train", far_m=ro.far_m)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    torch.save(out, path)
+    gb = sum(v.numel() * v.element_size() for k, v in out.items() if k != "meta") / 1e9
+    print(f"wrote training set {path}: {num_envs} drones x {T} steps, {int(out['done'].sum())} episode starts, "
+          f"{gb:.2f} GB")
+    return path
+
+
 def check_teacher(cfg, seconds):
     cfg.perturb.rate_hz = 0.0
     ro = Rollout(cfg)
@@ -385,15 +420,22 @@ def main():
     p.add_argument("--set", nargs="*", default=[], help="dotted overrides, e.g. sim.num_envs=32")
     p.add_argument("--check_teacher", action="store_true")
     p.add_argument("--heldout", action="store_true")
-    p.add_argument("--seconds", type=float, default=30.0)
+    p.add_argument("--seconds", type=float, default=30.0, help="check_teacher / record length")
+    p.add_argument("--record", default=None, metavar="PATH", help="record a training set to PATH")
+    p.add_argument("--envs", type=int, default=16, help="record: drones")
+    p.add_argument("--seed", type=int, default=1000, help="record: seed (use a new one per file; held-out is 12345)")
     a = p.parse_args()
     cfg = load_config(a.config, overrides=a.set)
     if a.check_teacher:
         check_teacher(cfg, a.seconds)
     elif a.heldout:
         write_heldout(cfg)
+    elif a.record:
+        if a.seed == cfg.data.heldout_seed:
+            p.error("--seed equals the held-out seed: the training flights would be the validation flights")
+        record_dataset(cfg, a.record, a.envs, a.seconds, a.seed)
     else:
-        p.error("pick --check_teacher or --heldout")
+        p.error("pick --check_teacher, --heldout or --record PATH")
 
 
 if __name__ == "__main__":

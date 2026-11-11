@@ -11,6 +11,7 @@ Generalise (--generalize): train on random windows of held-out drones 0..train_e
 validate on the remaining drones' whole flights, which the network never sees.
     python -m event_snn.overfit --generalize --variant mb_ttc_ann --wandb
     python -m event_snn.overfit --generalize --variant mb_ttc_ann --no_inertial --wandb
+    python -m event_snn.overfit --generalize --variant grid_ttc_ann --train_data runs/event_snn/train_s1000.pt --wandb
     python -m event_snn.overfit --generalize --variant grid_ttc_ann --wandb     # no bottleneck: 8x8 grid
 Memorising (drone identity, time since start) does not help here, so the validation error
 below the per-pixel reference is what the inputs genuinely predict.
@@ -49,10 +50,13 @@ def ablate(b, no_events, no_inertial, inertial_mean=None):
     return b
 
 
-def median_maps(b, valid, eps):
-    y = torch.log(b["ttc"] + eps)                                      # (T, E, H, W)
-    m = valid.bool()
-    return y[m].median(), y[m].median(dim=0).values
+def median_maps(b, valid, eps, max_frames=20000):
+    """Median log target (scalar) and per cell (H, W) over valid frames (a random subset if many)."""
+    idx = valid.bool().nonzero()
+    if len(idx) > max_frames:
+        idx = idx[torch.randperm(len(idx), generator=torch.Generator().manual_seed(0))[:max_frames]]
+    y = torch.log(b["ttc"][idx[:, 0], idx[:, 1]].float() + eps)         # (N, H, W)
+    return y.median(), y.median(dim=0).values
 
 
 def ref_losses(b, valid, const, pix, eps, ttc_max):
@@ -88,6 +92,10 @@ def main():
     p.add_argument("--generalize", action="store_true", help="train on some drones, validate on the others")
     p.add_argument("--envs", type=int, default=4, help="overfit: drones in the clip")
     p.add_argument("--train_envs", type=int, default=8, help="generalize: drones 0..n-1 train, the rest validate")
+    p.add_argument("--batch_envs", type=int, default=8, help="generalize: drones (random windows) per iteration")
+    p.add_argument("--train_data", nargs="+", default=None, metavar="PATH",
+                   help="generalize: train on these recorded sets (event_snn.sim --record) instead of held-out "
+                        "drones 0..train_envs-1; validation stays on held-out drones train_envs..")
     p.add_argument("--seconds", type=float, default=1.0, help="clip (overfit) or window (generalize) length")
     p.add_argument("--start_s", type=float, default=2.0, help="overfit: clip start inside the flights")
     p.add_argument("--iterations", type=int, default=None, help="default 1500 overfit, 3000 generalize")
@@ -113,8 +121,16 @@ def main():
     if a.generalize:
         if not 0 < a.train_envs < Eall:
             raise SystemExit(f"--train_envs must be in 1..{Eall - 1}")
-        tr = {k: x[:, :a.train_envs] for k, x in H.items()}
         va = {k: x[:, a.train_envs:].to(dev) for k, x in H.items()}
+        if a.train_data:
+            sets = [select_target(torch.load(f), cfg.data.target_map) for f in a.train_data]
+            Tmin = min(d["done"].shape[0] for d in sets)
+            tr = {k: torch.cat([d[k][:Tmin] for d in sets], dim=1) for k in KEYS if k != "rho" and k in sets[0]}
+            print(f"training set: {', '.join(a.train_data)} -> {tr['done'].shape[1]} drones x {Tmin / 100:.0f} s "
+                  f"({tr['done'].shape[1] * Tmin / 100 / 60:.0f} min of flight)")
+        else:
+            tr = {k: x[:, :a.train_envs] for k, x in H.items()}
+        Ttot = tr["done"].shape[0]
         src = tr
     else:
         t0 = steps(a.start_s)
@@ -146,7 +162,10 @@ def main():
     inputs = "events only" if a.no_inertial and not a.no_events else "inertial only" if a.no_events and not a.no_inertial \
         else "NO inputs" if a.no_events else "events + inertial"
     if a.generalize:
-        what = (f"train drones 0-{a.train_envs - 1} ({Ttot / 100:.0f} s each, random {a.seconds} s windows), "
+        src_txt = (f"recorded {', '.join(os.path.basename(f) for f in a.train_data)} ({tr['done'].shape[1]} drones"
+                   if a.train_data else f"drones 0-{a.train_envs - 1} ({a.train_envs} drones")
+        what = (f"train {src_txt}, {Ttot / 100:.0f} s each, {min(a.batch_envs, tr['done'].shape[1])} random "
+                f"{a.seconds} s windows per iteration), "
                 f"validate drones {a.train_envs}-{Eall - 1} whole flights")
     else:
         what = f"one fixed clip, {a.envs} drones x {a.seconds} s from {a.start_s} s"
@@ -176,10 +195,15 @@ def main():
     ar = torch.arange(T)
     for it in range(1, iters + 1):
         if a.generalize:
-            E = a.train_envs
+            Etr = tr["done"].shape[1]
+            E = min(a.batch_envs, Etr)
             starts = torch.randint(0, Ttot - T + 1, (E,))
-            ti, ei = starts[None, :] + ar[:, None], torch.arange(E)[None, :]
-            b = ablate({k: x[ti, ei].to(dev) for k, x in tr.items()}, a.no_events, a.no_inertial, mean)
+            ti, ei = starts[None, :] + ar[:, None], torch.randperm(Etr)[:E][None, :]
+            b = {k: x[ti, ei].to(dev) for k, x in tr.items()}
+            b["ttc"] = b["ttc"].float()
+            if "rho" not in b:                                       # recorded sets carry no depth
+                b["rho"] = torch.zeros_like(b["ttc"])
+            b = ablate(b, a.no_events, a.no_inertial, mean)
         else:
             b = tr
         loss, logs, rates, d, pred = run(model, b, cfg, burn)
