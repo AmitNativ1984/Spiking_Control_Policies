@@ -153,6 +153,7 @@ def train(cfg):
                                                    grad_decay=tc.bptt_grad_decay, record=record, extras=ex)
                 loss, logs = depth_velocity_loss(d, v, rates, b, cfg.loss, cfg.data.inv_depth_eps, burn,
                                                  ex.get("ttc"), cfg.data.ttc_eps, cfg.data.ttc_max, age0)
+                last = (b, d.detach(), ex["ttc"].detach() if "ttc" in ex else None, age0)
                 if not torch.isfinite(loss):
                     print(f"it {it}: non-finite loss, batch skipped", flush=True)
                     continue
@@ -213,6 +214,18 @@ def train(cfg):
             if wb:
                 wb.log({f"val/{k}": x for k, x in val.items()}, step=it)
                 wb.log({"val/maps": wandb.Image(maps)}, step=it)
+            # the same panels on the newest training window (fresh sim data, drawn after this iteration's update)
+            tb, td, tt, tage = last
+            tframes = pick_frames(tb["ttc"], valid_mask(tb["done"], burn, tage)) if tt is not None else None
+            tmaps = depth_image(tb, td, cfg.data.inv_depth_eps, ttc=tt, ttc_eps=cfg.data.ttc_eps,
+                                depth=cfg.loss.lambda_d > 0, frames=tframes,
+                                ttc_name="speed/range" if cfg.data.target_map == "near" else "invTTC")
+            writer.add_image("train/depth", tmaps, it, dataformats="HWC")
+            if wb:
+                wb.log({"train/maps": wandb.Image(tmaps)}, step=it)
+            os.makedirs(os.path.join(run_dir, "maps"), exist_ok=True)
+            for nm, im in (("val", maps), ("train", tmaps)):
+                cv2.imwrite(os.path.join(run_dir, "maps", f"{nm}_{it:05d}.png"), cv2.cvtColor(im, cv2.COLOR_RGB2BGR))
             grew = curriculum.update(val["loss"])
             vparts = [f"{n} {val[n]:.4f}" for n, w in (("depth", cfg.loss.lambda_d), ("ttc", cfg.loss.lambda_ttc),
                       ("vel", cfg.loss.lambda_v)) if w > 0]
