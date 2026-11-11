@@ -211,8 +211,9 @@ def train(cfg):
                 writer.add_scalar(k, x, it)
             if wb:
                 wb.log(scal, step=it)
-            print(f"it {it:5d}  T {T:3d}  loss {scal['train/loss']:.4f}  depth {scal['train/depth']:.4f}  "
-                  f"ttc {scal['train/ttc']:.4f}  vel {scal['train/vel']:.4f}  "
+            parts = [f"{n} {scal['train/' + n]:.4f}" for n, w in (("depth", cfg.loss.lambda_d),
+                     ("ttc", cfg.loss.lambda_ttc), ("vel", cfg.loss.lambda_v)) if w > 0]
+            print(f"it {it:5d}  T {T:3d}  loss {scal['train/loss']:.4f}  " + "  ".join(parts) + "  "
                   f"{model.interface} rate {scal['train/rate/' + model.interface]:.3f}  "
                   f"collect {t_collect:.1f}s train {t_train:.1f}s", flush=True)
 
@@ -241,7 +242,11 @@ def train(cfg):
                 wb.log({f"val/{k}": x for k, x in val.items()}, step=it)
                 wb.log({"val/maps": wandb.Image(maps)}, step=it)
             grew = curriculum.update(val["loss"])
-            print(f"  val loss {val['loss']:.4f} depth {val['depth']:.4f} ttc {val['ttc']:.4f} (constant map: {val.get('ttc_const', float('nan')):.4f}) vel {val['vel']:.4f}"
+            vparts = [f"{n} {val[n]:.4f}" for n, w in (("depth", cfg.loss.lambda_d), ("ttc", cfg.loss.lambda_ttc),
+                      ("vel", cfg.loss.lambda_v)) if w > 0]
+            if "ttc_const" in val:
+                vparts.append(f"(constant map: {val['ttc_const']:.4f})")
+            print(f"  val loss {val['loss']:.4f} " + " ".join(vparts)
                   + (f"  -> BPTT window {curriculum.T} steps" if grew else ""), flush=True)
             if val["loss"] < best_val:
                 best_val = val["loss"]
