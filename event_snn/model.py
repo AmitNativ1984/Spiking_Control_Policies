@@ -21,25 +21,40 @@ STATE_INPUTS = {"acc": slice(0, 3), "gyro": slice(3, 6), "grav": slice(6, 9)}
 SPIKING_LAYERS = ("c1", "c2", "c3", "mem", "d1")  # + "bn" when model.bottleneck > 0: see EventSNN.spiking_layers
 
 
+def rate_fn(alpha):
+    """Non-spiking stand-in for the spike function. Forward: the rate clamp(x, 0, 1), x = U - threshold
+    (a neuron cannot fire more than once per step, so the rate is capped at 1 like a spike).
+    Backward: the same atan surrogate derivative the spiking network uses, so silent neurons still
+    get a gradient and the two networks differ only in binary vs continuous outputs.
+    (A plain relu was tried first, job 295415: the conv layers stayed dead for 200 iterations, then
+    their activity ran away to a mean of 5.7 and gradients to 4e4.)"""
+    sg = surrogate.atan(alpha=alpha)
+
+    def f(x):
+        s = sg(x)
+        return x.clamp(0.0, 1.0).detach() + (s - s.detach())
+    return f
+
+
 class LeakyRate(nn.Module):
     """Non-spiking twin of snn.Leaky(threshold=1, reset_mechanism="subtract"): the same membrane
-    U = beta*U + I - reset, but the output is the continuous rate relu(U - 1) instead of a spike,
-    and the reset subtracts that rate (detached, as snnTorch detaches its reset). For a constant
-    input I the output settles near I, as a spiking neuron's rate does."""
+    U = beta*U + I - reset, but the output is the continuous rate rate_fn(U - 1) instead of a spike,
+    and the reset subtracts that rate (detached, as snnTorch detaches its reset)."""
 
-    def __init__(self, shape, beta_init):
+    def __init__(self, shape, beta_init, fn):
         super().__init__()
         self.beta = nn.Parameter(torch.full(shape, float(beta_init)))
+        self.fn = fn
 
     def forward(self, x, mem):
-        r_prev = F.relu(mem - 1.0).detach()
+        r_prev = (mem - 1.0).clamp(0.0, 1.0).detach()
         mem = self.beta.clamp(0.0, 1.0) * mem + x - r_prev
-        return F.relu(mem - 1.0), mem
+        return self.fn(mem - 1.0), mem
 
 
 def _leaky(channels, beta_init, spike_grad, spiking=True):
     if not spiking:
-        return LeakyRate((channels, 1, 1), beta_init)
+        return LeakyRate((channels, 1, 1), beta_init, spike_grad)
     return snn.Leaky(beta=torch.full((channels, 1, 1), beta_init), learn_beta=True, threshold=1.0,
                      spike_grad=spike_grad, reset_mechanism="subtract")
 
@@ -222,9 +237,11 @@ class EventSNN(nn.Module):
             else torch.zeros(0, dtype=torch.long))
 
         # model.spiking false: the same network with every spike replaced by a continuous rate
-        # (relu(U - threshold)); membranes, leaks, resets, adaptation and time constants unchanged
+        # (clamp(U - threshold, 0, 1)); membranes, leaks, resets, adaptation, time constants and
+        # the surrogate gradient unchanged
         self.spiking = bool(getattr(cfg, "spiking", True))
-        sg = surrogate.atan(alpha=float(cfg.surrogate_alpha)) if self.spiking else F.relu
+        sg = surrogate.atan(alpha=float(cfg.surrogate_alpha)) if self.spiking \
+            else rate_fn(float(cfg.surrogate_alpha))
         c1, c2, c3 = cfg.conv_channels
         m = cfg.mem_channels
         self.conv1 = nn.Conv2d(2, c1, 5, stride=2, padding=2)
@@ -254,7 +271,7 @@ class EventSNN(nn.Module):
                 self.bn_fc = nn.Linear(m * 64, nb)
                 self.lif_bn = snn.Leaky(beta=torch.full((nb,), float(cfg.beta_init)), learn_beta=True,
                                         threshold=1.0, spike_grad=sg, reset_mechanism="subtract") \
-                    if self.spiking else LeakyRate((nb,), cfg.beta_init)
+                    if self.spiking else LeakyRate((nb,), cfg.beta_init, sg)
         if nb:
             self.bn_expand = nn.Linear(nb, m * 64)
         self.spiking_layers = (("c1", "c2", "c3") + (("mem",) if self.memory_kind == "grid" else ())

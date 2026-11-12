@@ -614,3 +614,4 @@ def test_rate_twin_has_the_same_structure_and_continuous_outputs():
     assert rate_m.conv1.weight.grad is not None and float(rate_m.conv1.weight.grad.abs().sum()) > 0
     s1 = rate_m.lif1(rate_m.conv1(ev[0].float() * 3), torch.zeros(B, 16, 32, 32))[0]
     assert ((s1 > 0) & (s1 != 1)).any()                     # rates, not spikes
+    assert float(s1.min()) >= 0.0 and float(s1.max()) <= 1.0   # capped like a spike
