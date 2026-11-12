@@ -751,3 +751,24 @@ def test_global_context_reaches_the_far_corner():
         # membrane of the bottom-right memory cells (far outside conv3's 17 px receptive field)
         far = (sa["mem_u"][..., 6:, 6:] - sb["mem_u"][..., 6:, 6:]).abs().max()
         assert (float(far) > 1e-3) == reaches, (variant, float(far))
+
+
+
+def test_raw_gyro_acts_only_where_there_are_events():
+    from event_snn.model import calibrate_rates
+    cfg, m = make_model("grid_ttc_vis_glob_gyro")
+    assert m.conv1.in_channels == 2 + 3 + 2
+    T, B = 5, 2
+    ev, st, done = random_batch(T, B, p_event=0.1)
+    calibrate_rates(m, ev, st, done)
+    st2 = st.clone()
+    st2[..., 3:6] += 0.7
+    with torch.no_grad():
+        a, b, c, d = {}, {}, {}, {}
+        m.unroll(ev, st, done, m.init_state(B), extras=a)
+        m.unroll(ev, st2, done, m.init_state(B), extras=b)
+        z = torch.zeros_like(ev)
+        m.unroll(z, st, done, m.init_state(B), extras=c)
+        m.unroll(z, st2, done, m.init_state(B), extras=d)
+    assert float((a["ttc"] - b["ttc"]).abs().max()) > 1e-3     # with events the gyro matters
+    assert torch.allclose(c["ttc"], d["ttc"], atol=1e-5)       # with no events it has no effect

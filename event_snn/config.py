@@ -57,6 +57,8 @@ VARIANTS["grid_ttc_vis_long"]["train"] = {"bptt_curriculum_s": [1.0, 2.0]}
 # the same plus the gyro gated by events: the gyro may only change how events are read.
 VARIANTS["grid_ttc_vis_glob"] = copy.deepcopy(VARIANTS["grid_ttc_vis"])
 VARIANTS["grid_ttc_vis_glob"]["model"]["global_context"] = True
+VARIANTS["grid_ttc_vis_glob_gyro"] = copy.deepcopy(VARIANTS["grid_ttc_vis_glob"])
+VARIANTS["grid_ttc_vis_glob_gyro"]["model"]["gyro_maps"] = "raw"
 VARIANTS["grid_ttc_vis_glob_gyrogate"] = copy.deepcopy(VARIANTS["grid_ttc_vis_glob"])
 VARIANTS["grid_ttc_vis_glob_gyrogate"]["model"]["gyro_maps"] = "gated"
 VARIANTS["grid_ttc_vis_gyro"] = copy.deepcopy(VARIANTS["grid_ttc_vis"])

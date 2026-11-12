@@ -293,14 +293,19 @@ class EventSNN(nn.Module):
         # gyro_maps "gated": the same maps (without the duplicate xy field: 5 x 3 = 15) multiplied by
         # "event at this pixel", so the gyro only changes how existing events are read; with no events
         # it has no effect and cannot supply near/far or a global level by itself.
+        # gyro_maps "raw": the 3 gyro numbers themselves (scaled), as 3 conv-1 input channels set only at
+        # pixels with an event, plus 2 fixed x/y position channels so the network can learn how the
+        # effect of turning depends on where in the image the event is. Nothing about the geometry is
+        # given; with no events the gyro has no effect.
         gm = getattr(cfg, "gyro_maps", False)
+        self.gyro_raw = gm == "raw"
         self.gyro_gated = gm == "gated"
         self.gyro_maps = bool(gm)
         # event_input: counts (0..7 per pixel per 10 ms) | binary (event yes/no) | log (log(1 + count))
         self.event_input = getattr(cfg, "event_input", "counts")
         if self.event_input not in ("counts", "binary", "log"):
             raise ValueError(f"model.event_input must be counts, binary or log, got {self.event_input!r}")
-        n_gyro_ch = (15 if self.gyro_gated else 18) if self.gyro_maps else 0
+        n_gyro_ch = (5 if self.gyro_raw else 15 if self.gyro_gated else 18) if self.gyro_maps else 0
         if self.gyro_maps:
             self.register_buffer("rot_basis", rotational_flow_basis(64, float(getattr(cfg, "gyro_hfov_deg", 84.3))))
             self.register_buffer("gyro_mid", torch.zeros(3))
@@ -434,6 +439,12 @@ class EventSNN(nn.Module):
             x = torch.log1p(x)
         if self.gyro_maps:
             g = ((state_in[:, 3:6] - self.gyro_mid) / self.gyro_half).clamp(-3.0, 3.0)        # (B, 3)
+        if self.gyro_raw:
+            ev_mask = (events.sum(1, keepdim=True) > 0).to(x.dtype)                         # (B, 1, 64, 64)
+            gyro_ch = g[:, :, None, None] * ev_mask                                         # (B, 3, 64, 64)
+            pos = self.rot_basis[[5, 2]][None].expand(x.shape[0], -1, -1, -1)              # x, y coordinates
+            x = torch.cat([x, gyro_ch, pos], dim=1)
+        elif self.gyro_maps:
             basis = self.rot_basis
             if self.gyro_gated:
                 basis = self.rot_basis[[0, 1, 2, 3, 5]]                                   # drop the 2nd xy
