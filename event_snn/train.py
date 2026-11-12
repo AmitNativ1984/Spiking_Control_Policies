@@ -57,6 +57,12 @@ def validate(model, heldout, cfg):
         const = torch.log(b["ttc"] + cfg.data.ttc_eps)[valid.bool()].median()
         ref = ttc_loss(torch.full_like(ex["ttc"], float(const)), b["ttc"], cfg.data.ttc_eps, cfg.data.ttc_max)
         logs["ttc_const"] = (ref * valid).sum() / valid.sum().clamp(min=1.0)
+        # stronger reference: the best single value per frame (its median log target) -- knows how near
+        # things are overall in every frame but not where. Only the gap below this is spatial skill.
+        lt = torch.log(b["ttc"] + cfg.data.ttc_eps)
+        fc = lt.flatten(2).median(-1).values[..., None, None].expand_as(lt)
+        ref_f = ttc_loss(fc, b["ttc"], cfg.data.ttc_eps, cfg.data.ttc_max)
+        logs["ttc_frame_const"] = (ref_f * valid).sum() / valid.sum().clamp(min=1.0)
     return {k: float(x) for k, x in logs.items()}, (b, d, ex.get("ttc"))
 
 
@@ -230,7 +236,7 @@ def train(cfg):
             vparts = [f"{n} {val[n]:.4f}" for n, w in (("depth", cfg.loss.lambda_d), ("ttc", cfg.loss.lambda_ttc),
                       ("vel", cfg.loss.lambda_v)) if w > 0]
             if "ttc_const" in val:
-                vparts.append(f"(constant map: {val['ttc_const']:.4f})")
+                vparts.append(f"(constant map: {val['ttc_const']:.4f}, per-frame constant: {val['ttc_frame_const']:.4f})")
             print(f"  val loss {val['loss']:.4f} " + " ".join(vparts)
                   + (f"  -> BPTT window {curriculum.T} steps" if grew else ""), flush=True)
             if val["loss"] < best_val:
