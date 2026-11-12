@@ -103,6 +103,27 @@ class PopEncoder(nn.Module):
         return spk, mem
 
 
+class CurrentInput(nn.Module):
+    """Inertial numbers injected as currents, no spikes: each value scaled to about -1..1 by the
+    data bounds (clamped at +-3). One input per number instead of pop_dim Gaussian spike trains,
+    so the inertial path gives the memory far fewer inputs than the visual path does."""
+
+    def __init__(self, n_in):
+        super().__init__()
+        self.n_out = n_in
+        self.register_buffer("mid", torch.zeros(n_in))
+        self.register_buffer("half", torch.ones(n_in))
+
+    @torch.no_grad()
+    def set_bounds(self, lo, hi):
+        lo, hi = torch.as_tensor(lo, dtype=torch.float32), torch.as_tensor(hi, dtype=torch.float32)
+        self.mid.copy_((lo + hi) / 2)
+        self.half.copy_(((hi - lo) / 2).clamp(min=1e-6))
+
+    def forward(self, x):
+        return ((x - self.mid) / self.half).clamp(-3.0, 3.0)
+
+
 class ALIFMemory(nn.Module):
     """Adaptive LIF on the 8x8 grid: per-region C3 input + broadcast state spikes + 3x3 recurrence.
 
@@ -248,9 +269,17 @@ class EventSNN(nn.Module):
         self.conv2 = nn.Conv2d(c1, c2, 3, stride=2, padding=1)
         self.conv3 = nn.Conv2d(c2, c3, 3, stride=2, padding=1)
         self.lif1, self.lif2, self.lif3 = (_leaky(c, cfg.beta_init, sg, self.spiking) for c in (c1, c2, c3))
+        # inertial path: pop = Gaussian population of IF spikes (pop_dim per number);
+        # current = the scaled numbers themselves, injected as input current
+        self.inertial_input = getattr(cfg, "inertial_input", "pop")
+        if self.inertial_input not in ("pop", "current"):
+            raise ValueError(f"model.inertial_input must be pop or current, got {self.inertial_input!r}")
         self.encoder = PopEncoder(len(self.state_index), cfg.pop_dim, cfg.encoder_threshold, self.spiking) \
-            if self.state_inputs else None
-        n_pop = self.encoder.n_out if self.encoder is not None else 0
+            if self.state_inputs and self.inertial_input == "pop" else None
+        self.current_in = CurrentInput(len(self.state_index)) \
+            if self.state_inputs and self.inertial_input == "current" else None
+        n_pop = self.encoder.n_out if self.encoder is not None else \
+            self.current_in.n_out if self.current_in is not None else 0
         self.n_bottleneck = int(getattr(cfg, "bottleneck", 0) or 0)
         self.ttc_head = bool(getattr(cfg, "ttc_head", False))
         self.memory_kind = getattr(cfg, "memory", "grid")       # grid | bottleneck
@@ -299,9 +328,10 @@ class EventSNN(nn.Module):
     @torch.no_grad()
     def set_input_bounds(self, lo9, hi9):
         """Bounds for all 9 state numbers [acc, gyro, grav]; the encoder keeps its own subset."""
-        if self.encoder is not None:
-            idx = self.state_index.cpu()
-            self.encoder.set_bounds(torch.as_tensor(lo9)[idx], torch.as_tensor(hi9)[idx])
+        idx = self.state_index.cpu()
+        for enc in (self.encoder, self.current_in):
+            if enc is not None:
+                enc.set_bounds(torch.as_tensor(lo9)[idx], torch.as_tensor(hi9)[idx])
 
     # --- state ------------------------------------------------------------------------
 
@@ -353,6 +383,8 @@ class EventSNN(nn.Module):
         new = {"c1": m1, "c2": m2, "c3": m3}
         if self.encoder is not None:
             s_pop, new["enc"] = self.encoder(state_in[:, self.state_index], st["enc"])
+        elif self.current_in is not None:
+            s_pop = self.current_in(state_in[:, self.state_index])
         else:
             s_pop = None
         spikes = {"c1": s1, "c2": s2, "c3": s3}

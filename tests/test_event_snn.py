@@ -615,3 +615,24 @@ def test_rate_twin_has_the_same_structure_and_continuous_outputs():
     s1 = rate_m.lif1(rate_m.conv1(ev[0].float() * 3), torch.zeros(B, 16, 32, 32))[0]
     assert ((s1 > 0) & (s1 != 1)).any()                     # rates, not spikes
     assert float(s1.min()) >= 0.0 and float(s1.max()) <= 1.0   # capped like a spike
+
+
+@pytest.mark.parametrize("variant", ["grid_ttc_ann", "mb_ttc_ann"])
+def test_inertial_current_injection(variant):
+    from event_snn.config import load_config
+    from event_snn.model import EventSNN
+    torch.manual_seed(0)
+    cfg = load_config(variant=variant, overrides=["model.inertial_input=current"])
+    m = EventSNN(cfg.model).to(DEV)
+    assert m.encoder is None and m.current_in is not None and "enc" not in m.init_state(1)
+    n_in = m.memory.ff.in_features if variant.startswith("mb") else m.memory.state_fc.in_features
+    assert n_in == (64 * 64 + 9 if variant.startswith("mb") else 9)        # 9 numbers, not 90 spike trains
+    m.set_input_bounds(-torch.ones(9) * 2, torch.ones(9) * 2)
+    assert torch.allclose(m.current_in.half.cpu(), torch.full((9,), 2.0))
+    T, B = 6, 2
+    ev, st, done = random_batch(T, B, p_event=0.1)
+    with torch.no_grad():
+        ea, eb = {}, {}
+        m.unroll(ev, st, done, m.init_state(B), extras=ea)
+        m.unroll(ev, st + 1.0, done, m.init_state(B), extras=eb)
+    assert ea["ttc"].shape == (T, B, 32, 32) and not torch.equal(ea["ttc"], eb["ttc"])
