@@ -689,3 +689,18 @@ def test_event_input_encodings(mode):
         m.unroll(ev, st, done, m.init_state(B), extras=a)
         m0.unroll(ev, st, done, m0.init_state(B), extras=b)
     assert not torch.equal(a["ttc"], b["ttc"])      # same weights (seed 0), different input encoding
+
+
+
+def test_memory_time_constants_spread_over_channels():
+    from event_snn.config import load_config
+    from event_snn.model import EventSNN
+    cfg = load_config(variant="grid_ttc_vis_long")
+    assert cfg.train.bptt_curriculum_s == [1.0, 2.0]
+    m = EventSNN(cfg.model)
+    tau = m.memory.log_tau_mem.exp()                       # (64, 8, 8)
+    assert abs(float(tau.min()) - 0.05) < 1e-4 and abs(float(tau.max()) - 1.5) < 1e-3
+    assert torch.allclose(tau[:, 0, 0], tau[:, 7, 7])      # one value per channel, same in every cell
+    assert float(m.memory.alpha().max()) > 0.99            # slowest channel keeps > 99 % per 10 ms step
+    m0 = EventSNN(load_config(variant="grid_ttc_vis").model)
+    assert torch.allclose(m0.memory.log_tau_mem.exp(), torch.full((64, 8, 8), 0.1))

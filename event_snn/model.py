@@ -115,6 +115,16 @@ def rotational_flow_basis(size, hfov_deg):
     return torch.stack([x * y, 1 + x * x, y, 1 + y * y, x * y, x])
 
 
+def log_tau_init(spec, n):
+    """(n,) initial log time constants. spec: one number (seconds, all equal) or [min, max]: spread
+    log-uniformly over the n channels, so the memory holds fast and slow copies of its input and
+    can compare them (image growth over a few hundred ms is the looming signal)."""
+    if isinstance(spec, (list, tuple)):
+        lo, hi = float(spec[0]), float(spec[1])
+        return torch.linspace(math.log(lo), math.log(hi), n)
+    return torch.full((n,), math.log(float(spec)))
+
+
 class CurrentInput(nn.Module):
     """Inertial numbers injected as currents, no spikes: each value scaled to about -1..1 by the
     data bounds (clamped at +-3). One input per number instead of pop_dim Gaussian spike trains,
@@ -160,7 +170,7 @@ class ALIFMemory(nn.Module):
             self.register_buffer("_rec_v", F.normalize(torch.randn(1, channels, size, size).flatten(), dim=0)
                                  .view(1, channels, size, size), persistent=False)
             self._rec_v_warm = False
-        self.log_tau_mem = nn.Parameter(torch.full((channels, size, size), math.log(tau_mem_init)))
+        self.log_tau_mem = nn.Parameter(log_tau_init(tau_mem_init, channels)[:, None, None].repeat(1, size, size))
         self.log_tau_adapt = nn.Parameter(torch.full((channels, 1, 1), math.log(tau_adapt_init)))
         self.adapt_strength = adapt_strength
         self.spike_grad = spike_grad
@@ -224,7 +234,7 @@ class MemoryBottleneck(nn.Module):
                 self.rec.weight.mul_(rec_init_scale)
         self.rec_max_gain = rec_max_gain
         self._w_rec = None
-        self.log_tau_mem = nn.Parameter(torch.full((n,), math.log(tau_mem_init)))
+        self.log_tau_mem = nn.Parameter(log_tau_init(tau_mem_init, n))
         self.log_tau_adapt = nn.Parameter(torch.full((n,), math.log(tau_adapt_init)))
         self.adapt_strength = adapt_strength
         self.spike_grad = spike_grad

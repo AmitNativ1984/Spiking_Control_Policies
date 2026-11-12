@@ -69,7 +69,7 @@ model:
   inertial_input: pop           # pop: Gaussian population spikes (pop_dim per number) | current: scaled numbers as input current
   encoder_threshold: 0.5
   beta_init: 0.85
-  tau_mem_init_s: 0.1
+  tau_mem_init_s: 0.1           # memory membrane time constant [s]; [min, max] = spread log-uniformly over channels
   tau_adapt_init_s: 0.5
   adapt_strength: 0.5
   readout_beta_init: 0.8

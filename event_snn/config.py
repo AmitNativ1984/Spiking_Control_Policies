@@ -47,6 +47,12 @@ VARIANTS = {
                      "loss": {"lambda_d": 0.0, "lambda_ttc": 1.0, "lambda_v": 0.0, "lambda_s": 0.1},
                      "data": {"target_map": "ttc"}},
 }
+# Long memory: an obstacle edge r px from the focus of expansion moves r/TTC px/s, so the 2-3 px
+# needed to see motion take ~0.3-1 s near the centre at TTC 1.5-3 s. Memory time constants spread
+# 50 ms .. 1.5 s over the channels, and BPTT windows long enough to train the slow ones.
+VARIANTS["grid_ttc_vis_long"] = copy.deepcopy(VARIANTS["grid_ttc_vis"])
+VARIANTS["grid_ttc_vis_long"]["model"]["tau_mem_init_s"] = [0.05, 1.5]
+VARIANTS["grid_ttc_vis_long"]["train"] = {"bptt_curriculum_s": [1.0, 2.0]}
 VARIANTS["grid_ttc_vis_gyro"] = copy.deepcopy(VARIANTS["grid_ttc_vis"])
 VARIANTS["grid_ttc_vis_gyro"]["model"]["gyro_maps"] = True
 
