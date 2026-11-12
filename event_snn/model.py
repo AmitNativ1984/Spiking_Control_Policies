@@ -134,16 +134,16 @@ class CurrentInput(nn.Module):
         super().__init__()
         self.n_out = n_in
         self.register_buffer("mid", torch.zeros(n_in))
-        self.register_buffer("half", torch.ones(n_in))
+        self.register_buffer("span", torch.ones(n_in))   # half the 1-99 % range ("half" would shadow Module.half)
 
     @torch.no_grad()
     def set_bounds(self, lo, hi):
         lo, hi = torch.as_tensor(lo, dtype=torch.float32), torch.as_tensor(hi, dtype=torch.float32)
         self.mid.copy_((lo + hi) / 2)
-        self.half.copy_(((hi - lo) / 2).clamp(min=1e-6))
+        self.span.copy_(((hi - lo) / 2).clamp(min=1e-6))
 
     def forward(self, x):
-        return ((x - self.mid) / self.half).clamp(-3.0, 3.0)
+        return ((x - self.mid) / self.span).clamp(-3.0, 3.0)
 
 
 class ALIFMemory(nn.Module):

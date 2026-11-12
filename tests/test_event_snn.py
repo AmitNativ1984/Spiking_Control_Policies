@@ -627,9 +627,11 @@ def test_inertial_current_injection(variant):
     n_in = m.memory.ff.in_features if variant.startswith("mb") else m.memory.state_fc.in_features
     assert n_in == (64 * 64 + 9 if variant.startswith("mb") else 9)        # 9 numbers, not 90 spike trains
     m.set_input_bounds(-torch.ones(9) * 2, torch.ones(9) * 2)
-    assert torch.allclose(m.current_in.half.cpu(), torch.full((9,), 2.0))
+    assert torch.allclose(m.current_in.span.cpu(), torch.full((9,), 2.0))
     T, B = 6, 2
     ev, st, done = random_batch(T, B, p_event=0.1)
+    from event_snn.model import calibrate_rates
+    calibrate_rates(m, ev, st, done)
     with torch.no_grad():
         ea, eb = {}, {}
         m.unroll(ev, st, done, m.init_state(B), extras=ea)
@@ -653,6 +655,8 @@ def test_rotational_flow_basis_and_gyro_maps():
     m1.set_input_bounds(-torch.ones(9), torch.ones(9))
     T, B = 5, 2
     ev, st, done = random_batch(T, B, p_event=0.1)
+    from event_snn.model import calibrate_rates
+    calibrate_rates(m1, ev, st, done)          # default weights leave the convs silent on this input
     with torch.no_grad():
         ea, eb, ec = {}, {}, {}
         m1.unroll(ev, st, done, m1.init_state(B), extras=ea)
@@ -684,6 +688,9 @@ def test_event_input_encodings(mode):
     T, B = 4, 2
     ev, st, done = random_batch(T, B, p_event=0.1)
     _, m0 = make_model("grid_ttc_vis")
+    from event_snn.model import calibrate_rates
+    calibrate_rates(m0, ev, st, done)          # default weights leave the convs silent on this input
+    m.load_state_dict(m0.state_dict())         # identical weights; only the input encoding differs
     with torch.no_grad():
         a, b = {}, {}
         m.unroll(ev, st, done, m.init_state(B), extras=a)
