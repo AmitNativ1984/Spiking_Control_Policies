@@ -433,6 +433,7 @@ def test_speed_over_range_sees_a_wall_the_drone_flies_along():
 
 @pytest.mark.parametrize("variant", ["mb_ttc_snn", "mb_ttc_ann", "mb_near_snn", "mb_near_ann"])
 def test_memory_bottleneck_architecture(variant):
+    from event_snn.model import calibrate_rates
     cfg, m = make_model(variant)
     assert m.interface == "bn" and not m.vel_head and not hasattr(m, "vel_fc")
     assert not m.depth_head and m.deconv2.out_channels == 1 and m.init_state(1)["y_depth"].shape[1] == 1
@@ -442,11 +443,9 @@ def test_memory_bottleneck_architecture(variant):
     T, B = 12, 2
     ev, st, done = random_batch(T, B, p_event=0.1)
     ex = {}
-    # start with some bottleneck spikes: with random weights and weak input the bottleneck can stay
-    # silent for 12 steps, and then the recurrent weights get exactly zero gradient
-    init = m.init_state(B)
-    init["mem_s"] = (torch.rand_like(init["mem_s"]) < 0.5).float()
-    d, v, s, rates = m.unroll(ev, st, done, init, extras=ex)
+    # with default weights conv3 is silent on sparse events; the training entry points calibrate first
+    calibrate_rates(m, ev, st, done)
+    d, v, s, rates = m.unroll(ev, st, done, m.init_state(B), extras=ex)
     assert ex["ttc"].shape == (T, B, 32, 32) and s["mem_s"].shape == (B, 128)
     assert float(d.abs().max()) == 0.0
     assert float(v.abs().max()) == 0.0
@@ -662,3 +661,31 @@ def test_rotational_flow_basis_and_gyro_maps():
         st3 = st.clone(); st3[..., 0:3] += 0.5; st3[..., 6:9] += 0.5        # acc / gravity do not
         m1.unroll(ev, st3, done, m1.init_state(B), extras=ec)
     assert not torch.equal(ea["ttc"], eb["ttc"]) and torch.equal(ea["ttc"], ec["ttc"])
+
+
+
+@pytest.mark.parametrize("variant", ["grid_ttc_ann", "grid_ttc_vis", "grid_ttc_vis_gyro", "mb_ttc_ann", "mb_ttc_snn"])
+def test_calibrate_rates_brings_every_layer_near_target(variant):
+    from event_snn.model import calibrate_rates
+    cfg, m = make_model(variant)
+    T, B = 30, 4
+    ev, st, done = random_batch(T, B, p_event=0.05)
+    rep = calibrate_rates(m, ev, st, done, target=0.1)
+    assert set(rep) == {k for k, _ in m.calibration_layers()}
+    with torch.no_grad():
+        _, _, _, rates = m.unroll(ev, st, done, m.init_state(B))
+    for k in rep:
+        assert 0.05 <= float(rates[k]) <= 0.2, (k, float(rates[k]), rep[k])
+
+
+@pytest.mark.parametrize("mode", ["binary", "log"])
+def test_event_input_encodings(mode):
+    cfg, m = make_model("grid_ttc_vis", event_input=mode)
+    T, B = 4, 2
+    ev, st, done = random_batch(T, B, p_event=0.1)
+    _, m0 = make_model("grid_ttc_vis")
+    with torch.no_grad():
+        a, b = {}, {}
+        m.unroll(ev, st, done, m.init_state(B), extras=a)
+        m0.unroll(ev, st, done, m0.init_state(B), extras=b)
+    assert not torch.equal(a["ttc"], b["ttc"])      # same weights (seed 0), different input encoding

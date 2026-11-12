@@ -62,6 +62,8 @@ model:
   conv_channels: [16, 32, 64]
   mem_channels: 64
   pop_dim: 10
+  event_input: counts           # counts (0..7 per 10 ms) | binary (yes/no) | log (log(1 + count))
+  init_rate: 0.1                # calibrate every spiking layer to fire ~this on real data before training; null = off
   gyro_maps: false              # true: 18 rotational-flow maps (6 basis fields x 3 gyro rates) as extra conv-1 inputs
   gyro_hfov_deg: 84.3           # camera horizontal FOV for those maps (GenX320 104 deg diagonal, square 128x128)
   inertial_input: pop           # pop: Gaussian population spikes (pop_dim per number) | current: scaled numbers as input current

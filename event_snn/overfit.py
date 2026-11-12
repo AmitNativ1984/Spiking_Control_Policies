@@ -35,7 +35,7 @@ from .config import heldout_path, load_config, steps, to_dict
 from .data import select_target, state_input
 from .loss import depth_velocity_loss, ttc_loss, valid_mask
 from .baseline import StackedEventCNN
-from .model import EventSNN, count_parameters
+from .model import EventSNN, calibrate_rates, count_parameters
 from .visualize import depth_image, pick_frames
 
 KEYS = ("events", "imu", "grav", "rho", "ttc", "vel", "done")
@@ -172,6 +172,12 @@ def main():
 
     model = (StackedEventCNN(a.k, a.width, imu=not a.baseline_events_only) if a.baseline else EventSNN(cfg.model)).to(dev)
     model.set_input_bounds(lo, hi)
+    if not a.baseline and getattr(cfg.model, "init_rate", None):
+        n = min(16, tr["done"].shape[1])
+        cal = {k: tr[k][:steps(0.5), :n].to(dev) for k in ("events", "imu", "grav", "done")}
+        cal = ablate(cal, a.no_events, a.no_inertial, mean)
+        rep = calibrate_rates(model, cal["events"], state_input(cal), cal["done"], target=float(cfg.model.init_rate))
+        print("calibrated initial firing: " + "  ".join(f"{k} x{m:.3g} -> {r:.3f}" for k, (m, r) in rep.items()))
     model.train()
     opt = torch.optim.Adam(model.parameters(), lr=a.lr)
 

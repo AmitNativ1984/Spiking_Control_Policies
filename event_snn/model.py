@@ -281,6 +281,10 @@ class EventSNN(nn.Module):
         # input channels, so every image location knows the motion that rotation alone would cause
         # there and can discount the events it explains. Spatial, unlike the memory's broadcast input.
         self.gyro_maps = bool(getattr(cfg, "gyro_maps", False))
+        # event_input: counts (0..7 per pixel per 10 ms) | binary (event yes/no) | log (log(1 + count))
+        self.event_input = getattr(cfg, "event_input", "counts")
+        if self.event_input not in ("counts", "binary", "log"):
+            raise ValueError(f"model.event_input must be counts, binary or log, got {self.event_input!r}")
         n_gyro_ch = 18 if self.gyro_maps else 0
         if self.gyro_maps:
             self.register_buffer("rot_basis", rotational_flow_basis(64, float(getattr(cfg, "gyro_hfov_deg", 84.3))))
@@ -401,6 +405,10 @@ class EventSNN(nn.Module):
         With ttc_head, the log map is new_state["y_depth"][:, self.ttc_ch]; without depth_head the
         depth prediction returned is zeros. The policy interface is spikes[self.interface]."""
         x = events.to(torch.float32)
+        if self.event_input == "binary":
+            x = (x > 0).to(torch.float32)
+        elif self.event_input == "log":
+            x = torch.log1p(x)
         if self.gyro_maps:
             g = ((state_in[:, 3:6] - self.gyro_mid) / self.gyro_half).clamp(-3.0, 3.0)        # (B, 3)
             maps = self.rot_basis[None, :, None] * g[:, None, :, None, None]               # (B, 6, 3, 64, 64)
@@ -461,6 +469,19 @@ class EventSNN(nn.Module):
         depth = new["y_depth"][:, 0]
         return (depth if self.depth_head else torch.zeros_like(depth)), new["y_vel"], new, spikes
 
+    def calibration_layers(self):
+        """(spike key, module whose weight drives that layer), upstream first, for calibrate_rates."""
+        out = [("c1", self.conv1), ("c2", self.conv2), ("c3", self.conv3)]
+        if self.memory_kind == "bottleneck":
+            out.append(("bn", self.memory.ff))
+        else:
+            out.append(("mem", self.memory.ff))
+            if self.n_bottleneck:
+                out.append(("bn", self.bn_fc))
+        if self.decoder_kind == "spiking":
+            out.append(("d1", self.deconv1))
+        return out
+
     @property
     def interface(self):
         """Layer whose spikes a downstream policy reads."""
@@ -496,6 +517,43 @@ class EventSNN(nn.Module):
         if ttc:
             extras["ttc"] = torch.stack(ttc)
         return torch.stack(depth), torch.stack(vel), st, rates
+
+
+@torch.no_grad()
+def calibrate_rates(model, events, state_in, done, target=0.1, tol=0.3, iters=14):
+    """Data-driven initialisation: scale each spiking layer's input weights, upstream first, until
+    the layer fires at about `target` (within +-tol*target) on real data. Each multiplier is found by
+    bisection in log space between 1/64 and 64, on a cold-start unroll of the given batch
+    (events (T, B, 2, 64, 64), state_in (T, B, 9), done (T, B)). The aim follows Rossbroich et al.
+    2022 (every layer starts in a fluctuation-driven, moderately active regime); the method is
+    LSUV-style measurement rather than their analytic formula. Returns {layer: (multiplier, rate)}."""
+    was_training = model.training
+    model.eval()
+    B = done.shape[1]
+    report = {}
+
+    def rate(key):
+        model.memory.prepare()
+        _, _, _, rates = model.unroll(events, state_in, done, model.init_state(B, events.device))
+        return float(rates[key])
+
+    for key, mod in model.calibration_layers():
+        w0 = mod.weight.detach().clone()
+        lo, hi, s = 1.0 / 64, 64.0, 1.0
+        r = rate(key)
+        for _ in range(iters):
+            if abs(r - target) <= tol * target:
+                break
+            if r < target:
+                lo = s
+            else:
+                hi = s
+            s = math.sqrt(lo * hi)
+            mod.weight.copy_(w0 * s)
+            r = rate(key)
+        report[key] = (s, r)
+    model.train(was_training)
+    return report
 
 
 class Monitor:

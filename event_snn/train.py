@@ -24,7 +24,8 @@ from torch.utils.tensorboard import SummaryWriter
 
 from .config import heldout_path, load_config, steps, to_dict
 from .loss import depth_velocity_loss, episode_age, ttc_loss, valid_mask
-from .model import EventSNN, Monitor, count_parameters, surrogate_half_width
+from .evaluate import ttc_errors
+from .model import EventSNN, Monitor, calibrate_rates, count_parameters, surrogate_half_width
 from .data import log_rho, select_target, state_input
 from .sim import Rollout, measure_bounds, write_heldout
 from .visualize import depth_image, pick_frames
@@ -63,6 +64,21 @@ def validate(model, heldout, cfg):
         fc = lt.flatten(2).median(-1).values[..., None, None].expand_as(lt)
         ref_f = ttc_loss(fc, b["ttc"], cfg.data.ttc_eps, cfg.data.ttc_max)
         logs["ttc_frame_const"] = (ref_f * valid).sum() / valid.sum().clamp(min=1.0)
+    if "ttc" in ex:
+        # does the map come from this flight's events? the same flights with another drone's events
+        # (rolled by one env) and with no events; a model that reads obstacles gets much worse
+        for name, ev in (("ttc_swapped", b["events"].roll(1, dims=1)), ("ttc_noevents", torch.zeros_like(b["events"]))):
+            ex2 = {}
+            d2, v2, _, r2 = model.unroll(ev, state_input(b), b["done"], model.init_state(E), extras=ex2)
+            _, l2 = depth_velocity_loss(d2, v2, r2, b, cfg.loss, cfg.data.inv_depth_eps, steps(cfg.loss.burn_in_s),
+                                        ex2["ttc"], cfg.data.ttc_eps, cfg.data.ttc_max)
+            logs[name] = l2["ttc"]
+        # cells the drone is closing on fast (invTTC > 1/s): share flagged (recall), and share of
+        # clearly safe cells (<= 0.5/s) flagged anyway (false alarm)
+        te = ttc_errors(ex["ttc"], {"ttc": b["ttc"]}, cfg.data.ttc_eps, valid.bool())
+        for k in ("danger_recall", "false_alarm", "danger_rel_median"):
+            if k in te:
+                logs[k] = te[k]
     return {k: float(x) for k, x in logs.items()}, (b, d, ex.get("ttc"))
 
 
@@ -114,6 +130,14 @@ def train(cfg):
     model = EventSNN(cfg.model).to(dev)
     model.set_input_bounds(lo, hi)
     print(f"{cfg.variant}: {count_parameters(model)} parameters; state bounds lo {lo.tolist()} hi {hi.tolist()}")
+    init_rate = getattr(cfg.model, "init_rate", None)
+    if init_rate:
+        n = min(16, rollout.n)
+        cal = rollout.collect(steps(0.5), keys=("events", "imu", "grav", "done"))
+        cal = {k: v[:, :n] for k, v in cal.items()}
+        rep = calibrate_rates(model, cal["events"], state_input(cal), cal["done"], target=float(init_rate))
+        print("calibrated initial firing: " + "  ".join(f"{k} x{m:.3g} -> {r:.3f}" for k, (m, r) in rep.items()),
+              flush=True)
 
     tc = cfg.train
     opt = torch.optim.Adam(model.parameters(), lr=tc.lr)
@@ -237,6 +261,10 @@ def train(cfg):
                       ("vel", cfg.loss.lambda_v)) if w > 0]
             if "ttc_const" in val:
                 vparts.append(f"(constant map: {val['ttc_const']:.4f}, per-frame constant: {val['ttc_frame_const']:.4f})")
+            if "ttc_swapped" in val:
+                vparts.append(f"swapped events {val['ttc_swapped']:.4f} no events {val['ttc_noevents']:.4f}")
+            if "danger_recall" in val:
+                vparts.append(f"danger recall {val['danger_recall']:.3f} false alarm {val['false_alarm']:.3f}")
             print(f"  val loss {val['loss']:.4f} " + " ".join(vparts)
                   + (f"  -> BPTT window {curriculum.T} steps" if grew else ""), flush=True)
             if val["loss"] < best_val:
