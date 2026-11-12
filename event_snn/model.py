@@ -103,6 +103,18 @@ class PopEncoder(nn.Module):
         return spk, mem
 
 
+def rotational_flow_basis(size, hfov_deg):
+    """(6, size, size): the image-motion fields that a pure camera rotation causes, per unit angular
+    rate about each camera axis (Longuet-Higgins & Prazdny), in normalised image coordinates x, y
+    (pinhole, square pixels): u = xy wx - (1+x^2) wy + y wz,  v = (1+y^2) wx - xy wy - x wz.
+    Returned as the six maps [xy, 1+x^2, y, 1+y^2, xy, x]; together with the three gyro numbers they
+    span the rotational flow for any camera-to-body rotation (see EventSNN gyro_maps)."""
+    t = math.tan(math.radians(hfov_deg) / 2.0)
+    c = (torch.arange(size, dtype=torch.float32) + 0.5) / size * 2.0 - 1.0
+    y, x = torch.meshgrid(c * t, c * t, indexing="ij")
+    return torch.stack([x * y, 1 + x * x, y, 1 + y * y, x * y, x])
+
+
 class CurrentInput(nn.Module):
     """Inertial numbers injected as currents, no spikes: each value scaled to about -1..1 by the
     data bounds (clamped at +-3). One input per number instead of pop_dim Gaussian spike trains,
@@ -265,7 +277,16 @@ class EventSNN(nn.Module):
             else rate_fn(float(cfg.surrogate_alpha))
         c1, c2, c3 = cfg.conv_channels
         m = cfg.mem_channels
-        self.conv1 = nn.Conv2d(2, c1, 5, stride=2, padding=2)
+        # gyro_maps: the rotational-flow basis x each gyro number (6 x 3 = 18 maps) as extra conv-1
+        # input channels, so every image location knows the motion that rotation alone would cause
+        # there and can discount the events it explains. Spatial, unlike the memory's broadcast input.
+        self.gyro_maps = bool(getattr(cfg, "gyro_maps", False))
+        n_gyro_ch = 18 if self.gyro_maps else 0
+        if self.gyro_maps:
+            self.register_buffer("rot_basis", rotational_flow_basis(64, float(getattr(cfg, "gyro_hfov_deg", 84.3))))
+            self.register_buffer("gyro_mid", torch.zeros(3))
+            self.register_buffer("gyro_half", torch.ones(3))
+        self.conv1 = nn.Conv2d(2 + n_gyro_ch, c1, 5, stride=2, padding=2)
         self.conv2 = nn.Conv2d(c1, c2, 3, stride=2, padding=1)
         self.conv3 = nn.Conv2d(c2, c3, 3, stride=2, padding=1)
         self.lif1, self.lif2, self.lif3 = (_leaky(c, cfg.beta_init, sg, self.spiking) for c in (c1, c2, c3))
@@ -328,6 +349,10 @@ class EventSNN(nn.Module):
     @torch.no_grad()
     def set_input_bounds(self, lo9, hi9):
         """Bounds for all 9 state numbers [acc, gyro, grav]; the encoder keeps its own subset."""
+        if self.gyro_maps:
+            lo, hi = torch.as_tensor(lo9, dtype=torch.float32)[3:6], torch.as_tensor(hi9, dtype=torch.float32)[3:6]
+            self.gyro_mid.copy_((lo + hi) / 2)
+            self.gyro_half.copy_(((hi - lo) / 2).clamp(min=1e-6))
         idx = self.state_index.cpu()
         for enc in (self.encoder, self.current_in):
             if enc is not None:
@@ -376,6 +401,10 @@ class EventSNN(nn.Module):
         With ttc_head, the log map is new_state["y_depth"][:, self.ttc_ch]; without depth_head the
         depth prediction returned is zeros. The policy interface is spikes[self.interface]."""
         x = events.to(torch.float32)
+        if self.gyro_maps:
+            g = ((state_in[:, 3:6] - self.gyro_mid) / self.gyro_half).clamp(-3.0, 3.0)        # (B, 3)
+            maps = self.rot_basis[None, :, None] * g[:, None, :, None, None]               # (B, 6, 3, 64, 64)
+            x = torch.cat([x, maps.flatten(1, 2)], dim=1)
         s1, m1 = self.lif1(self.conv1(x), st["c1"])
         s2, m2 = self.lif2(self.conv2(s1), st["c2"])
         s3, m3 = self.lif3(self.conv3(s2), st["c3"])

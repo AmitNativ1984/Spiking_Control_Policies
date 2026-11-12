@@ -636,3 +636,29 @@ def test_inertial_current_injection(variant):
         m.unroll(ev, st, done, m.init_state(B), extras=ea)
         m.unroll(ev, st + 1.0, done, m.init_state(B), extras=eb)
     assert ea["ttc"].shape == (T, B, 32, 32) and not torch.equal(ea["ttc"], eb["ttc"])
+
+
+def test_rotational_flow_basis_and_gyro_maps():
+    from event_snn.config import load_config
+    from event_snn.model import EventSNN, rotational_flow_basis
+    b = rotational_flow_basis(64, 90.0)
+    assert b.shape == (6, 64, 64)
+    # yaw about the optical axis (wz): u = y, v = -x -> zero flow at the image centre, largest at the rim
+    assert abs(float(b[2, 32, 32])) < 0.05 and abs(float(b[5, 32, 32])) < 0.05
+    assert float(b[1].min()) >= 1.0 and float(b[1, 32, 0]) > 1.9         # 1 + x^2 at the edge, tan 45 = 1
+    vis = load_config(variant="grid_ttc_vis").model
+    gyro = load_config(variant="grid_ttc_vis_gyro").model
+    m0, m1 = EventSNN(vis).to(DEV), EventSNN(gyro).to(DEV)
+    assert m0.encoder is None and m0.memory.state_fc is None and m0.conv1.in_channels == 2
+    assert m1.memory.state_fc is None and m1.conv1.in_channels == 20
+    m1.set_input_bounds(-torch.ones(9), torch.ones(9))
+    T, B = 5, 2
+    ev, st, done = random_batch(T, B, p_event=0.1)
+    with torch.no_grad():
+        ea, eb, ec = {}, {}, {}
+        m1.unroll(ev, st, done, m1.init_state(B), extras=ea)
+        st2 = st.clone(); st2[..., 3:6] += 0.5                              # gyro changes the output
+        m1.unroll(ev, st2, done, m1.init_state(B), extras=eb)
+        st3 = st.clone(); st3[..., 0:3] += 0.5; st3[..., 6:9] += 0.5        # acc / gravity do not
+        m1.unroll(ev, st3, done, m1.init_state(B), extras=ec)
+    assert not torch.equal(ea["ttc"], eb["ttc"]) and torch.equal(ea["ttc"], ec["ttc"])

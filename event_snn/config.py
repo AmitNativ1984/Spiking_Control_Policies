@@ -38,7 +38,17 @@ VARIANTS = {
                          "loss": {"lambda_d": 0.0, "lambda_ttc": 1.0, "lambda_v": 0.0, "lambda_s": 0.1},
                          "data": {"target_map": t}}
        for t in ("ttc", "near") for d in ("snn", "ann")},
+    # Vision-only latent (like the teacher's depth latent, inertial goes to the policy, not the latent):
+    # grid_ttc_ann with no inertial input to the memory; *_gyro adds the gyro only as rotational-flow
+    # maps at the conv-1 input (derotation prior, spatial), never as a broadcast current.
+    "grid_ttc_vis": {"model": {"recurrent": False, "stateful": True, "state_inputs": [], "bottleneck": 0,
+                               "ttc_head": True, "memory": "grid", "vel_head": False, "depth_head": False,
+                               "decoder": "ann"},
+                     "loss": {"lambda_d": 0.0, "lambda_ttc": 1.0, "lambda_v": 0.0, "lambda_s": 0.1},
+                     "data": {"target_map": "ttc"}},
 }
+VARIANTS["grid_ttc_vis_gyro"] = copy.deepcopy(VARIANTS["grid_ttc_vis"])
+VARIANTS["grid_ttc_vis_gyro"]["model"]["gyro_maps"] = True
 
 
 def _merge(base, over):
