@@ -664,7 +664,9 @@ def test_rotational_flow_basis_and_gyro_maps():
         m1.unroll(ev, st2, done, m1.init_state(B), extras=eb)
         st3 = st.clone(); st3[..., 0:3] += 0.5; st3[..., 6:9] += 0.5        # acc / gravity do not
         m1.unroll(ev, st3, done, m1.init_state(B), extras=ec)
-    assert not torch.equal(ea["ttc"], eb["ttc"]) and torch.equal(ea["ttc"], ec["ttc"])
+    # GPU convolutions are not bit-exact between calls: compare with tolerances
+    assert float((ea["ttc"] - eb["ttc"]).abs().max()) > 1e-3
+    assert torch.allclose(ea["ttc"], ec["ttc"], atol=1e-5)
 
 
 
