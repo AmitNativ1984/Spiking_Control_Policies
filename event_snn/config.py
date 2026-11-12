@@ -53,6 +53,12 @@ VARIANTS = {
 VARIANTS["grid_ttc_vis_long"] = copy.deepcopy(VARIANTS["grid_ttc_vis"])
 VARIANTS["grid_ttc_vis_long"]["model"]["tau_mem_init_s"] = [0.05, 1.5]
 VARIANTS["grid_ttc_vis_long"]["train"] = {"bptt_curriculum_s": [1.0, 2.0]}
+# Vision-only with a whole-image view (conv3 spikes averaged, broadcast to every memory cell), and
+# the same plus the gyro gated by events: the gyro may only change how events are read.
+VARIANTS["grid_ttc_vis_glob"] = copy.deepcopy(VARIANTS["grid_ttc_vis"])
+VARIANTS["grid_ttc_vis_glob"]["model"]["global_context"] = True
+VARIANTS["grid_ttc_vis_glob_gyrogate"] = copy.deepcopy(VARIANTS["grid_ttc_vis_glob"])
+VARIANTS["grid_ttc_vis_glob_gyrogate"]["model"]["gyro_maps"] = "gated"
 VARIANTS["grid_ttc_vis_gyro"] = copy.deepcopy(VARIANTS["grid_ttc_vis"])
 VARIANTS["grid_ttc_vis_gyro"]["model"]["gyro_maps"] = True
 

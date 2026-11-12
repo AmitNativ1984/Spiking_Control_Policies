@@ -290,12 +290,17 @@ class EventSNN(nn.Module):
         # gyro_maps: the rotational-flow basis x each gyro number (6 x 3 = 18 maps) as extra conv-1
         # input channels, so every image location knows the motion that rotation alone would cause
         # there and can discount the events it explains. Spatial, unlike the memory's broadcast input.
-        self.gyro_maps = bool(getattr(cfg, "gyro_maps", False))
+        # gyro_maps "gated": the same maps (without the duplicate xy field: 5 x 3 = 15) multiplied by
+        # "event at this pixel", so the gyro only changes how existing events are read; with no events
+        # it has no effect and cannot supply near/far or a global level by itself.
+        gm = getattr(cfg, "gyro_maps", False)
+        self.gyro_gated = gm == "gated"
+        self.gyro_maps = bool(gm)
         # event_input: counts (0..7 per pixel per 10 ms) | binary (event yes/no) | log (log(1 + count))
         self.event_input = getattr(cfg, "event_input", "counts")
         if self.event_input not in ("counts", "binary", "log"):
             raise ValueError(f"model.event_input must be counts, binary or log, got {self.event_input!r}")
-        n_gyro_ch = 18 if self.gyro_maps else 0
+        n_gyro_ch = (15 if self.gyro_gated else 18) if self.gyro_maps else 0
         if self.gyro_maps:
             self.register_buffer("rot_basis", rotational_flow_basis(64, float(getattr(cfg, "gyro_hfov_deg", 84.3))))
             self.register_buffer("gyro_mid", torch.zeros(3))
@@ -315,6 +320,14 @@ class EventSNN(nn.Module):
             if self.state_inputs and self.inertial_input == "current" else None
         n_pop = self.encoder.n_out if self.encoder is not None else \
             self.current_in.n_out if self.current_in is not None else 0
+        # global_context: conv3 spikes averaged over the whole 8x8 grid (one number per channel), fed to
+        # every memory cell through the same broadcast input the inertial path uses. Gives a
+        # vision-only network the whole-image view that only the IMU broadcast provided before.
+        self.global_context = bool(getattr(cfg, "global_context", False))
+        if self.global_context:
+            if getattr(cfg, "memory", "grid") != "grid":
+                raise ValueError("model.global_context needs memory=grid")
+            n_pop += c3
         self.n_bottleneck = int(getattr(cfg, "bottleneck", 0) or 0)
         self.ttc_head = bool(getattr(cfg, "ttc_head", False))
         self.memory_kind = getattr(cfg, "memory", "grid")       # grid | bottleneck
@@ -421,8 +434,14 @@ class EventSNN(nn.Module):
             x = torch.log1p(x)
         if self.gyro_maps:
             g = ((state_in[:, 3:6] - self.gyro_mid) / self.gyro_half).clamp(-3.0, 3.0)        # (B, 3)
-            maps = self.rot_basis[None, :, None] * g[:, None, :, None, None]               # (B, 6, 3, 64, 64)
-            x = torch.cat([x, maps.flatten(1, 2)], dim=1)
+            basis = self.rot_basis
+            if self.gyro_gated:
+                basis = self.rot_basis[[0, 1, 2, 3, 5]]                                   # drop the 2nd xy
+            maps = basis[None, :, None] * g[:, None, :, None, None]                       # (B, 5|6, 3, 64, 64)
+            maps = maps.flatten(1, 2)
+            if self.gyro_gated:
+                maps = maps * (events.sum(1, keepdim=True) > 0).to(maps.dtype)
+            x = torch.cat([x, maps], dim=1)
         s1, m1 = self.lif1(self.conv1(x), st["c1"])
         s2, m2 = self.lif2(self.conv2(s1), st["c2"])
         s3, m3 = self.lif3(self.conv3(s2), st["c3"])
@@ -434,6 +453,9 @@ class EventSNN(nn.Module):
             s_pop = self.current_in(state_in[:, self.state_index])
         else:
             s_pop = None
+        if self.global_context:
+            glob = s3.mean(dim=(2, 3))                                                     # (B, c3)
+            s_pop = glob if s_pop is None else torch.cat([s_pop, glob], dim=1)
         spikes = {"c1": s1, "c2": s2, "c3": s3}
         mems = {"c1": (m1, 1.0), "c2": (m2, 1.0), "c3": (m3, 1.0)}
         grid = (-1, self.cfg.mem_channels, 8, 8)

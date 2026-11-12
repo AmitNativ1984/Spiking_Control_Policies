@@ -713,3 +713,41 @@ def test_memory_time_constants_spread_over_channels():
     assert float(m.memory.alpha().max()) > 0.99            # slowest channel keeps > 99 % per 10 ms step
     m0 = EventSNN(load_config(variant="grid_ttc_vis").model)
     assert torch.allclose(m0.memory.log_tau_mem.exp(), torch.full((64, 8, 8), 0.1))
+
+
+
+def test_gated_gyro_acts_only_where_there_are_events():
+    from event_snn.model import calibrate_rates
+    cfg, m = make_model("grid_ttc_vis_glob_gyrogate")
+    assert m.conv1.in_channels == 2 + 15 and m.memory.state_fc.in_features == 64
+    T, B = 5, 2
+    ev, st, done = random_batch(T, B, p_event=0.1)
+    calibrate_rates(m, ev, st, done)
+    st2 = st.clone()
+    st2[..., 3:6] += 0.7
+    with torch.no_grad():
+        a, b, c, d = {}, {}, {}, {}
+        m.unroll(ev, st, done, m.init_state(B), extras=a)
+        m.unroll(ev, st2, done, m.init_state(B), extras=b)
+        z = torch.zeros_like(ev)
+        m.unroll(z, st, done, m.init_state(B), extras=c)
+        m.unroll(z, st2, done, m.init_state(B), extras=d)
+    assert float((a["ttc"] - b["ttc"]).abs().max()) > 1e-3     # with events the gyro matters
+    assert torch.allclose(c["ttc"], d["ttc"], atol=1e-5)       # with no events it has no effect
+
+
+def test_global_context_reaches_the_far_corner():
+    from event_snn.model import calibrate_rates
+    T, B = 6, 1
+    ev, st, done = random_batch(T, B, p_event=0.1)
+    ev2 = ev.clone()
+    ev2[:, :, :, :16, :16] = 0                                  # change events in the top-left corner only
+    for variant, reaches in (("grid_ttc_vis", False), ("grid_ttc_vis_glob", True)):
+        cfg, m = make_model(variant)
+        calibrate_rates(m, ev, st, done)
+        with torch.no_grad():
+            _, _, sa, _ = m.unroll(ev, st, done, m.init_state(B))
+            _, _, sb, _ = m.unroll(ev2, st, done, m.init_state(B))
+        # membrane of the bottom-right memory cells (far outside conv3's 17 px receptive field)
+        far = (sa["mem_u"][..., 6:, 6:] - sb["mem_u"][..., 6:, 6:]).abs().max()
+        assert (float(far) > 1e-3) == reaches, (variant, float(far))
